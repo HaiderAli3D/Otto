@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class OttoUiState(
+    val deviceId: String? = null,
     val fcmToken: String? = null,
     val permissions: PermissionState = PermissionState.UNKNOWN,
     val alarms: List<AlarmEntity> = emptyList(),
@@ -41,24 +42,42 @@ class OttoViewModel @Inject constructor(
     // Permissions aren't observable; the Activity re-pushes them on resume.
     private val permissions = MutableStateFlow(permissionsManager.currentState())
 
-    val uiState: StateFlow<OttoUiState> = combine(
+    // Grouped so the public combine stays within the 5-arg typed limit.
+    private data class Identity(
+        val deviceId: String?,
+        val token: String?,
+        val lastRegistration: Long?,
+        val urlOverride: String?,
+    )
+
+    private val identity = combine(
+        preferences.deviceId,
         preferences.fcmToken,
-        repository.observeAlarms(),
         preferences.lastRegistrationMillis,
         preferences.serverUrlOverride,
+    ) { deviceId, token, lastRegistration, urlOverride ->
+        Identity(deviceId, token, lastRegistration, urlOverride)
+    }
+
+    val uiState: StateFlow<OttoUiState> = combine(
+        identity,
+        repository.observeAlarms(),
         permissions,
-    ) { token, alarms, lastRegistration, urlOverride, perms ->
+    ) { id, alarms, perms ->
         OttoUiState(
-            fcmToken = token,
+            deviceId = id.deviceId,
+            fcmToken = id.token,
             permissions = perms,
             alarms = alarms,
-            serverBaseUrl = urlOverride ?: BuildConfig.SERVER_BASE_URL,
-            lastRegistrationMillis = lastRegistration,
+            serverBaseUrl = id.urlOverride ?: BuildConfig.SERVER_BASE_URL,
+            lastRegistrationMillis = id.lastRegistration,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), OttoUiState())
 
     init {
         refreshToken()
+        // Mint the device id eagerly so it shows in the UI and is ready for registration.
+        viewModelScope.launch { preferences.getOrCreateDeviceId() }
     }
 
     fun refreshPermissions() {

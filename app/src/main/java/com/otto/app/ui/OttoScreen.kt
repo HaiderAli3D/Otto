@@ -69,6 +69,14 @@ fun OttoScreen(
             }
 
             SectionCard("Device") {
+                Text("Device ID", style = MaterialTheme.typography.labelMedium)
+                SelectionContainer {
+                    Text(
+                        text = state.deviceId ?: "Generating…",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
                 Text("FCM token", style = MaterialTheme.typography.labelMedium)
                 SelectionContainer {
                     Text(

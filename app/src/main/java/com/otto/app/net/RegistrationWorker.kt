@@ -1,7 +1,6 @@
 package com.otto.app.net
 
 import android.content.Context
-import android.provider.Settings
 import androidx.hilt.work.HiltWorker
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -49,7 +48,7 @@ class RegistrationWorker @AssistedInject constructor(
 
         return try {
             val response = api.registerToken(
-                deviceId = deviceId(),
+                deviceId = preferences.getOrCreateDeviceId(),
                 body = TokenRegistrationRequest(token = token, appVersion = BuildConfig.VERSION_NAME),
             )
             if (response.isSuccessful) {
@@ -68,10 +67,6 @@ class RegistrationWorker @AssistedInject constructor(
             Result.failure()
         }
     }
-
-    private fun deviceId(): String =
-        Settings.Secure.getString(applicationContext.contentResolver, Settings.Secure.ANDROID_ID)
-            ?: "unknown"
 
     companion object {
         private const val PLACEHOLDER_HOST = "otto.invalid"

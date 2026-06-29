@@ -11,6 +11,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -26,10 +27,27 @@ class OttoPreferences @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private object Keys {
+        val DEVICE_ID = stringPreferencesKey("device_id")
         val FCM_TOKEN = stringPreferencesKey("fcm_token")
         val LAST_REGISTRATION_MILLIS = longPreferencesKey("last_registration_millis")
         val SERVER_URL_OVERRIDE = stringPreferencesKey("server_url_override")
         val BATTERY_PROMPT_SHOWN = booleanPreferencesKey("battery_prompt_shown")
+    }
+
+    /** Stable, app-generated device id. Until M5 pairing provisions a server-side id, this
+     *  locally-minted UUID identifies the device in registration/reporting calls. */
+    val deviceId: Flow<String?> = context.ottoDataStore.data.map { it[Keys.DEVICE_ID] }
+
+    /** Returns the device id, generating and persisting one on first call (atomic per the
+     *  single edit transaction, so concurrent callers can't mint two). */
+    suspend fun getOrCreateDeviceId(): String {
+        var id = ""
+        context.ottoDataStore.edit { prefs ->
+            id = prefs[Keys.DEVICE_ID] ?: "dev_${UUID.randomUUID().toString().replace("-", "")}".also {
+                prefs[Keys.DEVICE_ID] = it
+            }
+        }
+        return id
     }
 
     val fcmToken: Flow<String?> = context.ottoDataStore.data.map { it[Keys.FCM_TOKEN] }
