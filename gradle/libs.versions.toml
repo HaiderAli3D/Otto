@@ -5,8 +5,10 @@ kotlin = "2.4.0"              # Compose & serialization compiler plugins MUST tr
 ksp = "2.3.9"                 # KSP2 single-number scheme; pairs with Kotlin 2.4.0
 
 # AndroidX / Compose
-coreKtx = "1.19.0"
-lifecycle = "2.11.0"
+# core 1.16.0 / lifecycle 2.9.x are the latest lines that compile against SDK 36; the next
+# minors (core 1.19.0, lifecycle 2.11.0) require compileSdk 37 (a preview) which we avoid.
+coreKtx = "1.16.0"
+lifecycle = "2.9.4"
 activityCompose = "1.13.0"
 composeBom = "2026.06.00"     # pins material3 -> 1.4.0 (do not pull 1.5.0-alpha)
 datastore = "1.2.1"

@@ -58,8 +58,11 @@ These were settled at kickoff. Change them only with a clear reason.
   *property* with a computed `get()` (WorkManager 2.9+), and the manifest removes the
   default `WorkManagerInitializer` meta-data. Needs BOTH `com.google.dagger:hilt-compiler`
   AND `androidx.hilt:hilt-compiler` on `ksp`.
-- **Receivers** (`AlarmReceiver`, `BootReceiver`) call `super.onReceive()` first (that
-  triggers Hilt injection), then use `goAsync()` for DB work (finish within ~10s).
+- **Receivers** (`AlarmReceiver`, `BootReceiver`) get deps via Hilt **`EntryPointAccessors`**,
+  not `@AndroidEntryPoint`. A Kotlin `BroadcastReceiver` can't call `super.onReceive()` (the
+  base method is abstract → "Abstract member cannot be accessed directly"), so the
+  field-injection path doesn't compile. They define a `@EntryPoint` interface in
+  `SingletonComponent` and use `goAsync()` for DB work (finish within ~10s).
 - **`EncryptedSharedPreferences` is deprecated** (androidx.security:security-crypto, Apr
   2025). M1 doesn't need it; when M2 needs the HMAC secret, use **DataStore + Tink**, not
   security-crypto.
@@ -92,6 +95,13 @@ Everything keyed by `alarmId`; arm/cancel/ring are idempotent.
 - **JDK 17+ required to run Gradle** (AGP 9.x). The machine's PATH `java` may be older;
   Android Studio's bundled JBR (21) works. For a CLI build set `JAVA_HOME` to a 17+ JDK.
 - **Android SDK Platform 36** installed.
+- **AGP 9 gotchas (these are verified by an actual build — don't "fix" them blindly):**
+  AGP 9.2 defaults `android.newDsl=true`, which is incompatible with the standalone Kotlin
+  Gradle plugin, so `gradle.properties` sets `android.newDsl=false` (+ `builtInKotlin=false`).
+  The newest androidx `core`/`lifecycle` (1.19.0 / 2.11.0) require **compileSdk 37** (a
+  preview), so we pin `core 1.16.0` / `lifecycle 2.9.x`, which compile against SDK 36 —
+  bumping them means bumping compileSdk. Verified build: `:app:assembleDebug` + the 18 unit
+  tests pass on JBR 21.
 - **`google-services.json`** goes at **`app/google-services.json`** (gitignored, provided
   per-environment). Register the Firebase Android app with package name `com.otto.app`.
   The build fails clearly if the file is missing — that is intended (`spec.md` §16).
