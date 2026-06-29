@@ -1,6 +1,7 @@
 package com.otto.app.alarm
 
 import com.otto.app.core.Clock
+import com.otto.app.core.OttoConstants
 import com.otto.app.core.OttoLog
 import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmRepository
@@ -41,6 +42,18 @@ class AlarmController @Inject constructor(
         }
         OttoLog.i("Armed $alarmId -> $decision")
         return decision
+    }
+
+    /** Snooze: re-arm the alarm at now + the fixed snooze interval (spec §13). */
+    suspend fun snooze(alarmId: String): Boolean {
+        val entity = repository.snooze(alarmId, clock.nowMillis() + OttoConstants.SNOOZE_INTERVAL_MILLIS)
+        if (entity == null) {
+            OttoLog.w("Cannot snooze $alarmId; not found")
+            return false
+        }
+        registerWithOs(entity)
+        OttoLog.i("Snoozed $alarmId to ${entity.triggerAtMillis} (count ${entity.snoozeCount})")
+        return true
     }
 
     /** Cancel an alarm and record the outcome (no-op on the OS side if not registered). */

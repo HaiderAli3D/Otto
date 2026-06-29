@@ -18,6 +18,12 @@ object OttoConstants {
      */
     const val DEFAULT_GRACE_WINDOW_MILLIS = 60_000L
 
+    /**
+     * Snooze interval (spec §14 open decision resolved as a fixed interval — the classic 9
+     * minutes). A snooze re-arms the alarm at now + this and increments snoozeCount.
+     */
+    const val SNOOZE_INTERVAL_MILLIS = 9 * 60 * 1000L
+
     /** Host of the default placeholder server URL; network workers no-op while it's in use. */
     const val PLACEHOLDER_SERVER_HOST = "otto.invalid"
 

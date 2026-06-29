@@ -17,15 +17,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.otto.app.R
+import com.otto.app.alarm.AlarmController
 import com.otto.app.core.OttoConstants
 import com.otto.app.data.AlarmRepository
 import com.otto.app.data.AlarmState
@@ -34,50 +38,88 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
- * The full-screen ring experience. Shows over the lockscreen, turns the screen on, plays
- * the alarm via [AlarmRinger], and offers a single dismiss control. Dismissing stops the
- * sound, cancels the notification, and records DISMISSED in Room (the source of truth).
+ * The full-screen ring experience (M3). Shows over the lockscreen, turns the screen on, plays
+ * the ramped + vibrating alarm via [AlarmRinger], and offers Dismiss and Snooze. Resolving one
+ * alarm advances to the next still-RANG alarm (handling simultaneous fires) and only stops the
+ * sound when none remain. Room stays the source of truth for every transition.
  */
 @AndroidEntryPoint
 class RingActivity : ComponentActivity() {
 
     @Inject lateinit var ringer: AlarmRinger
     @Inject lateinit var repository: AlarmRepository
+    @Inject lateinit var controller: AlarmController
     @Inject lateinit var notifications: AlarmNotifications
     @Inject lateinit var appScope: CoroutineScope
 
-    private var alarmId: String? = null
+    private val display = mutableStateOf(Ringing("", ""))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureLockedWindow()
 
-        // Back press resolves the alarm cleanly (stop, cancel the notification, mark
-        // DISMISSED) rather than leaving it stuck RANG with a pinned ongoing notification.
+        // Back press dismisses cleanly rather than leaving the alarm stuck RANG.
         onBackPressedDispatcher.addCallback(this) { dismiss() }
 
-        alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID)
-        val label = intent.getStringExtra(EXTRA_LABEL) ?: getString(R.string.ring_default_label)
-
+        display.value = ringingFromIntent(intent)
         ringer.start()
 
         setContent {
             OttoTheme {
-                RingScreen(label = label, onDismiss = ::dismiss)
+                val current by display
+                RingScreen(label = current.label, onDismiss = ::dismiss, onSnooze = ::snooze)
             }
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // singleInstance: another fire is routed here; adopt the new intent's extras.
-        // NOTE (M3): proper handling of simultaneous alarms — resolving the previous one and
-        // updating the displayed label — is deferred to the M3 ring experience (spec §13).
+        // singleInstance: a second simultaneous alarm routed its full-screen intent here. Show
+        // the newest now; any alarm still RANG is returned to when this one is resolved.
         setIntent(intent)
-        alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID)
+        display.value = ringingFromIntent(intent)
+    }
+
+    private fun ringingFromIntent(intent: Intent) = Ringing(
+        alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID).orEmpty(),
+        label = intent.getStringExtra(EXTRA_LABEL) ?: getString(R.string.ring_default_label),
+    )
+
+    private fun dismiss() {
+        val id = display.value.alarmId
+        appScope.launch(Dispatchers.IO) {
+            if (id.isNotEmpty()) {
+                notifications.cancel(id)
+                repository.markState(id, AlarmState.DISMISSED)
+            }
+            advanceOrFinish()
+        }
+    }
+
+    private fun snooze() {
+        val id = display.value.alarmId
+        appScope.launch(Dispatchers.IO) {
+            if (id.isNotEmpty()) {
+                notifications.cancel(id)
+                controller.snooze(id)
+            }
+            advanceOrFinish()
+        }
+    }
+
+    /** Switch to the next still-ringing alarm, or stop the sound and finish when none remain. */
+    private suspend fun advanceOrFinish() {
+        val next = repository.getRinging().firstOrNull()
+        if (next != null) {
+            withContext(Dispatchers.Main) { display.value = Ringing(next.alarmId, next.label) }
+        } else {
+            ringer.stop()
+            withContext(Dispatchers.Main) { finish() }
+        }
     }
 
     private fun configureLockedWindow() {
@@ -92,18 +134,9 @@ class RingActivity : ComponentActivity() {
             )
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // Auto-dismisses only an insecure keyguard; a secured lockscreen still shows the
-        // ring over it (showWhenLocked) without unlocking.
+        // Auto-dismisses only an insecure keyguard; a secured lockscreen still shows the ring
+        // over it (showWhenLocked) without unlocking.
         getSystemService(KeyguardManager::class.java)?.requestDismissKeyguard(this, null)
-    }
-
-    private fun dismiss() {
-        ringer.stop()
-        alarmId?.let { id ->
-            notifications.cancel(id)
-            appScope.launch(Dispatchers.IO) { repository.markState(id, AlarmState.DISMISSED) }
-        }
-        finish()
     }
 
     override fun onDestroy() {
@@ -111,13 +144,15 @@ class RingActivity : ComponentActivity() {
         ringer.stop()
     }
 
+    private data class Ringing(val alarmId: String, val label: String)
+
     companion object {
         const val EXTRA_LABEL = "com.otto.app.extra.LABEL"
     }
 }
 
 @Composable
-private fun RingScreen(label: String, onDismiss: () -> Unit) {
+private fun RingScreen(label: String, onDismiss: () -> Unit, onSnooze: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -149,6 +184,18 @@ private fun RingScreen(label: String, onDismiss: () -> Unit) {
             ) {
                 Text(
                     text = stringResource(R.string.ring_dismiss),
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(
+                onClick = onSnooze,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(64.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.ring_snooze),
                     style = MaterialTheme.typography.titleLarge,
                 )
             }

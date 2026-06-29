@@ -7,4 +7,5 @@
     <string name="ring_notification_title">Otto alarm</string>
     <string name="ring_default_label">Alarm</string>
     <string name="ring_dismiss">Dismiss</string>
+    <string name="ring_snooze">Snooze 9 min</string>
 </resources>

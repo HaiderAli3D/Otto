@@ -61,6 +61,27 @@ class AlarmRepository @Inject constructor(
     /** All ARMED alarms regardless of time (used at boot to also detect missed ones). */
     suspend fun getAllArmed(): List<AlarmEntity> = dao.getByState(AlarmState.ARMED)
 
+    /** Alarms currently ringing (RANG) — used to cycle through simultaneous alarms. */
+    suspend fun getRinging(): List<AlarmEntity> = dao.getByState(AlarmState.RANG)
+
+    /**
+     * Re-arm [alarmId] at [newTriggerAtMillis], incrementing snoozeCount and clearing the
+     * report flag. Returns the updated entity, or null if the alarm no longer exists.
+     */
+    suspend fun snooze(alarmId: String, newTriggerAtMillis: Long): AlarmEntity? {
+        val existing = dao.getById(alarmId) ?: return null
+        val updated = existing.copy(
+            triggerAtMillis = newTriggerAtMillis,
+            state = AlarmState.ARMED,
+            snoozeCount = existing.snoozeCount + 1,
+            updatedAtMillis = clock.nowMillis(),
+            reportedToServer = false,
+        )
+        dao.upsert(updated)
+        ReportWorker.enqueue(context)
+        return updated
+    }
+
     /** Alarms whose latest state change still needs to reach the server. */
     suspend fun getUnreported(): List<AlarmEntity> = dao.getUnreported()
 
