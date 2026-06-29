@@ -23,6 +23,12 @@ local.properties
 *.jks
 *.keystore
 
+# Loki Mode scratch state (autonomous-run bookkeeping)
+.loki/
+
+# Node tooling
+node_modules/
+
 # IDE
 .idea/
 *.iml

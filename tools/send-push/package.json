@@ -1,0 +1,16 @@
+{
+  "name": "otto-send-push",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Otto FCM test-push helper — sends data-only ARM/CANCEL messages via the FCM HTTP v1 API.",
+  "bin": {
+    "otto-send-push": "./send-push.mjs"
+  },
+  "scripts": {
+    "start": "node send-push.mjs"
+  },
+  "dependencies": {
+    "google-auth-library": "^10.9.0"
+  }
+}
