@@ -1,0 +1,15 @@
+# Normalize text to LF in the repository; let working copies use native endings.
+* text=auto eol=lf
+
+# Windows batch scripts need CRLF.
+*.bat text eol=crlf
+
+# The POSIX wrapper script must stay LF even on Windows checkouts.
+gradlew text eol=lf
+
+# Binary assets — never apply line-ending conversion.
+*.jar binary
+*.png binary
+*.webp binary
+*.jks binary
+*.keystore binary

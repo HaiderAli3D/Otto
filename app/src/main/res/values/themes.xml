@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose drives all UI colors; this window theme just removes the action bar.
+         A dark counterpart lives in values-night/themes.xml. -->
+    <style name="Theme.Otto" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
