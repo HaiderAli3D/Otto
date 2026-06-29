@@ -20,4 +20,7 @@ object OttoConstants {
 
     /** Unique WorkManager work name for FCM-token registration. */
     const val WORK_REGISTER_TOKEN = "otto_register_token"
+
+    /** Unique WorkManager work name for draining unreported alarm events to the server. */
+    const val WORK_REPORT_EVENTS = "otto_report_events"
 }

@@ -1,18 +1,23 @@
 package com.otto.app.data
 
+import android.content.Context
 import com.otto.app.core.Clock
+import com.otto.app.net.ReportWorker
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * The single gateway to alarm persistence. Stamps timestamps from the injected [Clock] so
- * callers never touch the system clock directly.
+ * callers never touch the system clock directly, and — since it is the one choke point for
+ * every state write — schedules a server report after each change so no transition is missed.
  */
 @Singleton
 class AlarmRepository @Inject constructor(
     private val dao: AlarmDao,
     private val clock: Clock,
+    @ApplicationContext private val context: Context,
 ) {
     fun observeAlarms(): Flow<List<AlarmEntity>> = dao.observeAll()
 
@@ -42,15 +47,26 @@ class AlarmRepository @Inject constructor(
             reportedToServer = false,
         )
         dao.upsert(entity)
+        ReportWorker.enqueue(context)
         return entity
     }
 
     /** Transition an alarm to a new state (re-flags it as needing a server report). */
-    suspend fun markState(alarmId: String, state: AlarmState): Boolean =
-        dao.updateState(alarmId, state, clock.nowMillis()) > 0
+    suspend fun markState(alarmId: String, state: AlarmState): Boolean {
+        val changed = dao.updateState(alarmId, state, clock.nowMillis()) > 0
+        if (changed) ReportWorker.enqueue(context)
+        return changed
+    }
 
     /** All ARMED alarms regardless of time (used at boot to also detect missed ones). */
     suspend fun getAllArmed(): List<AlarmEntity> = dao.getByState(AlarmState.ARMED)
+
+    /** Alarms whose latest state change still needs to reach the server. */
+    suspend fun getUnreported(): List<AlarmEntity> = dao.getUnreported()
+
+    /** Mark [alarm] reported iff it hasn't transitioned since it was read (see DAO). */
+    suspend fun markReported(alarm: AlarmEntity): Boolean =
+        dao.markReported(alarm.alarmId, alarm.updatedAtMillis) > 0
 
     suspend fun delete(alarmId: String) = dao.deleteById(alarmId)
 }
