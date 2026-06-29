@@ -22,10 +22,6 @@ interface AlarmDao {
     @Query("SELECT * FROM alarms WHERE state = :state")
     suspend fun getByState(state: AlarmState): List<AlarmEntity>
 
-    /** ARMED alarms still in the future — used to re-arm after reboot. */
-    @Query("SELECT * FROM alarms WHERE state = :state AND triggerAtMillis > :nowMillis ORDER BY triggerAtMillis ASC")
-    suspend fun getByStateAfter(state: AlarmState, nowMillis: Long): List<AlarmEntity>
-
     @Query("UPDATE alarms SET state = :state, updatedAtMillis = :updatedAtMillis, reportedToServer = 0 WHERE alarmId = :alarmId")
     suspend fun updateState(alarmId: String, state: AlarmState, updatedAtMillis: Long): Int
 

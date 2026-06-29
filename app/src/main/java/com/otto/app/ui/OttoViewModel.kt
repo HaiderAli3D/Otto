@@ -74,18 +74,28 @@ class OttoViewModel @Inject constructor(
     /** Exercises the full scheduler→receiver→ring path locally, with no push involved. */
     fun armTestAlarm() {
         viewModelScope.launch {
-            val now = clock.nowMillis()
-            controller.arm(
-                alarmId = "test_$now",
-                triggerAtMillis = now + TEST_ALARM_DELAY_MILLIS,
-                label = "Test alarm",
-                allowWhileIdle = true,
-            )
+            try {
+                val now = clock.nowMillis()
+                controller.arm(
+                    alarmId = "test_$now",
+                    triggerAtMillis = now + TEST_ALARM_DELAY_MILLIS,
+                    label = "Test alarm",
+                    allowWhileIdle = true,
+                )
+            } catch (t: Throwable) {
+                OttoLog.e("Failed to arm test alarm", t)
+            }
         }
     }
 
     fun cancelAlarm(alarmId: String) {
-        viewModelScope.launch { controller.cancel(alarmId) }
+        viewModelScope.launch {
+            try {
+                controller.cancel(alarmId)
+            } catch (t: Throwable) {
+                OttoLog.e("Failed to cancel $alarmId", t)
+            }
+        }
     }
 
     private companion object {

@@ -2,6 +2,7 @@ package com.otto.app.alarm
 
 import com.otto.app.core.Clock
 import com.otto.app.core.OttoLog
+import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmRepository
 import com.otto.app.data.AlarmState
 import javax.inject.Inject
@@ -32,7 +33,7 @@ class AlarmController @Inject constructor(
         val entity = repository.upsertArmed(alarmId, triggerAtMillis, label, allowWhileIdle)
         when (decision) {
             // A past-but-within-grace trigger is handled by the OS firing immediately.
-            FireDecision.ARM, FireDecision.FIRE_NOW -> scheduler.arm(entity)
+            FireDecision.ARM, FireDecision.FIRE_NOW -> registerWithOs(entity)
             FireDecision.MISSED -> {
                 repository.markState(alarmId, AlarmState.MISSED)
                 OttoLog.i("Alarm $alarmId older than grace window; marked MISSED, not ringing")
@@ -44,11 +45,14 @@ class AlarmController @Inject constructor(
 
     /** Cancel an alarm and record the outcome (no-op on the OS side if not registered). */
     suspend fun cancel(alarmId: String) {
-        scheduler.cancel(alarmId)
+        // Room first (source of truth): if we crash before scheduler.cancel(), a stale OS
+        // alarm that still fires is ignored by AlarmReceiver's terminal-state guard. The
+        // reverse order would let reArmAll() resurrect a cancelled alarm on the next boot.
         val existing = repository.getById(alarmId)
         if (existing != null && !existing.state.isTerminal) {
             repository.markState(alarmId, AlarmState.CANCELLED)
         }
+        scheduler.cancel(alarmId)
         OttoLog.i("Cancelled $alarmId")
     }
 
@@ -73,5 +77,20 @@ class AlarmController @Inject constructor(
             }
         }
         OttoLog.i("Re-armed $reArmed of ${armed.size} stored alarm(s)")
+    }
+
+    private fun registerWithOs(entity: AlarmEntity) {
+        if (!scheduler.canScheduleExact()) {
+            // Leave it ARMED in Room so boot re-arm can register it once the exact-alarm
+            // permission is granted; the permissions panel surfaces the missing grant. We do
+            // not pretend it is scheduled beyond that (spec §9).
+            OttoLog.w("Exact alarms not permitted; ${entity.alarmId} recorded but not registered")
+            return
+        }
+        try {
+            scheduler.arm(entity)
+        } catch (se: SecurityException) {
+            OttoLog.e("Exact alarm denied while arming ${entity.alarmId}", se)
+        }
     }
 }

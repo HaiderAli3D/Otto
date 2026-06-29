@@ -49,10 +49,6 @@ class AlarmRepository @Inject constructor(
     suspend fun markState(alarmId: String, state: AlarmState): Boolean =
         dao.updateState(alarmId, state, clock.nowMillis()) > 0
 
-    /** All ARMED alarms whose trigger time is still in the future. */
-    suspend fun getArmedFutureAlarms(): List<AlarmEntity> =
-        dao.getByStateAfter(AlarmState.ARMED, clock.nowMillis())
-
     /** All ARMED alarms regardless of time (used at boot to also detect missed ones). */
     suspend fun getAllArmed(): List<AlarmEntity> = dao.getByState(AlarmState.ARMED)
 

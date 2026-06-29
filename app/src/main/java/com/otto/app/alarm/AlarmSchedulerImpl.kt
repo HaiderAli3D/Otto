@@ -47,6 +47,8 @@ class AlarmSchedulerImpl @Inject constructor(
             PI_FLAGS,
         )
 
+        // Note: alarm.allowWhileIdle is informational only — setAlarmClock() is inherently
+        // exempt from Doze, so there is no inexact/idle variant to gate here.
         val info = AlarmManager.AlarmClockInfo(alarm.triggerAtMillis, showIntent)
         alarmManager.setAlarmClock(info, operation)
         OttoLog.d("Armed ${alarm.alarmId} @ ${alarm.triggerAtMillis} (rc=$requestCode)")

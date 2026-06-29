@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.addCallback
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -54,6 +55,10 @@ class RingActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         configureLockedWindow()
 
+        // Back press resolves the alarm cleanly (stop, cancel the notification, mark
+        // DISMISSED) rather than leaving it stuck RANG with a pinned ongoing notification.
+        onBackPressedDispatcher.addCallback(this) { dismiss() }
+
         alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID)
         val label = intent.getStringExtra(EXTRA_LABEL) ?: getString(R.string.ring_default_label)
 
@@ -69,6 +74,8 @@ class RingActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // singleInstance: another fire is routed here; adopt the new intent's extras.
+        // NOTE (M3): proper handling of simultaneous alarms — resolving the previous one and
+        // updating the displayed label — is deferred to the M3 ring experience (spec §13).
         setIntent(intent)
         alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID)
     }
