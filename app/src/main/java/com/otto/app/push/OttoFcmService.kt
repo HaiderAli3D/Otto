@@ -5,6 +5,7 @@ import com.google.firebase.messaging.RemoteMessage
 import com.otto.app.alarm.AlarmController
 import com.otto.app.core.OttoLog
 import com.otto.app.data.prefs.OttoPreferences
+import com.otto.app.data.prefs.SecretStore
 import com.otto.app.net.HeartbeatWorker
 import com.otto.app.net.RegistrationWorker
 import com.otto.app.net.SyncWorker
@@ -21,11 +22,12 @@ class OttoFcmService : FirebaseMessagingService() {
 
     @Inject lateinit var controller: AlarmController
     @Inject lateinit var preferences: OttoPreferences
+    @Inject lateinit var secretStore: SecretStore
 
     override fun onMessageReceived(message: RemoteMessage) {
         OttoLog.d("FCM data message received: keys=${message.data.keys}")
         when (val result = CommandParser.parse(message.data)) {
-            is ParseResult.Parsed -> execute(result.command)
+            is ParseResult.Parsed -> execute(message.data, result.command)
             is ParseResult.Ignored -> OttoLog.i("Ignoring FCM command: ${result.reason}")
             is ParseResult.Invalid -> OttoLog.w("Invalid FCM command: ${result.reason}")
         }
@@ -35,7 +37,16 @@ class OttoFcmService : FirebaseMessagingService() {
     // it returns, so a Dozing device that this push just woke could re-idle before a
     // background coroutine ran setAlarmClock() — dropping the alarm. The work is a fast DB
     // upsert + schedule, and we are already on a Firebase background thread (not main).
-    private fun execute(command: FcmCommand) = runBlocking {
+    private fun execute(data: Map<String, String>, command: FcmCommand) = runBlocking {
+        // HMAC gate: once a secret is provisioned (pairing), reject any unsigned/forged command.
+        // Before pairing there is no secret, so commands are accepted unverified (M2 testing).
+        val secret = secretStore.getSecret()
+        if (secret == null) {
+            OttoLog.w("No HMAC secret provisioned; accepting command unverified (pair to enable)")
+        } else if (!HmacVerifier.verify(data, secret)) {
+            OttoLog.w("Dropping command — HMAC verification failed")
+            return@runBlocking
+        }
         try {
             when (command) {
                 is FcmCommand.ArmAlarm -> controller.arm(

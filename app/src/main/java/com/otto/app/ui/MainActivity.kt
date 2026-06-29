@@ -50,6 +50,8 @@ class MainActivity : ComponentActivity() {
                     onGrantBattery = { startActivitySafely(permissionsManager.batteryExemptionIntent()) },
                     onArmTest = viewModel::armTestAlarm,
                     onCancelAlarm = viewModel::cancelAlarm,
+                    onSetSecret = viewModel::setPairingSecret,
+                    onClearSecret = viewModel::clearPairingSecret,
                 )
             }
         }

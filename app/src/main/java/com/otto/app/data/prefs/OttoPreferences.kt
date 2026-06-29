@@ -32,6 +32,7 @@ class OttoPreferences @Inject constructor(
         val LAST_REGISTRATION_MILLIS = longPreferencesKey("last_registration_millis")
         val SERVER_URL_OVERRIDE = stringPreferencesKey("server_url_override")
         val BATTERY_PROMPT_SHOWN = booleanPreferencesKey("battery_prompt_shown")
+        val HMAC_SECRET = stringPreferencesKey("hmac_secret")
     }
 
     /** Stable, app-generated device id. Until M5 pairing provisions a server-side id, this
@@ -77,5 +78,14 @@ class OttoPreferences @Inject constructor(
 
     suspend fun setBatteryPromptShown(shown: Boolean) {
         context.ottoDataStore.edit { it[Keys.BATTERY_PROMPT_SHOWN] = shown }
+    }
+
+    /** Keystore-encrypted HMAC secret as "ivB64:ctB64" (see [SecretStore]); null when unpaired. */
+    val hmacSecret: Flow<String?> = context.ottoDataStore.data.map { it[Keys.HMAC_SECRET] }
+
+    suspend fun setHmacSecret(packed: String?) {
+        context.ottoDataStore.edit { prefs ->
+            if (packed == null) prefs.remove(Keys.HMAC_SECRET) else prefs[Keys.HMAC_SECRET] = packed
+        }
     }
 }

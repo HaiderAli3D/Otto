@@ -4,8 +4,9 @@ package com.otto.app.push
  * Parses the FCM `data` map (all values are strings) into an [FcmCommand] (spec.md §7).
  * Pure and Android-free so every branch is unit-testable.
  *
- * Rules: unknown fields are ignored; unknown or not-yet-supported `type`s are dropped (not
- * errors); the integrity `sig` field is accepted but unverified until M2.
+ * Rules: unknown fields are ignored; unknown `type`s are dropped (not errors). The integrity
+ * `sig` is not handled here — [HmacVerifier] checks it at the FCM boundary (OttoFcmService),
+ * so this stays a pure, signature-agnostic parser.
  */
 object CommandParser {
 

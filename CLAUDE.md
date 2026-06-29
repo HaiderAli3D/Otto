@@ -17,8 +17,11 @@ rings reliably even when backgrounded, in Doze, or after reboot.
 
 ## Current status
 
-**Milestone 1 (alarm spine)** in progress. M2–M5 are out of scope until M1 ships.
-See `spec.md` §13 for the milestone breakdown.
+**Milestone 1 (alarm spine)** shipped and build-verified. **Milestone 2 (server sync)**
+complete: device identity + token registration, alarm-event reporting (ReportWorker),
+SYNC reconciliation (SyncWorker) + PING heartbeat (HeartbeatWorker), and HMAC verification
+of inbound commands. A Node FCM test-push helper lives in `tools/send-push/` (spec §15).
+M3–M5 next. See `spec.md` §13 for the milestone breakdown.
 
 ## Stack (do not substitute — see `spec.md` §4)
 
@@ -64,8 +67,17 @@ These were settled at kickoff. Change them only with a clear reason.
   field-injection path doesn't compile. They define a `@EntryPoint` interface in
   `SingletonComponent` and use `goAsync()` for DB work (finish within ~10s).
 - **`EncryptedSharedPreferences` is deprecated** (androidx.security:security-crypto, Apr
-  2025). M1 doesn't need it; when M2 needs the HMAC secret, use **DataStore + Tink**, not
-  security-crypto.
+  2025). The M2 HMAC secret is stored by `SecretStore`, which encrypts it with a
+  hardware-backed **Android Keystore AES/GCM** key and keeps the ciphertext in DataStore.
+  (Deliberate change from the original "DataStore + Tink" plan: Keystore AES/GCM is
+  dependency-free with a stable API since 23, and is exactly what Tink wraps — chosen so the
+  crypto path compiles with certainty without on-device Tink-API testing.)
+- **HMAC (`sig`) canonical form** — server, Android `HmacVerifier`, and the `tools/send-push`
+  helper must all agree: every `data` field **except** `sig`, sorted by key, joined as
+  `key=value` with `&`, then HMAC-SHA256 with the shared secret, lowercase hex. A unit test
+  pins the Kotlin output to a vector cross-checked against node + openssl. Until a secret is
+  provisioned (pairing, M5) the FCM service accepts commands unverified; once set, a
+  missing/forged `sig` is dropped.
 - **Room stays on the 2.x stable line** (3.0 is RC). `room-ktx` is merged into
   `room-runtime`; `work-runtime-ktx` likewise into `work-runtime`.
 
