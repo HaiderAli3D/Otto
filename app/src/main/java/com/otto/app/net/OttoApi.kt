@@ -2,6 +2,7 @@ package com.otto.app.net
 
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
 
@@ -20,5 +21,18 @@ interface OttoApi {
     suspend fun reportEvent(
         @Path("alarmId") alarmId: String,
         @Body body: AlarmEventRequest,
+    ): Response<Unit>
+
+    /** SYNC: the server's authoritative alarm set, which the app reconciles to. */
+    @GET("devices/{deviceId}/alarms")
+    suspend fun fetchAlarms(
+        @Path("deviceId") deviceId: String,
+    ): Response<AlarmSyncResponse>
+
+    /** PING: liveness heartbeat. */
+    @POST("devices/{deviceId}/heartbeat")
+    suspend fun heartbeat(
+        @Path("deviceId") deviceId: String,
+        @Body body: HeartbeatRequest,
     ): Response<Unit>
 }

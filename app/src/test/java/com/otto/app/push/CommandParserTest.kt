@@ -61,9 +61,15 @@ class CommandParserTest {
     }
 
     @Test
-    fun m2Types_areIgnored() {
-        assertTrue(CommandParser.parse(mapOf("type" to "SYNC")) is ParseResult.Ignored)
-        assertTrue(CommandParser.parse(mapOf("type" to "PING")) is ParseResult.Ignored)
+    fun sync_parses() {
+        val result = CommandParser.parse(mapOf("type" to "SYNC"))
+        assertEquals(FcmCommand.Sync, (result as ParseResult.Parsed).command)
+    }
+
+    @Test
+    fun ping_parses() {
+        val result = CommandParser.parse(mapOf("type" to "PING"))
+        assertEquals(FcmCommand.Ping, (result as ParseResult.Parsed).command)
     }
 
     @Test

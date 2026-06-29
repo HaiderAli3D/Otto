@@ -36,7 +36,7 @@ class ReportWorker @AssistedInject constructor(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        if (BuildConfig.SERVER_BASE_URL.contains(PLACEHOLDER_HOST)) {
+        if (BuildConfig.SERVER_BASE_URL.contains(OttoConstants.PLACEHOLDER_SERVER_HOST)) {
             OttoLog.i("Server URL is the placeholder; skipping event reporting")
             return Result.success()
         }
@@ -75,8 +75,6 @@ class ReportWorker @AssistedInject constructor(
     }
 
     companion object {
-        private const val PLACEHOLDER_HOST = "otto.invalid"
-
         /** Enqueue a drain; a fresh enqueue replaces any pending one (the drain is idempotent). */
         fun enqueue(context: Context) {
             val request = OneTimeWorkRequestBuilder<ReportWorker>()

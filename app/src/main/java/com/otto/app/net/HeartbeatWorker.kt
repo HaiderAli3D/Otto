@@ -17,16 +17,12 @@ import com.otto.app.core.OttoLog
 import com.otto.app.data.prefs.OttoPreferences
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
-import kotlinx.coroutines.flow.firstOrNull
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/**
- * Posts the current FCM token to the server. No-ops gracefully while the base URL is still
- * the placeholder (the server doesn't exist yet in M1). Network failures retry with backoff.
- */
+/** PING: posts a liveness heartbeat. No-ops on the placeholder URL. */
 @HiltWorker
-class RegistrationWorker @AssistedInject constructor(
+class HeartbeatWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
     private val api: OttoApi,
@@ -36,52 +32,44 @@ class RegistrationWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result {
         if (BuildConfig.SERVER_BASE_URL.contains(OttoConstants.PLACEHOLDER_SERVER_HOST)) {
-            OttoLog.i("Server URL is the placeholder; skipping token registration")
+            OttoLog.i("Server URL is the placeholder; skipping heartbeat")
             return Result.success()
         }
-
-        val token = preferences.fcmToken.firstOrNull()
-        if (token.isNullOrBlank()) {
-            OttoLog.w("No FCM token available; nothing to register yet")
-            return Result.success()
-        }
-
         return try {
-            val response = api.registerToken(
+            val response = api.heartbeat(
                 deviceId = preferences.getOrCreateDeviceId(),
-                body = TokenRegistrationRequest(token = token, appVersion = BuildConfig.VERSION_NAME),
+                body = HeartbeatRequest(
+                    appVersion = BuildConfig.VERSION_NAME,
+                    atMillis = clock.nowMillis(),
+                ),
             )
             if (response.isSuccessful) {
-                preferences.setLastRegistrationMillis(clock.nowMillis())
-                OttoLog.i("Registered FCM token ${OttoLog.redact(token)}")
                 Result.success()
             } else {
-                OttoLog.w("Token registration failed: HTTP ${response.code()}")
+                OttoLog.w("Heartbeat failed: HTTP ${response.code()}")
                 Result.retry()
             }
         } catch (io: IOException) {
-            OttoLog.w("Token registration network error; will retry", io)
+            OttoLog.w("Heartbeat network error; will retry", io)
             Result.retry()
         } catch (t: Throwable) {
-            OttoLog.e("Token registration error", t)
+            OttoLog.e("Heartbeat error", t)
             Result.failure()
         }
     }
 
     companion object {
-        /** Enqueue a one-off registration; a fresh enqueue replaces any pending one. */
+        /** Enqueue a heartbeat; KEEP so rapid PINGs don't stack redundant posts. */
         fun enqueue(context: Context) {
-            val request = OneTimeWorkRequestBuilder<RegistrationWorker>()
+            val request = OneTimeWorkRequestBuilder<HeartbeatWorker>()
                 .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
-                        .build(),
+                    Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
                 )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
-                OttoConstants.WORK_REGISTER_TOKEN,
-                ExistingWorkPolicy.REPLACE,
+                OttoConstants.WORK_HEARTBEAT,
+                ExistingWorkPolicy.KEEP,
                 request,
             )
         }

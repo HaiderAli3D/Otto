@@ -10,6 +10,12 @@ sealed interface FcmCommand {
     ) : FcmCommand
 
     data class CancelAlarm(val alarmId: String) : FcmCommand
+
+    /** Reconcile local alarms against the server's authoritative set. */
+    data object Sync : FcmCommand
+
+    /** Liveness heartbeat request. */
+    data object Ping : FcmCommand
 }
 
 /** Outcome of parsing an FCM data payload. */

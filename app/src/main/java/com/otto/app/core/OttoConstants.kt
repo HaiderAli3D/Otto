@@ -18,9 +18,18 @@ object OttoConstants {
      */
     const val DEFAULT_GRACE_WINDOW_MILLIS = 60_000L
 
+    /** Host of the default placeholder server URL; network workers no-op while it's in use. */
+    const val PLACEHOLDER_SERVER_HOST = "otto.invalid"
+
     /** Unique WorkManager work name for FCM-token registration. */
     const val WORK_REGISTER_TOKEN = "otto_register_token"
 
     /** Unique WorkManager work name for draining unreported alarm events to the server. */
     const val WORK_REPORT_EVENTS = "otto_report_events"
+
+    /** Unique WorkManager work name for SYNC reconciliation. */
+    const val WORK_SYNC = "otto_sync"
+
+    /** Unique WorkManager work name for PING heartbeats. */
+    const val WORK_HEARTBEAT = "otto_heartbeat"
 }

@@ -5,7 +5,9 @@ import com.google.firebase.messaging.RemoteMessage
 import com.otto.app.alarm.AlarmController
 import com.otto.app.core.OttoLog
 import com.otto.app.data.prefs.OttoPreferences
+import com.otto.app.net.HeartbeatWorker
 import com.otto.app.net.RegistrationWorker
+import com.otto.app.net.SyncWorker
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
@@ -43,6 +45,9 @@ class OttoFcmService : FirebaseMessagingService() {
                     allowWhileIdle = command.allowWhileIdle,
                 )
                 is FcmCommand.CancelAlarm -> controller.cancel(command.alarmId)
+                // Network-bound; hand to workers that outlive the FCM wakelock and retry.
+                FcmCommand.Sync -> SyncWorker.enqueue(applicationContext)
+                FcmCommand.Ping -> HeartbeatWorker.enqueue(applicationContext)
             }
         } catch (t: Throwable) {
             OttoLog.e("Failed to execute FCM command", t)

@@ -19,7 +19,8 @@ object CommandParser {
         return when (type) {
             "ARM_ALARM" -> parseArm(data)
             "CANCEL_ALARM" -> parseCancel(data)
-            "SYNC", "PING" -> ParseResult.Ignored("type $type is handled in M2")
+            "SYNC" -> ParseResult.Parsed(FcmCommand.Sync)
+            "PING" -> ParseResult.Parsed(FcmCommand.Ping)
             else -> ParseResult.Ignored("unknown type $type")
         }
     }
