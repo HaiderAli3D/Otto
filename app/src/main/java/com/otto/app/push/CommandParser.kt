@@ -1,0 +1,50 @@
+package com.otto.app.push
+
+/**
+ * Parses the FCM `data` map (all values are strings) into an [FcmCommand] (spec.md §7).
+ * Pure and Android-free so every branch is unit-testable.
+ *
+ * Rules: unknown fields are ignored; unknown or not-yet-supported `type`s are dropped (not
+ * errors); the integrity `sig` field is accepted but unverified until M2.
+ */
+object CommandParser {
+
+    const val SUPPORTED_VERSION = "1"
+    private const val DEFAULT_LABEL = "Alarm"
+
+    fun parse(data: Map<String, String>): ParseResult {
+        val type = data["type"]?.takeIf { it.isNotBlank() }
+            ?: return ParseResult.Invalid("missing type")
+
+        return when (type) {
+            "ARM_ALARM" -> parseArm(data)
+            "CANCEL_ALARM" -> parseCancel(data)
+            "SYNC", "PING" -> ParseResult.Ignored("type $type is handled in M2")
+            else -> ParseResult.Ignored("unknown type $type")
+        }
+    }
+
+    private fun parseArm(data: Map<String, String>): ParseResult {
+        val alarmId = data["alarmId"]?.takeIf { it.isNotBlank() }
+            ?: return ParseResult.Invalid("ARM_ALARM missing alarmId")
+        val triggerAtMillis = data["triggerAtMillis"]?.toLongOrNull()
+            ?: return ParseResult.Invalid("ARM_ALARM missing or non-numeric triggerAtMillis")
+        val label = data["label"]?.takeIf { it.isNotBlank() } ?: DEFAULT_LABEL
+        val allowWhileIdle = data["allowWhileIdle"]?.toBooleanStrictOrNull() ?: true
+
+        return ParseResult.Parsed(
+            FcmCommand.ArmAlarm(
+                alarmId = alarmId,
+                triggerAtMillis = triggerAtMillis,
+                label = label,
+                allowWhileIdle = allowWhileIdle,
+            ),
+        )
+    }
+
+    private fun parseCancel(data: Map<String, String>): ParseResult {
+        val alarmId = data["alarmId"]?.takeIf { it.isNotBlank() }
+            ?: return ParseResult.Invalid("CANCEL_ALARM missing alarmId")
+        return ParseResult.Parsed(FcmCommand.CancelAlarm(alarmId))
+    }
+}
