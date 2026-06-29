@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">Otto</string>
+
+    <!-- Ring -->
+    <string name="alarm_channel_name">Alarms</string>
+    <string name="alarm_channel_description">A ringing Otto alarm</string>
+    <string name="ring_notification_title">Otto alarm</string>
+    <string name="ring_default_label">Alarm</string>
+    <string name="ring_dismiss">Dismiss</string>
 </resources>
