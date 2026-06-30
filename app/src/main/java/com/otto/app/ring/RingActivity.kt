@@ -50,10 +50,8 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class RingActivity : ComponentActivity() {
 
-    @Inject lateinit var ringer: AlarmRinger
     @Inject lateinit var repository: AlarmRepository
     @Inject lateinit var controller: AlarmController
-    @Inject lateinit var notifications: AlarmNotifications
     @Inject lateinit var appScope: CoroutineScope
 
     private val display = mutableStateOf(Ringing("", ""))
@@ -66,7 +64,8 @@ class RingActivity : ComponentActivity() {
         onBackPressedDispatcher.addCallback(this) { dismiss() }
 
         display.value = ringingFromIntent(intent)
-        ringer.start()
+        // The RingService owns the sound (so it outlives this Activity); ensure it's running.
+        RingService.ring(this, display.value.alarmId, display.value.label)
 
         setContent {
             OttoTheme {
@@ -82,6 +81,7 @@ class RingActivity : ComponentActivity() {
         // the newest now; any alarm still RANG is returned to when this one is resolved.
         setIntent(intent)
         display.value = ringingFromIntent(intent)
+        RingService.ring(this, display.value.alarmId, display.value.label)
     }
 
     private fun ringingFromIntent(intent: Intent) = Ringing(
@@ -92,10 +92,8 @@ class RingActivity : ComponentActivity() {
     private fun dismiss() {
         val id = display.value.alarmId
         appScope.launch(Dispatchers.IO) {
-            if (id.isNotEmpty()) {
-                notifications.cancel(id)
-                repository.markState(id, AlarmState.DISMISSED)
-            }
+            if (id.isNotEmpty()) repository.markState(id, AlarmState.DISMISSED)
+            RingService.refresh(this@RingActivity)
             advanceOrFinish()
         }
     }
@@ -103,22 +101,18 @@ class RingActivity : ComponentActivity() {
     private fun snooze() {
         val id = display.value.alarmId
         appScope.launch(Dispatchers.IO) {
-            if (id.isNotEmpty()) {
-                notifications.cancel(id)
-                controller.snooze(id)
-            }
+            if (id.isNotEmpty()) controller.snooze(id)
+            RingService.refresh(this@RingActivity)
             advanceOrFinish()
         }
     }
 
-    /** Switch to the next still-ringing alarm, or stop the sound and finish when none remain. */
+    /** Switch to the next still-ringing alarm, or finish when none remain (the service stops
+     *  the sound via [RingService.refresh]). */
     private suspend fun advanceOrFinish() {
         val next = repository.getRinging().firstOrNull()
-        if (next != null) {
-            withContext(Dispatchers.Main) { display.value = Ringing(next.alarmId, next.label) }
-        } else {
-            ringer.stop()
-            withContext(Dispatchers.Main) { finish() }
+        withContext(Dispatchers.Main) {
+            if (next != null) display.value = Ringing(next.alarmId, next.label) else finish()
         }
     }
 
@@ -137,11 +131,6 @@ class RingActivity : ComponentActivity() {
         // Auto-dismisses only an insecure keyguard; a secured lockscreen still shows the ring
         // over it (showWhenLocked) without unlocking.
         getSystemService(KeyguardManager::class.java)?.requestDismissKeyguard(this, null)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        ringer.stop()
     }
 
     private data class Ringing(val alarmId: String, val label: String)

@@ -17,11 +17,13 @@ rings reliably even when backgrounded, in Doze, or after reboot.
 
 ## Current status
 
-**Milestone 1 (alarm spine)** shipped and build-verified. **Milestone 2 (server sync)**
-complete: device identity + token registration, alarm-event reporting (ReportWorker),
-SYNC reconciliation (SyncWorker) + PING heartbeat (HeartbeatWorker), and HMAC verification
-of inbound commands. A Node FCM test-push helper lives in `tools/send-push/` (spec §15).
-M3–M5 next. See `spec.md` §13 for the milestone breakdown.
+**M1 (alarm spine)** and **M2 (server sync)** shipped and build-verified. **M3 (ring
+experience)** — snooze (fixed 9-min), volume ramp, vibration, multi-alarm cycling — and
+**M4 (reliability hardening)** — `RingService` foreground service backing the ring,
+`TimeChangeReceiver` re-validation, force-stop recovery (re-arm + SYNC on app open), and the
+reliability warning card — are complete. A Node FCM test-push helper lives in
+`tools/send-push/`; device-only checks (Doze, force-stop, time change) are scripted in
+`docs/manual-testing.md`. **M5 (polish & observability)** next. See `spec.md` §13.
 
 ## Stack (do not substitute — see `spec.md` §4)
 

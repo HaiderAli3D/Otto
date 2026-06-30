@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Foreground service backing the ring (mediaPlayback type: it plays alarm audio) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
     <!-- Exact alarms: USE_EXACT_ALARM is auto-granted to genuine alarm apps on API 33+;
          SCHEDULE_EXACT_ALARM is only needed (and pre-granted) on API 31-32. -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
@@ -49,6 +53,12 @@
             android:theme="@style/Theme.Otto"
             android:turnScreenOn="true" />
 
+        <!-- Foreground service that backs the ring so the sound outlives the Activity -->
+        <service
+            android:name=".ring.RingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <!-- FCM: high-priority data messages -->
         <service
             android:name=".push.OttoFcmService"
@@ -70,6 +80,16 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Re-validate armed alarms when the clock or timezone changes -->
+        <receiver
+            android:name=".alarm.TimeChangeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
         </receiver>
 

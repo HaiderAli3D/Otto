@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.otto.app.core.OttoLog
 import com.otto.app.net.RegistrationWorker
+import com.otto.app.net.SyncWorker
 import com.otto.app.permissions.PermissionsManager
 import com.otto.app.ui.theme.OttoTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -37,6 +38,8 @@ class MainActivity : ComponentActivity() {
         // Best-effort (re)registration on launch; the worker no-ops on the placeholder URL
         // and retries with backoff when a real server is configured.
         RegistrationWorker.enqueue(this)
+        // Reconcile with the server on open (also part of force-stop recovery).
+        SyncWorker.enqueue(this)
         setContent {
             OttoTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()

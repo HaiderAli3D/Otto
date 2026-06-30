@@ -150,6 +150,15 @@ fun OttoScreen(
                 PermissionRow("Battery exemption", state.permissions.batteryExemptionGranted, onGrantBattery)
             }
 
+            SectionCard("Reliability") {
+                Text(
+                    "Don't use \"Force stop\" on Otto in Android Settings. A force-stop cancels " +
+                        "every scheduled alarm and pauses push until you reopen the app. If it " +
+                        "happens, just open Otto again — armed alarms are restored automatically.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
             SectionCard("Armed alarms") {
                 if (state.alarms.isEmpty()) {
                     Text("No alarms yet.", style = MaterialTheme.typography.bodyMedium)

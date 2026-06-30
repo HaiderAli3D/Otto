@@ -82,8 +82,17 @@ class OttoViewModel @Inject constructor(
 
     init {
         refreshToken()
-        // Mint the device id eagerly so it shows in the UI and is ready for registration.
-        viewModelScope.launch { preferences.getOrCreateDeviceId() }
+        viewModelScope.launch {
+            // Mint the device id eagerly so it shows in the UI and is ready for registration.
+            preferences.getOrCreateDeviceId()
+            // Force-stop recovery (spec §10): a force-stop clears all scheduled alarms while
+            // Room keeps them ARMED. Re-arming on every app open repairs that state.
+            try {
+                controller.reArmAll()
+            } catch (t: Throwable) {
+                OttoLog.e("Re-arm on app open failed", t)
+            }
+        }
     }
 
     fun refreshPermissions() {

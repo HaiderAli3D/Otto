@@ -8,6 +8,7 @@ import com.otto.app.core.OttoLog
 import com.otto.app.data.AlarmRepository
 import com.otto.app.data.AlarmState
 import com.otto.app.ring.AlarmNotifications
+import com.otto.app.ring.RingService
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -54,7 +55,15 @@ class AlarmReceiver : BroadcastReceiver() {
                         OttoLog.i("Alarm $alarmId already ${alarm.state}; ignoring fire")
                     else -> {
                         deps.repository().markState(alarmId, AlarmState.RANG)
-                        deps.notifications().postRinging(alarmId, alarm.label)
+                        // Prefer the foreground RingService (survives Activity death); the
+                        // exact-alarm fire exempts this background FGS start. Fall back to the
+                        // full-screen notification if that start is refused.
+                        try {
+                            RingService.ring(context.applicationContext, alarmId, alarm.label)
+                        } catch (t: Throwable) {
+                            OttoLog.w("Ring service start refused; using full-screen notification", t)
+                            deps.notifications().postRinging(alarmId, alarm.label)
+                        }
                         OttoLog.i("Alarm $alarmId ringing")
                     }
                 }
