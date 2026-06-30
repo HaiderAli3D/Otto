@@ -75,9 +75,13 @@ dependencies {
     implementation(libs.androidx.material3)
     debugImplementation(libs.androidx.ui.tooling)
 
-    // Firebase Cloud Messaging (versions pinned by the BOM)
+    // Firebase Cloud Messaging (versions pinned by the BOM).
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
+    // Crashlytics (M5): the catalog entry `libs.firebase.crashlytics` is ready; add it here
+    // once the build network can reach dl.google.com (this sandbox's proxy blocks new Google
+    // artifact downloads). No Gradle plugin is needed for unminified debug builds.
+    // implementation(libs.firebase.crashlytics)
 
     // Hilt — note TWO compilers on ksp: Dagger's, plus androidx's (generates HiltWorkerFactory)
     implementation(libs.hilt.android)

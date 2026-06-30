@@ -13,6 +13,7 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.otto.app.core.OttoLog
+import com.otto.app.net.HeartbeatWorker
 import com.otto.app.net.RegistrationWorker
 import com.otto.app.net.SyncWorker
 import com.otto.app.permissions.PermissionsManager
@@ -53,8 +54,8 @@ class MainActivity : ComponentActivity() {
                     onGrantBattery = { startActivitySafely(permissionsManager.batteryExemptionIntent()) },
                     onArmTest = viewModel::armTestAlarm,
                     onCancelAlarm = viewModel::cancelAlarm,
-                    onSetSecret = viewModel::setPairingSecret,
-                    onClearSecret = viewModel::clearPairingSecret,
+                    onOpenSettings = { startActivitySafely(Intent(this, SettingsActivity::class.java)) },
+                    onSendHeartbeat = { HeartbeatWorker.enqueue(this) },
                 )
             }
         }

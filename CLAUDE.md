@@ -17,13 +17,18 @@ rings reliably even when backgrounded, in Doze, or after reboot.
 
 ## Current status
 
-**M1 (alarm spine)** and **M2 (server sync)** shipped and build-verified. **M3 (ring
-experience)** — snooze (fixed 9-min), volume ramp, vibration, multi-alarm cycling — and
-**M4 (reliability hardening)** — `RingService` foreground service backing the ring,
-`TimeChangeReceiver` re-validation, force-stop recovery (re-arm + SYNC on app open), and the
-reliability warning card — are complete. A Node FCM test-push helper lives in
-`tools/send-push/`; device-only checks (Doze, force-stop, time change) are scripted in
-`docs/manual-testing.md`. **M5 (polish & observability)** next. See `spec.md` §13.
+**All five milestones (M1–M5) are implemented and build-verified.** M1 alarm spine; M2
+server sync (registration, reporting, SYNC/PING, HMAC); M3 ring (snooze, volume ramp,
+vibration, multi-alarm); M4 reliability (`RingService` foreground service, `TimeChangeReceiver`,
+force-stop recovery, warning card); M5 polish (settings/pairing screen, self-heartbeat,
+`NextAlarmTileService` quick-settings tile, structured `OttoLog`). A Node FCM test-push helper
+lives in `tools/send-push/`; device-only checks are scripted in `docs/manual-testing.md`.
+
+**One deferred item — Crashlytics:** the SDK couldn't be fetched in the build sandbox (its
+proxy blocks new `dl.google.com` downloads with an untrusted SSL root). The integration is
+ready: uncomment `implementation(libs.firebase.crashlytics)` in `app/build.gradle.kts` (the
+catalog entry exists) and re-add the breadcrumb/non-fatal forwarding in `OttoLog`. No Gradle
+plugin is needed for unminified debug builds. See `spec.md` §13.
 
 ## Stack (do not substitute — see `spec.md` §4)
 

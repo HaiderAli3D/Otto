@@ -14,22 +14,17 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.otto.app.BuildConfig
 import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmState
 import com.otto.app.permissions.PermissionState
@@ -50,8 +45,8 @@ fun OttoScreen(
     onGrantBattery: () -> Unit,
     onArmTest: () -> Unit,
     onCancelAlarm: (String) -> Unit,
-    onSetSecret: (String) -> Unit,
-    onClearSecret: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onSendHeartbeat: () -> Unit,
 ) {
     val formatter = remember { SimpleDateFormat("MMM d · HH:mm:ss", Locale.getDefault()) }
 
@@ -63,7 +58,14 @@ fun OttoScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Otto control panel", style = MaterialTheme.typography.headlineSmall)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Otto control panel", style = MaterialTheme.typography.headlineSmall)
+                OutlinedButton(onClick = onOpenSettings) { Text("Settings") }
+            }
 
             SectionCard("Test") {
                 Text(
@@ -72,6 +74,9 @@ fun OttoScreen(
                 )
                 Button(onClick = onArmTest, modifier = Modifier.fillMaxWidth()) {
                     Text("Arm test alarm (+60s)")
+                }
+                OutlinedButton(onClick = onSendHeartbeat, modifier = Modifier.fillMaxWidth()) {
+                    Text("Send self heartbeat")
                 }
             }
 
@@ -110,36 +115,6 @@ fun OttoScreen(
                         "Last registered: ${formatter.format(Date(it))}",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                }
-            }
-
-            if (BuildConfig.ALLOW_URL_OVERRIDE) {
-                SectionCard("Pairing (debug)") {
-                    Text(
-                        if (state.pairingSecretSet) {
-                            "Shared secret set — inbound commands are HMAC-verified."
-                        } else {
-                            "No shared secret — inbound commands are accepted unverified."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    var secret by remember { mutableStateOf("") }
-                    OutlinedTextField(
-                        value = secret,
-                        onValueChange = { secret = it },
-                        label = { Text("Shared secret") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { onSetSecret(secret); secret = "" },
-                            enabled = secret.isNotBlank(),
-                        ) { Text("Save secret") }
-                        OutlinedButton(onClick = onClearSecret, enabled = state.pairingSecretSet) {
-                            Text("Clear")
-                        }
-                    }
                 }
             }
 

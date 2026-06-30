@@ -22,6 +22,10 @@ interface AlarmDao {
     @Query("SELECT * FROM alarms WHERE state = :state")
     suspend fun getByState(state: AlarmState): List<AlarmEntity>
 
+    /** The soonest still-future alarm in the given state (for the quick-settings tile). */
+    @Query("SELECT * FROM alarms WHERE state = :state AND triggerAtMillis > :nowMillis ORDER BY triggerAtMillis ASC LIMIT 1")
+    suspend fun getNextInState(state: AlarmState, nowMillis: Long): AlarmEntity?
+
     /** Alarms whose latest state change hasn't reached the server yet. */
     @Query("SELECT * FROM alarms WHERE reportedToServer = 0 ORDER BY updatedAtMillis ASC")
     suspend fun getUnreported(): List<AlarmEntity>

@@ -4,8 +4,13 @@ import android.util.Log
 import com.otto.app.BuildConfig
 
 /**
- * Thin logging facade. Debug-level logs are stripped in release builds. Never pass secrets
- * or full tokens — use [redact] for any token-like value.
+ * Thin, structured logging facade. One tag, explicit levels, debug stripped from release.
+ *
+ * Crashlytics breadcrumb/non-fatal forwarding is intentionally wired here in a single place
+ * (see the commented `record`/`breadcrumb` hooks) so enabling it is a one-file change once the
+ * `firebase-crashlytics` dependency can be fetched (see CLAUDE.md / build notes).
+ *
+ * Never pass secrets or full tokens — use [redact] for any token-like value.
  */
 object OttoLog {
     private const val TAG = "Otto"

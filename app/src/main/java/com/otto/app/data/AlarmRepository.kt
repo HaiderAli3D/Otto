@@ -64,6 +64,10 @@ class AlarmRepository @Inject constructor(
     /** Alarms currently ringing (RANG) — used to cycle through simultaneous alarms. */
     suspend fun getRinging(): List<AlarmEntity> = dao.getByState(AlarmState.RANG)
 
+    /** The next ARMED alarm still in the future, or null (quick-settings tile). */
+    suspend fun getNextAlarm(): AlarmEntity? =
+        dao.getNextInState(AlarmState.ARMED, clock.nowMillis())
+
     /**
      * Re-arm [alarmId] at [newTriggerAtMillis], incrementing snoozeCount and clearing the
      * report flag. Returns the updated entity, or null if the alarm no longer exists.

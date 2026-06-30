@@ -10,7 +10,6 @@ import com.otto.app.core.OttoLog
 import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmRepository
 import com.otto.app.data.prefs.OttoPreferences
-import com.otto.app.data.prefs.SecretStore
 import com.otto.app.permissions.PermissionState
 import com.otto.app.permissions.PermissionsManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -29,7 +28,6 @@ data class OttoUiState(
     val alarms: List<AlarmEntity> = emptyList(),
     val serverBaseUrl: String = BuildConfig.SERVER_BASE_URL,
     val lastRegistrationMillis: Long? = null,
-    val pairingSecretSet: Boolean = false,
 )
 
 @HiltViewModel
@@ -37,7 +35,6 @@ class OttoViewModel @Inject constructor(
     private val controller: AlarmController,
     private val repository: AlarmRepository,
     private val preferences: OttoPreferences,
-    private val secretStore: SecretStore,
     private val permissionsManager: PermissionsManager,
     private val clock: Clock,
 ) : ViewModel() {
@@ -51,7 +48,6 @@ class OttoViewModel @Inject constructor(
         val token: String?,
         val lastRegistration: Long?,
         val urlOverride: String?,
-        val secretSet: Boolean,
     )
 
     private val identity = combine(
@@ -59,9 +55,8 @@ class OttoViewModel @Inject constructor(
         preferences.fcmToken,
         preferences.lastRegistrationMillis,
         preferences.serverUrlOverride,
-        preferences.hmacSecret,
-    ) { deviceId, token, lastRegistration, urlOverride, secret ->
-        Identity(deviceId, token, lastRegistration, urlOverride, !secret.isNullOrBlank())
+    ) { deviceId, token, lastRegistration, urlOverride ->
+        Identity(deviceId, token, lastRegistration, urlOverride)
     }
 
     val uiState: StateFlow<OttoUiState> = combine(
@@ -76,7 +71,6 @@ class OttoViewModel @Inject constructor(
             alarms = alarms,
             serverBaseUrl = id.urlOverride ?: BuildConfig.SERVER_BASE_URL,
             lastRegistrationMillis = id.lastRegistration,
-            pairingSecretSet = id.secretSet,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), OttoUiState())
 
@@ -128,28 +122,6 @@ class OttoViewModel @Inject constructor(
                 controller.cancel(alarmId)
             } catch (t: Throwable) {
                 OttoLog.e("Failed to cancel $alarmId", t)
-            }
-        }
-    }
-
-    /** Debug affordance until M5 pairing: store the shared HMAC secret (encrypted at rest). */
-    fun setPairingSecret(secret: String) {
-        if (secret.isBlank()) return
-        viewModelScope.launch {
-            try {
-                secretStore.setSecret(secret.trim())
-            } catch (t: Throwable) {
-                OttoLog.e("Failed to store pairing secret", t)
-            }
-        }
-    }
-
-    fun clearPairingSecret() {
-        viewModelScope.launch {
-            try {
-                secretStore.clearSecret()
-            } catch (t: Throwable) {
-                OttoLog.e("Failed to clear pairing secret", t)
             }
         }
     }
