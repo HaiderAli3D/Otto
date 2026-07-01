@@ -3,6 +3,7 @@ import { newAlarmId } from '../lib/ids.js'
 import { armAlarm, cancelAlarm, listArmed } from '../services/alarms.js'
 import type { Device } from '../services/devices.js'
 import { createCalendarEvent, createTask, hasGoogle, listCalendarEvents } from '../services/google.js'
+import { parseRecurrence } from '../services/recurrence.js'
 import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../services/time.js'
 
 /** The tool surface the Claude agent can call. Calendar/Tasks tools no-op gracefully if unconnected. */
@@ -20,13 +21,19 @@ export function buildTools(): Anthropic.Tool[] {
           },
           label: { type: 'string', description: 'Short label shown on the alarm screen' },
           allowWhileIdle: { type: 'boolean', description: 'Defaults true' },
+          recurrence: {
+            type: 'string',
+            description:
+              'Optional repeat rule; whenLocalISO is the first ring. FREQ=DAILY|WEEKLY|MONTHLY, optional INTERVAL=n, optional BYDAY=MO,..,SU (WEEKLY only). Examples: "FREQ=DAILY", "FREQ=WEEKLY;BYDAY=MO,WE,FR", "FREQ=DAILY;INTERVAL=2". Omit for a one-shot alarm.',
+          },
         },
         required: ['whenLocalISO', 'label'],
       },
     },
     {
       name: 'cancel_alarm',
-      description: 'Cancel a previously set alarm by its alarmId (from list_alarms).',
+      description:
+        'Cancel a previously set alarm by its alarmId (from list_alarms). Cancelling a recurring alarm stops the whole series.',
       input_schema: { type: 'object', properties: { alarmId: { type: 'string' } }, required: ['alarmId'] },
     },
     {
@@ -69,14 +76,24 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
   switch (name) {
     case 'create_alarm': {
       const triggerAtMillis = localIsoToEpochMillis(String(a.whenLocalISO), device.timezone)
+      const recurrence = a.recurrence === undefined ? null : String(a.recurrence)
+      if (recurrence !== null && parseRecurrence(recurrence) === null) {
+        return { error: `invalid recurrence rule "${recurrence}" — use FREQ=DAILY|WEEKLY|MONTHLY with optional INTERVAL/BYDAY` }
+      }
       const alarmId = newAlarmId()
       const { sent } = await armAlarm(device, {
         alarmId,
         triggerAtMillis,
         label: String(a.label ?? 'Alarm'),
         allowWhileIdle: typeof a.allowWhileIdle === 'boolean' ? a.allowWhileIdle : undefined,
+        recurrence,
       })
-      return { alarmId, firesAtLocal: epochMillisToLocalHuman(triggerAtMillis, device.timezone), delivered: sent }
+      return {
+        alarmId,
+        firesAtLocal: epochMillisToLocalHuman(triggerAtMillis, device.timezone),
+        repeats: recurrence ?? undefined,
+        delivered: sent,
+      }
     }
     case 'cancel_alarm': {
       await cancelAlarm(device, String(a.alarmId))
@@ -88,6 +105,7 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
           alarmId: x.alarmId,
           label: x.label,
           firesAtLocal: epochMillisToLocalHuman(x.triggerAtMillis, device.timezone),
+          repeats: x.recurrence ?? undefined,
         })),
       }
     }

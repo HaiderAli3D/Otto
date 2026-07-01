@@ -1,5 +1,5 @@
 import { log } from '../lib/log.js'
-import { ARM_ACK_TIMEOUT_MS, getAlarm, pushArm } from '../services/alarms.js'
+import { ARM_ACK_TIMEOUT_MS, advanceRecurrence, getAlarm, pushArm } from '../services/alarms.js'
 import { getDevice } from '../services/devices.js'
 import { deleteJob, dueJobs, rescheduleJob, type Job } from '../services/jobs.js'
 
@@ -24,7 +24,20 @@ async function runJob(job: Job): Promise<void> {
       rescheduleJob(job.id, nextAttempt, Date.now() + ARM_ACK_TIMEOUT_MS)
       return
     }
-    // 'recurring' and 'nudge' are wired in with calendar/reminders (S4/S5); drop unknowns safely.
+    case 'recurring': {
+      // Backstop: the phone never reported DISMISSED/MISSED for this occurrence (offline,
+      // uninstalled, lost push). If the series rule is still unclaimed, advance it here so the
+      // next occurrence still gets armed. advanceRecurrence's guarded claim makes this a no-op
+      // when the event-driven path already advanced.
+      if (job.alarmId) {
+        const alarm = getAlarm(job.alarmId)
+        if (alarm?.recurrence && alarm.state !== 'CANCELLED') {
+          await advanceRecurrence(job.alarmId)
+        }
+      }
+      return deleteJob(job.id)
+    }
+    // 'nudge' is reserved for future calendar/reminder features; drop unknowns safely.
     default:
       return deleteJob(job.id)
   }

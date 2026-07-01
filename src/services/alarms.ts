@@ -1,16 +1,21 @@
-import { and, eq, gt } from 'drizzle-orm'
+import { and, eq, gt, isNotNull } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { alarmEvents, alarms } from '../db/schema.js'
 import { armData, cancelData } from '../fcm/commands.js'
 import { sendData } from '../fcm/sender.js'
+import { newAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
 import { cancelJobs, enqueueJob } from './jobs.js'
-import { clearToken, type Device } from './devices.js'
+import { clearToken, getDevice, type Device } from './devices.js'
+import { nextOccurrence } from './recurrence.js'
 
 export type Alarm = typeof alarms.$inferSelect
 
 const GRACE_MS = 60_000
 export const ARM_ACK_TIMEOUT_MS = 90_000
+// Backstop delay after an occurrence's trigger time before the scheduler force-advances a
+// recurring series (covers a phone that never reports DISMISSED/MISSED, e.g. offline).
+export const RECURRING_BACKSTOP_MS = 10 * 60_000
 
 export function getAlarm(alarmId: string): Alarm | undefined {
   return db.select().from(alarms).where(eq(alarms.alarmId, alarmId)).get()
@@ -80,13 +85,62 @@ export async function armAlarm(
   // timeout we resend (see scheduler). Replace any prior watchdog for this alarm.
   cancelJobs('arm_ack', params.alarmId)
   enqueueJob('arm_ack', now + ARM_ACK_TIMEOUT_MS, { alarmId: params.alarmId, deviceId: device.deviceId, payload: { attempt: 1 } })
+  // Recurring series: schedule the advance backstop for this occurrence (event-driven advance in
+  // recordEvent is the primary path; this covers a phone that never reports back).
+  if (params.recurrence) {
+    cancelJobs('recurring', params.alarmId)
+    enqueueJob('recurring', params.triggerAtMillis + RECURRING_BACKSTOP_MS, {
+      alarmId: params.alarmId,
+      deviceId: device.deviceId,
+    })
+  }
   return { alarmId: params.alarmId, sent }
 }
 
-/** Mark an alarm cancelled and push CANCEL. */
+/**
+ * Roll a recurring series forward exactly once: claim this occurrence's rule (a guarded UPDATE —
+ * the event-driven path and the scheduler backstop can both call this, only one wins), compute
+ * the next wall-clock occurrence in the device zone, and arm it as a NEW alarm carrying the rule.
+ */
+export async function advanceRecurrence(alarmId: string): Promise<{ advanced: boolean; nextAlarmId?: string }> {
+  const alarm = getAlarm(alarmId)
+  if (!alarm?.recurrence || alarm.state === 'CANCELLED') return { advanced: false }
+  const device = getDevice(alarm.deviceId)
+  if (!device) return { advanced: false }
+
+  const rule = alarm.recurrence
+  const claimed = db
+    .update(alarms)
+    .set({ recurrence: null, updatedAt: Date.now() })
+    .where(and(eq(alarms.alarmId, alarmId), isNotNull(alarms.recurrence)))
+    .run()
+  if (claimed.changes === 0) return { advanced: false } // the other path got here first
+
+  const nextAt = nextOccurrence(rule, alarm.triggerAtMillis, device.timezone, Date.now())
+  if (nextAt === null) {
+    log.warn({ alarmId, rule }, 'recurrence: no next occurrence computable; series ends')
+    return { advanced: false }
+  }
+  const nextAlarmId = newAlarmId()
+  await armAlarm(device, {
+    alarmId: nextAlarmId,
+    triggerAtMillis: nextAt,
+    label: alarm.label,
+    allowWhileIdle: alarm.allowWhileIdle,
+    recurrence: rule,
+  })
+  log.info({ from: alarmId, to: nextAlarmId, nextAt }, 'recurrence: advanced series')
+  return { advanced: true, nextAlarmId }
+}
+
+/** Mark an alarm cancelled and push CANCEL. Cancelling the pending occurrence ends its series. */
 export async function cancelAlarm(device: Device, alarmId: string): Promise<boolean> {
-  db.update(alarms).set({ state: 'CANCELLED', updatedAt: Date.now() }).where(eq(alarms.alarmId, alarmId)).run()
+  db.update(alarms)
+    .set({ state: 'CANCELLED', recurrence: null, updatedAt: Date.now() })
+    .where(eq(alarms.alarmId, alarmId))
+    .run()
   cancelJobs('arm_ack', alarmId)
+  cancelJobs('recurring', alarmId)
   if (!device.fcmToken) return false
   const res = await sendData(device.fcmToken, cancelData(alarmId, device.hmacSecret))
   if (!res.ok && res.unregistered) clearToken(device.deviceId)
