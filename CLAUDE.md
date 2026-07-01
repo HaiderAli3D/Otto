@@ -37,6 +37,14 @@ keeps `AlarmRepository` off WorkManager (JVM-testable). This is Track 1 of a two
 Track 2 builds a separate Node/TS **Otto server** (WhatsApp + Claude agent + FCM sender +
 register/report/sync/heartbeat endpoints) — see the approved plan referenced in session notes.
 
+**Release-ready:** `signingConfigs.release` reads a gitignored `keystore.properties` (falls back to
+the debug key so `assembleRelease` still builds); release `SERVER_BASE_URL` is compiled from
+`otto.serverBaseUrl` in `local.properties`/`-P`; `usesCleartextTraffic="false"`; the Settings URL
+override is HTTPS-only; `versionName = 1.0.0`. Both `assembleDebug` and `assembleRelease` are green.
+The **Otto server** now exists as a sibling repo at `../otto-server` (Node/TS, SQLite, Fastify) — its
+`SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/Anthropic/Google/hosting/pairing).
+Still deferred: Crashlytics (needs `dl.google.com` + console) and R8 minify.
+
 **One deferred item — Crashlytics:** the SDK couldn't be fetched in the build sandbox (its
 proxy blocks new `dl.google.com` downloads with an untrusted SSL root). The integration is
 ready: uncomment `implementation(libs.firebase.crashlytics)` in `app/build.gradle.kts` (the

@@ -28,6 +28,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Otto"
+        android:usesCleartextTraffic="false"
         tools:targetApi="34">
 
         <!-- Control panel / launcher -->

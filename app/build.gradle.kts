@@ -1,4 +1,20 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.FileInputStream
+import java.util.Properties
+
+// Optional, gitignored config. Signing reads keystore.properties; a real release server URL comes
+// from `otto.serverBaseUrl` in local.properties (or -P). Absent files fall back gracefully so
+// debug/CI still build without any secrets present.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) FileInputStream(keystorePropsFile).use { load(it) }
+}
+val localProps = Properties().apply {
+    rootProject.file("local.properties").let { if (it.exists()) FileInputStream(it).use { s -> load(s) } }
+}
+val releaseServerUrl: String = localProps.getProperty("otto.serverBaseUrl")
+    ?: (project.findProperty("otto.serverBaseUrl") as String?)
+    ?: "https://otto.invalid/"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -19,7 +35,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0-m1"
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -28,10 +44,25 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        create("release") {
+            // Populated only when keystore.properties is present (owner-provided). Otherwise the
+            // release type falls back to the debug key below so assembleRelease still produces an
+            // installable APK for testing/CI.
+            if (keystorePropsFile.exists()) {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
-            // Placeholder so the app builds and runs before the Otto server exists.
+            // Placeholder so the app builds and runs before a server URL is provided; debug builds
+            // can override it at runtime from Settings.
             buildConfigField("String", "SERVER_BASE_URL", "\"https://otto.invalid/\"")
             buildConfigField("boolean", "ALLOW_URL_OVERRIDE", "true")
         }
@@ -41,8 +72,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            buildConfigField("String", "SERVER_BASE_URL", "\"https://otto.invalid/\"")
+            // Real server URL compiled in from local.properties (otto.serverBaseUrl); no in-app override.
+            buildConfigField("String", "SERVER_BASE_URL", "\"$releaseServerUrl\"")
             buildConfigField("boolean", "ALLOW_URL_OVERRIDE", "false")
+            signingConfig =
+                if (keystorePropsFile.exists()) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
         }
     }
 

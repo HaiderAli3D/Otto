@@ -68,6 +68,13 @@ class SettingsViewModel @Inject constructor(
 
     fun setServerUrlOverride(url: String?) {
         if (!BuildConfig.ALLOW_URL_OVERRIDE) return
-        viewModelScope.launch { preferences.setServerUrlOverride(url?.ifBlank { null }) }
+        val cleaned = url?.trim()?.ifBlank { null }
+        // Enforce HTTPS on the override (dev tunnels like cloudflared/ngrok are already https); a
+        // typo'd http:// host would be blocked by usesCleartextTraffic anyway, so reject it early.
+        if (cleaned != null && !cleaned.startsWith("https://")) {
+            OttoLog.w("Ignoring non-HTTPS server URL override")
+            return
+        }
+        viewModelScope.launch { preferences.setServerUrlOverride(cleaned) }
     }
 }
