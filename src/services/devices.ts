@@ -21,11 +21,17 @@ export function ensureDevice(deviceId: string): Device {
     hmacSecret: randomBytes(32).toString('hex'),
     whatsappNumber: null,
     timezone: config.defaultTimezone,
+    authLatched: false,
     lastHeartbeatAt: null,
     createdAt: Date.now(),
   }
   db.insert(devices).values(row).run()
   return row
+}
+
+/** One valid signed request latches the device: from now on its endpoints require a signature. */
+export function latchAuth(deviceId: string): void {
+  db.update(devices).set({ authLatched: true }).where(eq(devices.deviceId, deviceId)).run()
 }
 
 export function setToken(deviceId: string, fcmToken: string, appVersion: string | null): void {

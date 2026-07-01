@@ -8,6 +8,9 @@ export const devices = sqliteTable('devices', {
   hmacSecret: text('hmac_secret').notNull(),
   whatsappNumber: text('whatsapp_number'),
   timezone: text('timezone').notNull().default('UTC'),
+  // Fail-closed-once-paired: set on the first valid signed request; from then on the device
+  // endpoints require a signature for this deviceId (services/deviceAuth.ts).
+  authLatched: integer('auth_latched', { mode: 'boolean' }).notNull().default(false),
   lastHeartbeatAt: integer('last_heartbeat_at'),
   createdAt: integer('created_at').notNull(),
 })

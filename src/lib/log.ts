@@ -21,6 +21,8 @@ export const log = pino({
       '*.sig',
       'req.headers.authorization',
       'req.headers["x-hub-signature-256"]',
+      'req.headers["x-otto-sig"]',
+      'req.headers["x-admin-token"]',
     ],
     censor: '[redacted]',
   },

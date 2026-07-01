@@ -25,6 +25,7 @@ export function ensureSchema(): void {
       hmac_secret TEXT NOT NULL,
       whatsapp_number TEXT,
       timezone TEXT NOT NULL DEFAULT 'UTC',
+      auth_latched INTEGER NOT NULL DEFAULT 0,
       last_heartbeat_at INTEGER,
       created_at INTEGER NOT NULL
     );
@@ -77,4 +78,15 @@ export function ensureSchema(): void {
       updated_at INTEGER NOT NULL
     );
   `)
+
+  // Additive columns for databases created before the column existed (CREATE IF NOT EXISTS
+  // never alters an existing table). Idempotent: guarded by PRAGMA table_info.
+  ensureColumn('devices', 'auth_latched', 'auth_latched INTEGER NOT NULL DEFAULT 0')
+}
+
+function ensureColumn(table: string, column: string, ddl: string): void {
+  const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  if (!cols.some((c) => c.name === column)) {
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+  }
 }

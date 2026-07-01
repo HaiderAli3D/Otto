@@ -51,6 +51,23 @@ function loadServiceAccount(value: string): ServiceAccount {
 
 const serviceAccount = loadServiceAccount(raw.FIREBASE_SERVICE_ACCOUNT)
 
+/**
+ * /admin/devices exposes per-device pairing secrets, so an admin token is mandatory the moment
+ * the server is reachable beyond localhost. Pure so it's unit-testable; config.ts cannot import
+ * the logger (circular), so violations throw at boot instead.
+ */
+export function adminTokenRequired(publicOrigin: string, adminToken: string | null): boolean {
+  if (adminToken) return false
+  let host: string
+  try {
+    host = new URL(publicOrigin).hostname
+  } catch {
+    return true // unparseable origin: fail closed
+  }
+  const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+  return !local
+}
+
 const metaComplete =
   raw.META_APP_SECRET && raw.META_VERIFY_TOKEN && raw.META_WA_PHONE_NUMBER_ID && raw.META_WA_ACCESS_TOKEN
 
@@ -83,5 +100,11 @@ export const config = {
       }
     : null,
 } as const
+
+if (adminTokenRequired(config.publicOrigin, config.adminToken)) {
+  throw new Error(
+    'ADMIN_TOKEN is required when PUBLIC_ORIGIN is not localhost — /admin/devices exposes pairing secrets. Set ADMIN_TOKEN in the environment (see SETUP.md "Hardening").',
+  )
+}
 
 export type Config = typeof config
