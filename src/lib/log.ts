@@ -1,0 +1,31 @@
+import { pino } from 'pino'
+import { config } from '../config.js'
+
+/**
+ * Structured logger with secret redaction (mirrors the Android app's OttoLog.redact):
+ * tokens, secrets, and signatures never hit the logs.
+ */
+export const log = pino({
+  level: config.logLevel,
+  redact: {
+    paths: [
+      'token',
+      '*.token',
+      'accessToken',
+      '*.accessToken',
+      'secret',
+      '*.secret',
+      'hmacSecret',
+      '*.hmacSecret',
+      'sig',
+      '*.sig',
+      'req.headers.authorization',
+      'req.headers["x-hub-signature-256"]',
+    ],
+    censor: '[redacted]',
+  },
+  transport:
+    process.env.NODE_ENV === 'production'
+      ? undefined
+      : { target: 'pino-pretty', options: { translateTime: 'SYS:HH:MM:ss', ignore: 'pid,hostname' } },
+})

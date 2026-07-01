@@ -1,0 +1,47 @@
+# Fly.io config for the Otto server.
+#
+# One-time setup (run from this directory after `fly launch --no-deploy`):
+#   fly volumes create otto_data --size 1
+#       └─ persistent 1 GB disk for the SQLite file at /data (see [[mounts]] below).
+#   fly secrets set \
+#       FIREBASE_SERVICE_ACCOUNT="$(cat service-account.json)" \
+#       ANTHROPIC_API_KEY=sk-ant-... \
+#       ADMIN_TOKEN=$(openssl rand -hex 24) \
+#       PUBLIC_ORIGIN=https://<your-app>.fly.dev
+#       └─ FIREBASE_SERVICE_ACCOUNT accepts the JSON inline (multiline is fine via $(cat ...)).
+#   fly deploy
+#
+# IMPORTANT: the alarm scheduler runs IN-PROCESS, so the machine must stay resident.
+# min_machines_running = 1 and auto_stop_machines = false keep it up. DO NOT run
+# `fly scale count 0` or enable scale-to-zero — a stopped machine misses alarms.
+
+app = "otto-server"        # rename to your unique Fly app name
+primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https://fly.io/docs/reference/regions/
+
+[build]
+  # Uses the Dockerfile in this directory.
+
+[env]
+  PORT = "3000"
+  # PUBLIC_ORIGIN is best set via `fly secrets set` once you know the URL, e.g.
+  #   PUBLIC_ORIGIN = "https://otto-server.fly.dev"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = false   # keep the in-process scheduler resident
+  min_machines_running = 1     # never scale to zero
+  processes = ["app"]
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+# Persistent disk for the SQLite database (matches DATABASE_PATH=/data/otto.sqlite).
+[[mounts]]
+  source = "otto_data"
+  destination = "/data"

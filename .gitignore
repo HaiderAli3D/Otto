@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+
+# Secrets & local config — never commit
+.env
+.env.*
+!.env.example
+service-account.json
+*.sqlite
+*.sqlite-journal
+*.db
+data/
