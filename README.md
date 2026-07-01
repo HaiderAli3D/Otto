@@ -23,13 +23,18 @@ The alarm scheduler runs **in-process**, so the server must stay resident (do no
 | Route | Purpose |
 | --- | --- |
 | `GET /health` | Liveness: `{ ok: true, ts }`. |
-| `GET /admin/devices` | Owner-only: lists each device's `hmacSecret` (pairing secret) + `hasToken`. |
+| `GET /admin/devices` | Owner-only: lists each device's `hmacSecret` (pairing secret), `hasToken`, `timezone`, `authEnforced`. |
 | `POST /admin/test-alarm` | Owner-only: arm a real alarm now-ish. Body `{ deviceId?, inSeconds?, label? }`. |
-| `POST /devices/:id/token`, `.../heartbeat`, `.../alarms`, `POST /alarms/:id/events` | Called by the app. |
+| `POST /admin/cancel` | Owner-only: cancel an alarm. Body `{ deviceId, alarmId }`. |
+| `POST /admin/sync` | Owner-only: push SYNC — the app re-fetches and re-arms the server's alarm list. Body `{ deviceId? }`. |
+| `POST /admin/ping` | Owner-only: no-ring liveness check — the app answers with a heartbeat. Body `{ deviceId? }`. |
+| `POST /devices/:id/token`, `.../heartbeat`, `.../alarms`, `POST /alarms/:id/events` | Called by the app. Signed once paired (see SETUP.md §10 Hardening). |
 | `POST/GET /whatsapp/webhook` | Meta WhatsApp Cloud API webhook (only mounted when `META_*` are set). |
 | `GET /oauth/google/start?deviceId=...` | Google Calendar/Tasks OAuth (only mounted when `GOOGLE_*` are set). |
 
-`/admin/*` is protected by the `x-admin-token` header when `ADMIN_TOKEN` is set (open otherwise).
+`/admin/*` requires the `x-admin-token` header; `ADMIN_TOKEN` is mandatory whenever
+`PUBLIC_ORIGIN` is not localhost (the server refuses to boot without it). Device endpoints
+require a request signature once the device has paired (fail-closed per device).
 
 ## Run locally
 

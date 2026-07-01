@@ -24,10 +24,11 @@ Commands below use `bash`/`curl` (macOS/Linux, Git Bash, or WSL on Windows). Rep
 - A phone and computer that can reach the internet. For WhatsApp you'll also need a Meta
   (Facebook) account and a phone number for the business number (§7).
 
-Get the code and dependencies:
+Get the code and dependencies (clone from wherever this repo lives for you — a Git host fork or
+a local path):
 
 ```bash
-git clone <this-repo> otto-server && cd otto-server
+git clone <url-or-path-of-this-repo> otto-server && cd otto-server
 npm install
 cp .env.example .env      # you'll fill this in as you go
 ```
@@ -133,6 +134,9 @@ cloudflared tunnel --url http://localhost:3000
 `cloudflared` prints a `https://<random>.trycloudflare.com` URL — set `PUBLIC_ORIGIN` to it and
 **restart** `npm run dev` (the URL changes each run, so this is for testing, not production).
 
+> Because the tunnel URL is not localhost, the server now **requires `ADMIN_TOKEN` to be set**
+> and refuses to boot without it (see §10 Hardening). Generate one: `openssl rand -hex 24`.
+
 ---
 
 ## 5. Point the phone at the server & prove the pipe (before WhatsApp)
@@ -142,7 +146,10 @@ This confirms Firebase + endpoints work end-to-end **without** WhatsApp or AI.
 1. In the Otto app: **Settings → server URL** and enter your `PUBLIC_ORIGIN`. Debug builds allow
    this override.
 2. **Open the app once.** It registers its FCM token with the server (`POST /devices/:id/token`),
-   which creates the device row. Without this there is no device to push to.
+   which creates the device row. Without this there is no device to push to. The app also
+   reports the phone's **timezone** here (and on every heartbeat) — alarm times like "6pm" are
+   interpreted in that zone. `DEFAULT_TIMEZONE` in `.env` only covers the gap before the app's
+   first contact; verify the real zone landed with `GET /admin/devices` (the `timezone` field).
 3. Fire a test alarm (replace `<ADMIN_TOKEN>` and `$PUBLIC_ORIGIN`):
 
    ```bash
@@ -156,7 +163,7 @@ This confirms Firebase + endpoints work end-to-end **without** WhatsApp or AI.
    should ring full-screen**. That proves Firebase + the endpoints work end-to-end.
 
 If `admin/test-alarm` returns `no device registered yet — open the app first`, redo step 2. See
-§10 if it doesn't ring.
+§11 if it doesn't ring.
 
 ---
 
@@ -172,6 +179,10 @@ curl "$PUBLIC_ORIGIN/admin/devices" -H "x-admin-token: <ADMIN_TOKEN>"
 Copy the `hmacSecret` from the response and paste it into the app: **Settings → Pair**. From then
 on the app only rings pushes signed with that secret. (Re-run `test-alarm` from §5 to confirm it
 still rings after pairing — the server signs with the same secret.)
+
+Pairing also hardens the **other direction**: once the app holds the secret it signs every HTTP
+call it makes, and the server locks that device to signed calls after the first one arrives
+(`authEnforced: true` in `GET /admin/devices`). Details and recovery in §10 Hardening.
 
 The same response shows `hasToken` (is the FCM token registered?) and the `deviceId` you'll need
 for Google OAuth in §9.
@@ -245,6 +256,11 @@ approved). For example:
 Otto (the Claude agent) parses it, arms a **real alarm** on your phone via FCM, and at 6pm the
 phone rings. Try "cancel that" or "what alarms do I have?" too.
 
+Repeating alarms work as well — "wake me every weekday at 7", "every day at 22:00 remind me to
+take my meds", "monthly on the 1st". The phone only ever holds the *next* occurrence; after each
+ring the server automatically arms the following one. Cancelling a repeating alarm stops the
+whole series.
+
 If Otto replies *"Open the Otto app on your phone first so it can pair"*, it can't map your
 WhatsApp number to a device yet — make sure you completed §5–6 on the same phone.
 
@@ -285,7 +301,40 @@ Docs: [Using OAuth 2.0 for Web Server Applications](https://developers.google.co
 
 ---
 
-## 10. Troubleshooting
+## 10. Hardening
+
+What protects what, and how to recover when a protection bites.
+
+**Admin token (`ADMIN_TOKEN`).** `/admin/devices` returns every device's pairing secret, so the
+server **refuses to boot** when `PUBLIC_ORIGIN` is not localhost and `ADMIN_TOKEN` is unset. On
+localhost it may stay unset (a boot warning reminds you). All `/admin/*` calls send it as the
+`x-admin-token` header.
+
+**Push signing (server → phone).** Every FCM command carries an HMAC `sig`. Before pairing the
+app accepts unsigned pushes (bootstrap); after pairing it drops anything unsigned or mis-signed,
+permanently (fail-closed).
+
+**Request signing (phone → server).** The mirror image, added so nobody who learns a `deviceId`
+can spoof events or read your alarm list. Once paired, the app signs each HTTP call
+(`x-otto-ts` + `x-otto-sig` headers, HMAC over method/path/timestamp/body with the pairing
+secret, ±5 minute replay window). The server latches a device on its **first valid signed call**
+(`authEnforced: true` in `/admin/devices`) and from then on rejects unsigned calls for that
+device with **401**.
+- *Requirements:* the server must be mounted at the **origin root** (all three §4 options are —
+  don't reverse-proxy it under a sub-path), and the phone's clock must be sane (default
+  network time is fine).
+- *Recovery — 401s from the app after clearing app data or unpairing:* the app lost the secret
+  but the server still requires signatures. Re-pair (§6: paste the `hmacSecret` again) and it
+  self-heals. A full reinstall instead mints a fresh `deviceId`, which starts unlatched, so that
+  path also self-heals — the old device row just goes stale.
+
+**Beyond this** (optional, for the cautious): run the server on a private network (VPN/tailnet)
+so only your devices reach it at all, and keep `LOG_LEVEL=info` in production — logs redact
+secrets, signatures and tokens by design, but quieter is safer.
+
+---
+
+## 11. Troubleshooting
 
 **Phone doesn't ring:**
 - `GET /admin/devices` → is `hasToken: true`? If false, open the app (§5 step 2) so it registers
@@ -298,6 +347,14 @@ Docs: [Using OAuth 2.0 for Web Server Applications](https://developers.google.co
   is down.
 - Watch the server logs during `POST /admin/test-alarm` for FCM send errors (bad/expired token, or
   a Firebase project mismatch — the server project must equal the app's `google-services.json`).
+- `POST /admin/ping` is a no-ring liveness check: the phone answers with a heartbeat — watch
+  `lastHeartbeatAt` move in `GET /admin/devices`. `POST /admin/sync` makes the app re-fetch and
+  re-arm the server's alarm list (useful after a reinstall).
+- Alarms ring at the wrong hour → check `timezone` in `GET /admin/devices`; open the app once
+  (or wait for a heartbeat) so it reports the phone's real zone.
+
+**App gets 401s from the server:** the device is latched to signed requests but the app lost its
+secret (cleared data / unpaired). Re-pair per §6 — see §10 Hardening.
 
 **WhatsApp not replying:**
 - Webhook won't verify → the **Verify token** in Meta must exactly equal `META_VERIFY_TOKEN`, and
@@ -323,4 +380,4 @@ See [`.env.example`](./.env.example) for the full annotated list. Quick summary:
 | Claude | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Optional — enables the agent |
 | WhatsApp | `META_APP_SECRET`, `META_VERIFY_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_ACCESS_TOKEN` | Optional — set **all four** |
 | Google | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Optional — set **both** |
-| Admin | `ADMIN_TOKEN` | Optional locally, **set in production** |
+| Admin | `ADMIN_TOKEN` | **Required unless `PUBLIC_ORIGIN` is localhost** (the server refuses to boot without it) |
