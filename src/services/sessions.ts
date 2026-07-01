@@ -1,12 +1,10 @@
-import type Anthropic from '@anthropic-ai/sdk'
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { sessions } from '../db/schema.js'
+import { trimToValidStart, type Msg } from '../lib/history.js'
 
-export type Msg = Anthropic.MessageParam
-
-// Keep the recent conversation only — enough for coherent multi-message threads without unbounded growth.
-const MAX_MESSAGES = 40
+export type { Msg }
+export { trimToValidStart }
 
 export function loadSession(waUserId: string): Msg[] {
   const row = db.select().from(sessions).where(eq(sessions.waUserId, waUserId)).get()
@@ -19,7 +17,8 @@ export function loadSession(waUserId: string): Msg[] {
 }
 
 export function saveSession(waUserId: string, messages: Msg[]): void {
-  const json = JSON.stringify(messages.slice(-MAX_MESSAGES))
+  // Always persist a valid leading shape so a long, tool-heavy thread can't poison itself.
+  const json = JSON.stringify(trimToValidStart(messages))
   const now = Date.now()
   db.insert(sessions)
     .values({ waUserId, deviceId: null, messages: json, updatedAt: now })
