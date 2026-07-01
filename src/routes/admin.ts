@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { config } from '../config.js'
+import { pingData, syncData } from '../fcm/commands.js'
+import { sendData } from '../fcm/sender.js'
 import { newAlarmId } from '../lib/ids.js'
 import { armAlarm, cancelAlarm } from '../services/alarms.js'
-import { getDevice, listDevices } from '../services/devices.js'
+import { getDevice, listDevices, type Device } from '../services/devices.js'
 
 /**
  * Owner-only helpers: read a device's pairing secret (to paste into the app) and fire a test
@@ -25,6 +27,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       hasToken: Boolean(d.fcmToken),
       appVersion: d.appVersion,
       timezone: d.timezone,
+      authEnforced: d.authLatched,
       whatsappNumber: d.whatsappNumber,
       lastHeartbeatAt: d.lastHeartbeatAt,
     })),
@@ -52,5 +55,30 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!device) return reply.code(404).send({ error: 'unknown device' })
     const sent = await cancelAlarm(device, body.alarmId)
     return reply.send({ sent })
+  })
+
+  /** Resolve the target device for the push helpers below: explicit deviceId, else the first one. */
+  function resolveDevice(deviceId: string | undefined): Device | undefined {
+    return deviceId ? getDevice(deviceId) : listDevices()[0]
+  }
+
+  // Push SYNC: the app fetches the authoritative armed set and reconciles. Manual recovery tool.
+  app.post('/admin/sync', async (req, reply) => {
+    const body = z.object({ deviceId: z.string().optional() }).parse(req.body ?? {})
+    const device = resolveDevice(body.deviceId)
+    if (!device) return reply.code(404).send({ error: 'no device registered yet — open the app first' })
+    if (!device.fcmToken) return reply.code(409).send({ error: 'device has no FCM token' })
+    const res = await sendData(device.fcmToken, syncData(device.hmacSecret))
+    return reply.send({ deviceId: device.deviceId, sent: res.ok })
+  })
+
+  // Push PING: a no-ring liveness check — the app answers with a heartbeat (watch lastHeartbeatAt).
+  app.post('/admin/ping', async (req, reply) => {
+    const body = z.object({ deviceId: z.string().optional() }).parse(req.body ?? {})
+    const device = resolveDevice(body.deviceId)
+    if (!device) return reply.code(404).send({ error: 'no device registered yet — open the app first' })
+    if (!device.fcmToken) return reply.code(409).send({ error: 'device has no FCM token' })
+    const res = await sendData(device.fcmToken, pingData(device.hmacSecret))
+    return reply.send({ deviceId: device.deviceId, sent: res.ok, lastHeartbeatAt: device.lastHeartbeatAt })
   })
 }
