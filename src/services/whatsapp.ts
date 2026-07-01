@@ -18,30 +18,50 @@ export function verifySignature(rawBody: Buffer, signatureHeader: string | undef
   return timingSafeEqual(expectedBuf, actualBuf)
 }
 
+const SEND_ATTEMPTS = 3
+const RETRY_DELAYS_MS = [500, 1500]
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
 /**
- * Send a plain-text WhatsApp reply via the Cloud API. A failed send is logged, never thrown —
- * a broken reply must not crash the webhook. No-op when WhatsApp isn't configured.
+ * Send a plain-text WhatsApp reply via the Cloud API. Transient failures (network throw, 429,
+ * 5xx) are retried up to 3 attempts; a permanent failure (other 4xx) is not. Logged, never
+ * thrown — a broken reply must not crash the webhook. Returns whether the message was accepted.
+ * No-op (false) when WhatsApp isn't configured.
  */
-export async function sendText(toWaNumber: string, text: string): Promise<void> {
-  if (config.meta === null) return
+export async function sendText(toWaNumber: string, text: string): Promise<boolean> {
+  if (config.meta === null) return false
   const url = `https://graph.facebook.com/v22.0/${config.meta.phoneNumberId}/messages`
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.meta.accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to: toWaNumber,
-      type: 'text',
-      text: { body: text },
-    }),
+  const body = JSON.stringify({
+    messaging_product: 'whatsapp',
+    to: toWaNumber,
+    type: 'text',
+    text: { body: text },
   })
-  if (!res.ok) {
-    const responseText = await res.text().catch(() => '')
-    log.warn({ status: res.status, body: responseText }, 'WhatsApp sendText failed')
+
+  for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.meta.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+      })
+      if (res.ok) return true
+      const responseText = await res.text().catch(() => '')
+      if (res.status !== 429 && res.status < 500) {
+        log.error({ status: res.status, body: responseText, attempt }, 'WhatsApp sendText failed (permanent)')
+        return false
+      }
+      log.warn({ status: res.status, attempt }, 'WhatsApp sendText failed; retrying')
+    } catch (err) {
+      log.warn({ err, attempt }, 'WhatsApp sendText threw; retrying')
+    }
+    if (attempt < SEND_ATTEMPTS) await sleep(RETRY_DELAYS_MS[attempt - 1] ?? 1500)
   }
+  log.error({ attempts: SEND_ATTEMPTS }, 'WhatsApp sendText failed after all retries — reply dropped')
+  return false
 }
 
 /**
