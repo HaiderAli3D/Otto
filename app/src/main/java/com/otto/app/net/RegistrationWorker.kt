@@ -29,13 +29,13 @@ import java.util.concurrent.TimeUnit
 class RegistrationWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
-    private val api: OttoApi,
+    private val apiFactory: OttoApiFactory,
     private val preferences: OttoPreferences,
     private val clock: Clock,
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        if (BuildConfig.SERVER_BASE_URL.contains(OttoConstants.PLACEHOLDER_SERVER_HOST)) {
+        val api = apiFactory.currentApiOrNull() ?: run {
             OttoLog.i("Server URL is the placeholder; skipping token registration")
             return Result.success()
         }

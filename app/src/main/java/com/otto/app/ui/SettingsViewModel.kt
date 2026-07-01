@@ -6,6 +6,7 @@ import com.otto.app.BuildConfig
 import com.otto.app.core.OttoLog
 import com.otto.app.data.prefs.OttoPreferences
 import com.otto.app.data.prefs.SecretStore
+import com.otto.app.net.ServerUrl
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,7 +37,9 @@ class SettingsViewModel @Inject constructor(
         SettingsState(
             deviceId = deviceId,
             pairingSecretSet = !secret.isNullOrBlank(),
-            serverBaseUrl = urlOverride ?: BuildConfig.SERVER_BASE_URL,
+            serverBaseUrl = ServerUrl.effective(
+                urlOverride, BuildConfig.SERVER_BASE_URL, BuildConfig.ALLOW_URL_OVERRIDE,
+            ),
             urlOverridden = urlOverride != null,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsState())

@@ -1,17 +1,13 @@
 package com.otto.app.di
 
 import com.otto.app.BuildConfig
-import com.otto.app.net.OttoApi
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
-import retrofit2.Retrofit
-import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import javax.inject.Singleton
 
 @Module
@@ -37,16 +33,6 @@ object NetworkModule {
             .build()
     }
 
-    @Provides
-    @Singleton
-    fun provideRetrofit(client: OkHttpClient, json: Json): Retrofit =
-        Retrofit.Builder()
-            .baseUrl(BuildConfig.SERVER_BASE_URL)
-            .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-
-    @Provides
-    @Singleton
-    fun provideOttoApi(retrofit: Retrofit): OttoApi = retrofit.create(OttoApi::class.java)
+    // OttoApi is not provided here: it is built per effective base URL by OttoApiFactory so the
+    // debug URL override actually takes effect (Retrofit can't swap baseUrl on a singleton).
 }

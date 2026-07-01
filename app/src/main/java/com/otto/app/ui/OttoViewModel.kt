@@ -10,6 +10,7 @@ import com.otto.app.core.OttoLog
 import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmRepository
 import com.otto.app.data.prefs.OttoPreferences
+import com.otto.app.net.ServerUrl
 import com.otto.app.permissions.PermissionState
 import com.otto.app.permissions.PermissionsManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -69,7 +70,9 @@ class OttoViewModel @Inject constructor(
             fcmToken = id.token,
             permissions = perms,
             alarms = alarms,
-            serverBaseUrl = id.urlOverride ?: BuildConfig.SERVER_BASE_URL,
+            serverBaseUrl = ServerUrl.effective(
+                id.urlOverride, BuildConfig.SERVER_BASE_URL, BuildConfig.ALLOW_URL_OVERRIDE,
+            ),
             lastRegistrationMillis = id.lastRegistration,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), OttoUiState())
