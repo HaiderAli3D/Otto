@@ -10,7 +10,6 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import com.otto.app.BuildConfig
 import com.otto.app.alarm.AlarmController
 import com.otto.app.core.OttoConstants
 import com.otto.app.core.OttoLog
@@ -31,14 +30,14 @@ import java.util.concurrent.TimeUnit
 class SyncWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
-    private val api: OttoApi,
+    private val apiFactory: OttoApiFactory,
     private val controller: AlarmController,
     private val repository: AlarmRepository,
     private val preferences: OttoPreferences,
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        if (BuildConfig.SERVER_BASE_URL.contains(OttoConstants.PLACEHOLDER_SERVER_HOST)) {
+        val api = apiFactory.currentApiOrNull() ?: run {
             OttoLog.i("Server URL is the placeholder; skipping sync")
             return Result.success()
         }
@@ -48,18 +47,23 @@ class SyncWorker @AssistedInject constructor(
                 OttoLog.w("Sync fetch failed: HTTP ${response.code()}")
                 return Result.retry()
             }
-            val serverArmed = response.body()?.alarms.orEmpty().filter { it.state == ARMED_STATE }
-            // Arm/refresh what the server wants armed (idempotent on alarmId).
-            for (a in serverArmed) {
-                controller.arm(a.alarmId, a.triggerAtMillis, a.label, a.allowWhileIdle)
+            // Delegate the safety-critical arm/cancel decision to the pure, tested reconciler so a
+            // 200 with an empty/unparseable body can never wipe the user's alarms (see fix #1).
+            when (val plan = SyncReconciler.reconcile(repository.getAllArmed(), response.body())) {
+                SyncPlan.Retry -> {
+                    OttoLog.w("Sync response not authoritative (empty/unparseable body); alarms unchanged")
+                    Result.retry()
+                }
+                is SyncPlan.Apply -> {
+                    // Arm/refresh (idempotent on alarmId), then cancel only what the server dropped.
+                    for (a in plan.toArm) {
+                        controller.arm(a.alarmId, a.triggerAtMillis, a.label, a.allowWhileIdle)
+                    }
+                    for (id in plan.toCancelIds) controller.cancel(id)
+                    OttoLog.i("Synced: armed ${plan.toArm.size}, cancelled ${plan.toCancelIds.size}")
+                    Result.success()
+                }
             }
-            // Cancel anything still armed locally that the server dropped.
-            val serverArmedIds = serverArmed.mapTo(HashSet()) { it.alarmId }
-            for (local in repository.getAllArmed()) {
-                if (local.alarmId !in serverArmedIds) controller.cancel(local.alarmId)
-            }
-            OttoLog.i("Synced: ${serverArmed.size} armed alarm(s) from server")
-            Result.success()
         } catch (io: IOException) {
             OttoLog.w("Sync network error; will retry", io)
             Result.retry()
@@ -70,8 +74,6 @@ class SyncWorker @AssistedInject constructor(
     }
 
     companion object {
-        private const val ARMED_STATE = "ARMED"
-
         /** Enqueue a reconciliation; a fresh enqueue replaces any pending one (latest wins). */
         fun enqueue(context: Context) {
             val request = OneTimeWorkRequestBuilder<SyncWorker>()

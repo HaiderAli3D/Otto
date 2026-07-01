@@ -59,10 +59,10 @@ class AlarmReceiver : BroadcastReceiver() {
                         // exact-alarm fire exempts this background FGS start. Fall back to the
                         // full-screen notification if that start is refused.
                         try {
-                            RingService.ring(context.applicationContext, alarmId, alarm.label)
+                            RingService.ring(context.applicationContext, alarmId, alarm.label, alarm.requestCode)
                         } catch (t: Throwable) {
                             OttoLog.w("Ring service start refused; using full-screen notification", t)
-                            deps.notifications().postRinging(alarmId, alarm.label)
+                            deps.notifications().postRinging(alarmId, alarm.label, alarm.requestCode)
                         }
                         OttoLog.i("Alarm $alarmId ringing")
                     }

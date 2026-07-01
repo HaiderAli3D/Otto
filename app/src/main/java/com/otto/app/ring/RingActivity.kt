@@ -54,7 +54,7 @@ class RingActivity : ComponentActivity() {
     @Inject lateinit var controller: AlarmController
     @Inject lateinit var appScope: CoroutineScope
 
-    private val display = mutableStateOf(Ringing("", ""))
+    private val display = mutableStateOf(Ringing("", "", 0))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,7 +65,7 @@ class RingActivity : ComponentActivity() {
 
         display.value = ringingFromIntent(intent)
         // The RingService owns the sound (so it outlives this Activity); ensure it's running.
-        RingService.ring(this, display.value.alarmId, display.value.label)
+        RingService.ring(this, display.value.alarmId, display.value.label, display.value.requestCode)
 
         setContent {
             OttoTheme {
@@ -81,12 +81,13 @@ class RingActivity : ComponentActivity() {
         // the newest now; any alarm still RANG is returned to when this one is resolved.
         setIntent(intent)
         display.value = ringingFromIntent(intent)
-        RingService.ring(this, display.value.alarmId, display.value.label)
+        RingService.ring(this, display.value.alarmId, display.value.label, display.value.requestCode)
     }
 
     private fun ringingFromIntent(intent: Intent) = Ringing(
         alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID).orEmpty(),
         label = intent.getStringExtra(EXTRA_LABEL) ?: getString(R.string.ring_default_label),
+        requestCode = intent.getIntExtra(OttoConstants.EXTRA_REQUEST_CODE, 0),
     )
 
     private fun dismiss() {
@@ -112,7 +113,7 @@ class RingActivity : ComponentActivity() {
     private suspend fun advanceOrFinish() {
         val next = repository.getRinging().firstOrNull()
         withContext(Dispatchers.Main) {
-            if (next != null) display.value = Ringing(next.alarmId, next.label) else finish()
+            if (next != null) display.value = Ringing(next.alarmId, next.label, next.requestCode) else finish()
         }
     }
 
@@ -133,7 +134,7 @@ class RingActivity : ComponentActivity() {
         getSystemService(KeyguardManager::class.java)?.requestDismissKeyguard(this, null)
     }
 
-    private data class Ringing(val alarmId: String, val label: String)
+    private data class Ringing(val alarmId: String, val label: String, val requestCode: Int)
 
     companion object {
         const val EXTRA_LABEL = "com.otto.app.extra.LABEL"

@@ -24,6 +24,19 @@ force-stop recovery, warning card); M5 polish (settings/pairing screen, self-hea
 `NextAlarmTileService` quick-settings tile, structured `OttoLog`). A Node FCM test-push helper
 lives in `tools/send-push/`; device-only checks are scripted in `docs/manual-testing.md`.
 
+**Track-1 correctness hardening (branch `fix/app-correctness-track1`) — 6 fixes done, build
+green (47 unit tests):** (1) SYNC is fail-safe — the pure `net/SyncReconciler.kt` never cancels
+alarms on an empty/errored response; (2) a new append-only `alarm_events` outbox (`ReportWorker`
+drains+deletes events, not current state) so SNOOZED and every transition reach the server
+(dedupe on `(alarmId,event,atMillis)`); (3) heartbeat on app open; (4) a persisted `requestCode`
+column replaces `alarmId.hashCode()` (Room **v2**, `data/Migrations.kt` `MIGRATION_1_2`; schemas
+exported to `app/schemas/`; `AlarmScheduler.cancel(Int)`); (5) stuck-RANG → MISSED in `reArmAll`,
+gated on `RingService.isActive()` so a live ring is never mis-flagged; (6) HMAC fails closed once
+paired via `push/HmacGate.kt` + a persisted `hasEverPaired` latch. A `core/ReportTrigger` seam
+keeps `AlarmRepository` off WorkManager (JVM-testable). This is Track 1 of a two-track effort;
+Track 2 builds a separate Node/TS **Otto server** (WhatsApp + Claude agent + FCM sender +
+register/report/sync/heartbeat endpoints) — see the approved plan referenced in session notes.
+
 **One deferred item — Crashlytics:** the SDK couldn't be fetched in the build sandbox (its
 proxy blocks new `dl.google.com` downloads with an untrusted SSL root). The integration is
 ready: uncomment `implementation(libs.firebase.crashlytics)` in `app/build.gradle.kts` (the

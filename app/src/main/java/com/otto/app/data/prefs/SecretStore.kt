@@ -49,6 +49,8 @@ class SecretStore @Inject constructor(
         val packed = Base64.encodeToString(cipher.iv, Base64.NO_WRAP) +
             SEPARATOR + Base64.encodeToString(ciphertext, Base64.NO_WRAP)
         preferences.setHmacSecret(packed)
+        // Latch the pairing so the inbound trust gate fails closed from now on (fix #6).
+        preferences.setHasEverPaired(true)
     }
 
     /** Decrypt and return the secret, or null if unpaired / undecryptable. */
@@ -67,7 +69,11 @@ class SecretStore @Inject constructor(
         }
     }
 
-    suspend fun clearSecret() = preferences.setHmacSecret(null)
+    /** Explicit unpair: forget the secret AND reset the fail-closed latch to the bootstrap state. */
+    suspend fun clearSecret() {
+        preferences.setHmacSecret(null)
+        preferences.setHasEverPaired(false)
+    }
 
     private companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"

@@ -3,6 +3,7 @@ package com.otto.app.di
 import android.content.Context
 import androidx.room.Room
 import com.otto.app.data.AlarmDao
+import com.otto.app.data.MIGRATION_1_2
 import com.otto.app.data.OttoDatabase
 import dagger.Module
 import dagger.Provides
@@ -18,7 +19,9 @@ object DatabaseModule {
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): OttoDatabase =
-        Room.databaseBuilder(context, OttoDatabase::class.java, OttoDatabase.NAME).build()
+        Room.databaseBuilder(context, OttoDatabase::class.java, OttoDatabase.NAME)
+            .addMigrations(MIGRATION_1_2)
+            .build()
 
     @Provides
     fun provideAlarmDao(database: OttoDatabase): AlarmDao = database.alarmDao()

@@ -28,4 +28,29 @@ object AlarmTiming {
         nowMillis - triggerAtMillis <= graceWindowMillis -> FireDecision.FIRE_NOW
         else -> FireDecision.MISSED
     }
+
+    /**
+     * Recovery decision: whether a stored ARMED alarm should be re-registered with the OS
+     * (`true`) or recorded MISSED (`false`) after a reboot, time change, or force-stop restart.
+     * Uses the exact same grace window as [classify]/`arm()` so a within-grace trigger that
+     * elapsed while the phone was off still fires immediately instead of being dropped.
+     */
+    fun shouldReArm(
+        triggerAtMillis: Long,
+        nowMillis: Long,
+        graceWindowMillis: Long = OttoConstants.DEFAULT_GRACE_WINDOW_MILLIS,
+    ): Boolean = classify(triggerAtMillis, nowMillis, graceWindowMillis) != FireDecision.MISSED
+
+    /**
+     * Whether an alarm still marked RANG is old enough to be a candidate for stuck-ring cleanup.
+     * True once its trigger is older than [thresholdMillis]. This is only a time guard against a
+     * just-started ring; the authoritative "is it actually stuck?" check is process liveness
+     * (`RingService.isActive()`) at the [AlarmController.reArmAll] call site, since a genuine ring
+     * has no upper time bound.
+     */
+    fun isStuckRinging(
+        triggerAtMillis: Long,
+        nowMillis: Long,
+        thresholdMillis: Long = OttoConstants.STUCK_RANG_THRESHOLD_MILLIS,
+    ): Boolean = nowMillis - triggerAtMillis > thresholdMillis
 }

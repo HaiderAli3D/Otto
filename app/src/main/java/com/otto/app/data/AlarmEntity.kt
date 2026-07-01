@@ -1,5 +1,6 @@
 package com.otto.app.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -20,4 +21,12 @@ data class AlarmEntity(
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
     val reportedToServer: Boolean = false,
+    /**
+     * Stable, collision-free integer for this alarm's PendingIntent request code and ringing
+     * notification id (fix #4). Assigned once from a monotonic counter and preserved across
+     * re-arms, replacing the old `alarmId.hashCode()` which could collide. The SQL default 0 is
+     * only for the v1→v2 migration backfill; live rows always get a real value from
+     * `AlarmDao.nextRequestCode()`.
+     */
+    @ColumnInfo(defaultValue = "0") val requestCode: Int = 0,
 )

@@ -38,9 +38,13 @@ class RingService : Service() {
             ACTION_RING -> {
                 val alarmId = intent.getStringExtra(OttoConstants.EXTRA_ALARM_ID).orEmpty()
                 val label = intent.getStringExtra(EXTRA_LABEL).orEmpty()
-                goForeground(alarmId, label)
+                val requestCode = intent.getIntExtra(OttoConstants.EXTRA_REQUEST_CODE, 0)
+                // Mark the ring live in this process so recovery code doesn't mistake a long,
+                // genuinely-sounding alarm for one stuck after a mid-ring kill (see isActive()).
+                active = true
+                goForeground(alarmId, label, requestCode)
                 // Replace the receiver's launcher notification with our foreground one.
-                if (alarmId.isNotEmpty()) notifications.cancel(alarmId)
+                if (alarmId.isNotEmpty()) notifications.cancel(requestCode)
                 if (!ringing) {
                     ringer.start()
                     ringing = true
@@ -54,8 +58,8 @@ class RingService : Service() {
                     if (next == null) {
                         stopRinging()
                     } else {
-                        notifications.cancel(next.alarmId)
-                        goForeground(next.alarmId, next.label)
+                        notifications.cancel(next.requestCode)
+                        goForeground(next.alarmId, next.label, next.requestCode)
                     }
                 }
             }
@@ -63,12 +67,12 @@ class RingService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun goForeground(alarmId: String, label: String) {
+    private fun goForeground(alarmId: String, label: String, requestCode: Int) {
         try {
             ServiceCompat.startForeground(
                 this,
                 FOREGROUND_ID,
-                notifications.buildRinging(alarmId, label),
+                notifications.buildRinging(alarmId, label, requestCode),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
             )
         } catch (t: Throwable) {
@@ -77,6 +81,7 @@ class RingService : Service() {
     }
 
     private fun stopRinging() {
+        active = false
         if (ringing) {
             ringer.stop()
             ringing = false
@@ -87,6 +92,7 @@ class RingService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        active = false
         if (ringing) {
             ringer.stop()
             ringing = false
@@ -101,12 +107,22 @@ class RingService : Service() {
         private const val ACTION_REFRESH = "com.otto.app.ring.ACTION_REFRESH"
         const val EXTRA_LABEL = RingActivity.EXTRA_LABEL
 
+        // Process-wide: true while a ring is sounding in THIS process. Resets to false on any cold
+        // start (process death from boot/force-stop), which is exactly how recovery tells a ring
+        // that was killed mid-play (stuck RANG → reclassify) from one still live (leave it alone).
+        @Volatile
+        private var active = false
+
+        /** Whether a ring is currently sounding in this process. */
+        fun isActive(): Boolean = active
+
         /** Ensure the ring is sounding for [alarmId] (idempotent). */
-        fun ring(context: Context, alarmId: String, label: String) {
+        fun ring(context: Context, alarmId: String, label: String, requestCode: Int) {
             val intent = Intent(context, RingService::class.java).apply {
                 action = ACTION_RING
                 putExtra(OttoConstants.EXTRA_ALARM_ID, alarmId)
                 putExtra(EXTRA_LABEL, label)
+                putExtra(OttoConstants.EXTRA_REQUEST_CODE, requestCode)
             }
             ContextCompat.startForegroundService(context, intent)
         }

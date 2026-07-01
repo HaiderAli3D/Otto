@@ -41,6 +41,8 @@ class MainActivity : ComponentActivity() {
         RegistrationWorker.enqueue(this)
         // Reconcile with the server on open (also part of force-stop recovery).
         SyncWorker.enqueue(this)
+        // Report a heartbeat on app open as well as on PING (spec.md §7.4). No-ops on placeholder URL.
+        HeartbeatWorker.enqueue(this)
         setContent {
             OttoTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()

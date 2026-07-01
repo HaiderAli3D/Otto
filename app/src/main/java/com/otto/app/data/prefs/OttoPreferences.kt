@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 import javax.inject.Inject
@@ -33,6 +34,7 @@ class OttoPreferences @Inject constructor(
         val SERVER_URL_OVERRIDE = stringPreferencesKey("server_url_override")
         val BATTERY_PROMPT_SHOWN = booleanPreferencesKey("battery_prompt_shown")
         val HMAC_SECRET = stringPreferencesKey("hmac_secret")
+        val HAS_EVER_PAIRED = booleanPreferencesKey("has_ever_paired")
     }
 
     /** Stable, app-generated device id. Until M5 pairing provisions a server-side id, this
@@ -87,5 +89,19 @@ class OttoPreferences @Inject constructor(
         context.ottoDataStore.edit { prefs ->
             if (packed == null) prefs.remove(Keys.HMAC_SECRET) else prefs[Keys.HMAC_SECRET] = packed
         }
+    }
+
+    /**
+     * Latches true the first time a pairing secret is stored and stays true across a decrypt
+     * failure or an expired secret — so the FCM trust gate fails closed once paired (fix #6). An
+     * explicit unpair ([SecretStore.clearSecret]) resets it to the pre-pairing bootstrap state.
+     */
+    val hasEverPaired: Flow<Boolean> =
+        context.ottoDataStore.data.map { it[Keys.HAS_EVER_PAIRED] ?: false }
+
+    suspend fun getHasEverPaired(): Boolean = hasEverPaired.first()
+
+    suspend fun setHasEverPaired(value: Boolean) {
+        context.ottoDataStore.edit { it[Keys.HAS_EVER_PAIRED] = value }
     }
 }

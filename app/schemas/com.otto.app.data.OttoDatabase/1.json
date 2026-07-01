@@ -1,0 +1,32 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "b1a5e0c0d1e2f3a4b5c6d7e8f9a0b1c2",
+    "entities": [
+      {
+        "tableName": "alarms",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`alarmId` TEXT NOT NULL, `triggerAtMillis` INTEGER NOT NULL, `label` TEXT NOT NULL, `state` TEXT NOT NULL, `allowWhileIdle` INTEGER NOT NULL, `snoozeCount` INTEGER NOT NULL, `createdAtMillis` INTEGER NOT NULL, `updatedAtMillis` INTEGER NOT NULL, `reportedToServer` INTEGER NOT NULL, PRIMARY KEY(`alarmId`))",
+        "fields": [
+          { "fieldPath": "alarmId", "columnName": "alarmId", "affinity": "TEXT", "notNull": true },
+          { "fieldPath": "triggerAtMillis", "columnName": "triggerAtMillis", "affinity": "INTEGER", "notNull": true },
+          { "fieldPath": "label", "columnName": "label", "affinity": "TEXT", "notNull": true },
+          { "fieldPath": "state", "columnName": "state", "affinity": "TEXT", "notNull": true },
+          { "fieldPath": "allowWhileIdle", "columnName": "allowWhileIdle", "affinity": "INTEGER", "notNull": true },
+          { "fieldPath": "snoozeCount", "columnName": "snoozeCount", "affinity": "INTEGER", "notNull": true },
+          { "fieldPath": "createdAtMillis", "columnName": "createdAtMillis", "affinity": "INTEGER", "notNull": true },
+          { "fieldPath": "updatedAtMillis", "columnName": "updatedAtMillis", "affinity": "INTEGER", "notNull": true },
+          { "fieldPath": "reportedToServer", "columnName": "reportedToServer", "affinity": "INTEGER", "notNull": true }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": ["alarmId"]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b1a5e0c0d1e2f3a4b5c6d7e8f9a0b1c2')"
+    ]
+  }
+}

@@ -29,7 +29,7 @@ class AlarmSchedulerImpl @Inject constructor(
     private val alarmManager: AlarmManager = context.getSystemService(AlarmManager::class.java)
 
     override fun arm(alarm: AlarmEntity) {
-        val requestCode = AlarmRequestCodes.forAlarm(alarm.alarmId)
+        val requestCode = alarm.requestCode
 
         val operation = PendingIntent.getBroadcast(
             context,
@@ -54,8 +54,7 @@ class AlarmSchedulerImpl @Inject constructor(
         OttoLog.d("Armed ${alarm.alarmId} @ ${alarm.triggerAtMillis} (rc=$requestCode)")
     }
 
-    override fun cancel(alarmId: String) {
-        val requestCode = AlarmRequestCodes.forAlarm(alarmId)
+    override fun cancel(requestCode: Int) {
         // Must rebuild a PendingIntent equal to the armed one (extras are ignored in
         // matching; action + component must match).
         val operation = PendingIntent.getBroadcast(
@@ -68,7 +67,7 @@ class AlarmSchedulerImpl @Inject constructor(
         )
         alarmManager.cancel(operation)
         operation.cancel()
-        OttoLog.d("Cancelled $alarmId (rc=$requestCode)")
+        OttoLog.d("Cancelled alarm (rc=$requestCode)")
     }
 
     override fun canScheduleExact(): Boolean =

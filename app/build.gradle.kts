@@ -46,6 +46,13 @@ android {
         }
     }
 
+    // MigrationTestHelper loads the exported Room schemas from androidTest assets.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDirs(files("$projectDir/schemas"))
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -58,6 +65,11 @@ kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+// Export the Room schema so migrations (e.g. MIGRATION_1_2) can be diffed and tested.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -113,4 +125,11 @@ dependencies {
     // Unit tests
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // Instrumentation tests (androidTest — run on a device/emulator, e.g. MigrationTest)
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.room.testing)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
 }

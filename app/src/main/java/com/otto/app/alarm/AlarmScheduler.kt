@@ -7,11 +7,11 @@ import com.otto.app.data.AlarmEntity
  * the system — it never touches Room. Arming is idempotent per alarmId.
  */
 interface AlarmScheduler {
-    /** Register (or replace) an exact alarm-clock alarm for [alarm]. */
+    /** Register (or replace) an exact alarm-clock alarm for [alarm], keyed by its requestCode. */
     fun arm(alarm: AlarmEntity)
 
-    /** Cancel any registered alarm for [alarmId]. No-op if none exists. */
-    fun cancel(alarmId: String)
+    /** Cancel the registered alarm with [requestCode]. No-op if none exists. */
+    fun cancel(requestCode: Int)
 
     /** Whether the OS currently allows scheduling exact alarms. */
     fun canScheduleExact(): Boolean

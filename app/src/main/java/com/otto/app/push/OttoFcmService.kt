@@ -38,14 +38,25 @@ class OttoFcmService : FirebaseMessagingService() {
     // background coroutine ran setAlarmClock() — dropping the alarm. The work is a fast DB
     // upsert + schedule, and we are already on a Firebase background thread (not main).
     private fun execute(data: Map<String, String>, command: FcmCommand) = runBlocking {
-        // HMAC gate: once a secret is provisioned (pairing), reject any unsigned/forged command.
-        // Before pairing there is no secret, so commands are accepted unverified (M2 testing).
+        // Inbound trust gate — "fail closed once paired" (fix #6). Before the device has ever been
+        // paired we accept unsigned commands to bootstrap; once paired, only a valid signature runs,
+        // so a leaked FCM token (or a secret that later fails to decrypt) can't arm alarms.
         val secret = secretStore.getSecret()
+        val sigValid = secret != null && HmacVerifier.verify(data, secret)
+        if (!HmacGate.shouldExecute(
+                hasSecret = secret != null,
+                sigValid = sigValid,
+                hasEverPaired = preferences.getHasEverPaired(),
+            )
+        ) {
+            OttoLog.w(
+                if (secret != null) "Dropping command — HMAC verification failed"
+                else "Dropping unsigned command — device is paired (no usable secret)",
+            )
+            return@runBlocking
+        }
         if (secret == null) {
             OttoLog.w("No HMAC secret provisioned; accepting command unverified (pair to enable)")
-        } else if (!HmacVerifier.verify(data, secret)) {
-            OttoLog.w("Dropping command — HMAC verification failed")
-            return@runBlocking
         }
         try {
             when (command) {

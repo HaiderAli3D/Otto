@@ -8,7 +8,6 @@ import android.content.Intent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.otto.app.R
-import com.otto.app.alarm.AlarmRequestCodes
 import com.otto.app.core.OttoConstants
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -28,18 +27,19 @@ class AlarmNotifications @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     /** Build the full-screen ring notification for an alarm (used to post and to go foreground). */
-    fun buildRinging(alarmId: String, label: String): Notification {
+    fun buildRinging(alarmId: String, label: String, requestCode: Int): Notification {
         NotificationChannels.ensureCreated(context)
 
         val intent = Intent(context, RingActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
             putExtra(OttoConstants.EXTRA_ALARM_ID, alarmId)
             putExtra(RingActivity.EXTRA_LABEL, label)
+            putExtra(OttoConstants.EXTRA_REQUEST_CODE, requestCode)
         }
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         val pendingIntent = PendingIntent.getActivity(
             context,
-            AlarmRequestCodes.forAlarm(alarmId),
+            requestCode,
             intent,
             flags,
         )
@@ -61,12 +61,12 @@ class AlarmNotifications @Inject constructor(
     // POST_NOTIFICATIONS is surfaced and requested in the permissions panel; if it is not
     // granted, notify() is a safe no-op. Suppress the lint check rather than guard here.
     @SuppressLint("MissingPermission")
-    fun postRinging(alarmId: String, label: String) {
+    fun postRinging(alarmId: String, label: String, requestCode: Int) {
         NotificationManagerCompat.from(context)
-            .notify(AlarmRequestCodes.notificationId(alarmId), buildRinging(alarmId, label))
+            .notify(requestCode, buildRinging(alarmId, label, requestCode))
     }
 
-    fun cancel(alarmId: String) {
-        NotificationManagerCompat.from(context).cancel(AlarmRequestCodes.notificationId(alarmId))
+    fun cancel(requestCode: Int) {
+        NotificationManagerCompat.from(context).cancel(requestCode)
     }
 }
