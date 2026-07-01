@@ -72,11 +72,11 @@ export async function runAgentTurn(params: { waUserId: string; device: Device; t
 
   try {
     const reply = await runLoop(device, history)
-    saveSession(waUserId, history)
+    saveSession(waUserId, device.deviceId, history)
     return reply
   } catch (err) {
     log.error({ err, waUserId }, 'agent turn failed; resetting session')
-    saveSession(waUserId, []) // clean slate — next message starts fresh instead of re-failing
+    saveSession(waUserId, device.deviceId, []) // clean slate — next message starts fresh instead of re-failing
     return 'Sorry — I hit a snag. Please try that again.'
   }
 }

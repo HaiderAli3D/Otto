@@ -16,12 +16,12 @@ export function loadSession(waUserId: string): Msg[] {
   }
 }
 
-export function saveSession(waUserId: string, messages: Msg[]): void {
+export function saveSession(waUserId: string, deviceId: string | null, messages: Msg[]): void {
   // Always persist a valid leading shape so a long, tool-heavy thread can't poison itself.
   const json = JSON.stringify(trimToValidStart(messages))
   const now = Date.now()
   db.insert(sessions)
-    .values({ waUserId, deviceId: null, messages: json, updatedAt: now })
-    .onConflictDoUpdate({ target: sessions.waUserId, set: { messages: json, updatedAt: now } })
+    .values({ waUserId, deviceId, messages: json, updatedAt: now })
+    .onConflictDoUpdate({ target: sessions.waUserId, set: { deviceId, messages: json, updatedAt: now } })
     .run()
 }
