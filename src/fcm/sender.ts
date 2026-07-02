@@ -24,13 +24,19 @@ export async function sendData(token: string, data: Record<string, string>): Pro
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(message),
+        // Bound the call so a black-holed FCM connection can't hang an agent turn / scheduler tick
+        // for undici's ~5-minute default.
+        signal: AbortSignal.timeout(15_000),
       },
     )
     const body = await res.text()
     if (res.ok) return { ok: true }
-    // 404 / UNREGISTERED / INVALID_ARGUMENT ⇒ the token is dead; the caller should clear it so the
-    // app re-registers on next open (OttoFcmService.onNewToken).
-    const unregistered = res.status === 404 || /UNREGISTERED|INVALID_ARGUMENT/i.test(body)
+    // Only a genuinely dead token should clear the registration. FCM signals that with
+    // UNREGISTERED / NOT_FOUND (or a 404 on the token resource). INVALID_ARGUMENT is deliberately
+    // NOT treated as dead — it also fires for request problems like an over-4KB data payload (the
+    // alarm label is model-generated), and clearing a working token there would silently kill all
+    // future delivery until the app is reopened.
+    const unregistered = res.status === 404 || /UNREGISTERED|registration-token-not-registered|NOT_FOUND/i.test(body)
     log.warn({ status: res.status, unregistered }, 'FCM send failed')
     return { ok: false, status: res.status, unregistered, body }
   } catch (err) {

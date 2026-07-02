@@ -96,8 +96,10 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       }
     }
     case 'cancel_alarm': {
-      await cancelAlarm(device, String(a.alarmId))
-      return { cancelled: true }
+      const delivered = await cancelAlarm(device, String(a.alarmId))
+      // delivered=false means the DB row is cancelled but the CANCEL push didn't reach the phone
+      // (stale/absent token); the model should warn the owner the alarm may still ring.
+      return { cancelled: true, delivered }
     }
     case 'list_alarms': {
       return {
