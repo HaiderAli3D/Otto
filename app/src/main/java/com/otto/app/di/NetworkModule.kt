@@ -1,6 +1,7 @@
 package com.otto.app.di
 
 import com.otto.app.BuildConfig
+import com.otto.app.net.DeviceAuthInterceptor
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -23,12 +24,13 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    fun provideOkHttpClient(): OkHttpClient {
+    fun provideOkHttpClient(deviceAuth: DeviceAuthInterceptor): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             // BASIC only (request/response line) so the token in the body is never logged.
             level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
         }
         return OkHttpClient.Builder()
+            .addInterceptor(deviceAuth)
             .addInterceptor(logging)
             .build()
     }
