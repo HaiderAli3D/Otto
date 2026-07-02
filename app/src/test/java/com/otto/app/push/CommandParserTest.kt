@@ -78,6 +78,24 @@ class CommandParserTest {
     }
 
     @Test
+    fun unsupportedVersion_isIgnored() {
+        val result = CommandParser.parse(
+            mapOf("v" to "2", "type" to "ARM_ALARM", "alarmId" to "alm_1", "triggerAtMillis" to "100"),
+        )
+        assertTrue(result is ParseResult.Ignored)
+        assertTrue((result as ParseResult.Ignored).reason.contains("version"))
+    }
+
+    @Test
+    fun missingVersion_stillParses() {
+        // Back-compat: early payloads omitted `v`; they must keep working.
+        val result = CommandParser.parse(
+            mapOf("type" to "ARM_ALARM", "alarmId" to "alm_1", "triggerAtMillis" to "100"),
+        )
+        assertTrue(result is ParseResult.Parsed)
+    }
+
+    @Test
     fun unknownFields_areTolerated() {
         val result = CommandParser.parse(
             mapOf(

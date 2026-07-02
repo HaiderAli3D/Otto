@@ -14,6 +14,13 @@ object CommandParser {
     private const val DEFAULT_LABEL = "Alarm"
 
     fun parse(data: Map<String, String>): ParseResult {
+        // An absent `v` stays accepted (back-compat with early payloads); an explicit mismatch is
+        // a future-schema message this build can't be trusted to interpret, so drop it.
+        val version = data["v"]
+        if (version != null && version != SUPPORTED_VERSION) {
+            return ParseResult.Ignored("unsupported version $version (supported: $SUPPORTED_VERSION)")
+        }
+
         val type = data["type"]?.takeIf { it.isNotBlank() }
             ?: return ParseResult.Invalid("missing type")
 
