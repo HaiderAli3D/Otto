@@ -50,9 +50,19 @@ async function runLoop(device: Device, history: Msg[]): Promise<string> {
   }
 
   // Step cap reached still mid-tool-use: the last message is a user tool_result turn. Make one final
-  // call WITHOUT tools so the model must answer with text, leaving history ending on an assistant
-  // turn (never a dangling tool_result). Prevents the "two user turns in a row" poisoning.
-  const res = await client.messages.create({ model, max_tokens: MAX_TOKENS, system, messages: history })
+  // call that forbids further tool use (tool_choice: none) so the model must answer with text,
+  // leaving history ending on an assistant turn (never a dangling tool_result). `tools` MUST stay
+  // defined here — the Anthropic API rejects (400) any request whose messages contain
+  // tool_use/tool_result blocks without a tools parameter, which would otherwise wipe the whole
+  // session via runAgentTurn's catch.
+  const res = await client.messages.create({
+    model,
+    max_tokens: MAX_TOKENS,
+    system,
+    tools,
+    tool_choice: { type: 'none' },
+    messages: history,
+  })
   history.push({ role: 'assistant', content: res.content })
   return extractText(res.content) || 'Done.'
 }
