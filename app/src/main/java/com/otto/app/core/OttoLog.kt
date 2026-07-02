@@ -1,19 +1,25 @@
 package com.otto.app.core
 
 import android.util.Log
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 import com.otto.app.BuildConfig
 
 /**
  * Thin, structured logging facade. One tag, explicit levels, debug/info stripped from release.
  *
- * Crashlytics breadcrumb/non-fatal forwarding is intentionally wired here in a single place
- * (see the commented `record`/`breadcrumb` hooks) so enabling it is a one-file change once the
- * `firebase-crashlytics` dependency can be fetched (see CLAUDE.md / build notes).
+ * warn/error are also forwarded to Crashlytics as breadcrumbs (warn) and non-fatals (error) so a
+ * "why didn't it ring" trail survives even when nobody is watching logcat. Forwarding is wrapped
+ * in runCatching and lazily resolves the SDK, so a missing/unconfigured Crashlytics can never
+ * crash the app. Auto-init reads app/google-services.json.
  *
  * Never pass secrets or full tokens — use [redact] for any token-like value.
  */
 object OttoLog {
     private const val TAG = "Otto"
+
+    private val crashlytics: FirebaseCrashlytics? by lazy {
+        runCatching { FirebaseCrashlytics.getInstance() }.getOrNull()
+    }
 
     fun d(message: String) {
         if (BuildConfig.DEBUG) Log.d(TAG, message)
@@ -28,10 +34,18 @@ object OttoLog {
 
     fun w(message: String, throwable: Throwable? = null) {
         Log.w(TAG, message, throwable)
+        runCatching {
+            crashlytics?.log("W/$TAG: $message")
+            if (throwable != null) crashlytics?.recordException(throwable)
+        }
     }
 
     fun e(message: String, throwable: Throwable? = null) {
         Log.e(TAG, message, throwable)
+        runCatching {
+            crashlytics?.log("E/$TAG: $message")
+            crashlytics?.recordException(throwable ?: RuntimeException(message))
+        }
     }
 
     /** Reduces a token/secret to a short, non-reversible hint safe for logs. */

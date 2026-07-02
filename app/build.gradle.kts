@@ -129,10 +129,10 @@ dependencies {
     // Firebase Cloud Messaging (versions pinned by the BOM).
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
-    // Crashlytics (M5): the catalog entry `libs.firebase.crashlytics` is ready; add it here
-    // once the build network can reach dl.google.com (this sandbox's proxy blocks new Google
-    // artifact downloads). No Gradle plugin is needed for unminified debug builds.
-    // implementation(libs.firebase.crashlytics)
+    // Crashlytics (M5): crash + non-fatal reporting. No Gradle plugin is needed while R8/minify
+    // is off (the plugin only uploads the R8 mapping file, and there is none). OttoLog forwards
+    // warn/error here; auto-init reads app/google-services.json.
+    implementation(libs.firebase.crashlytics)
 
     // Hilt — note TWO compilers on ksp: Dagger's, plus androidx's (generates HiltWorkerFactory)
     implementation(libs.hilt.android)

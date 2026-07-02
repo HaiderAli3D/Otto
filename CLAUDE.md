@@ -45,11 +45,12 @@ The **Otto server** now exists as a sibling repo at `../otto-server` (Node/TS, S
 `SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/Anthropic/Google/hosting/pairing).
 Still deferred: Crashlytics (needs `dl.google.com` + console) and R8 minify.
 
-**One deferred item — Crashlytics:** the SDK couldn't be fetched in the build sandbox (its
-proxy blocks new `dl.google.com` downloads with an untrusted SSL root). The integration is
-ready: uncomment `implementation(libs.firebase.crashlytics)` in `app/build.gradle.kts` (the
-catalog entry exists) and re-add the breadcrumb/non-fatal forwarding in `OttoLog`. No Gradle
-plugin is needed for unminified debug builds. See `spec.md` §13.
+**Crashlytics — now enabled.** `implementation(libs.firebase.crashlytics)` is active in
+`app/build.gradle.kts` and `OttoLog.w/e` forward breadcrumbs/non-fatals to
+`FirebaseCrashlytics.getInstance()` (lazily resolved, `runCatching`-guarded so a missing/unconfigured
+SDK can never crash the app). No Gradle plugin is used (none is needed while R8/minify is off — the
+plugin only uploads the R8 mapping file). Actual crash upload should be confirmed once on a real
+device against the Firebase console. See `spec.md` §13.
 
 ## Stack (do not substitute — see `spec.md` §4)
 
