@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
-import { asc, eq } from 'drizzle-orm'
+import { asc, eq, isNotNull } from 'drizzle-orm'
 import { config } from '../config.js'
 import { db } from '../db/client.js'
-import { devices } from '../db/schema.js'
+import { devices, processedMessages } from '../db/schema.js'
 
 export type Device = typeof devices.$inferSelect
 
@@ -71,4 +71,22 @@ export function deviceForWhatsapp(waNumber: string): Device | undefined {
   const linked = db.select().from(devices).where(eq(devices.whatsappNumber, waNumber)).get()
   if (linked) return linked
   return db.select().from(devices).orderBy(asc(devices.createdAt)).limit(1).get()
+}
+
+/** True iff any device has already claimed a WhatsApp number (trust-on-first-use gate). */
+export function anyWhatsappLinked(): boolean {
+  return db.select().from(devices).where(isNotNull(devices.whatsappNumber)).get() !== undefined
+}
+
+/**
+ * Record a WhatsApp message id as processed. Returns true if it was NEW (safe to handle), false
+ * if already seen — Meta redelivers at-least-once, so this makes inbound handling idempotent.
+ */
+export function claimWhatsappMessage(wamid: string): boolean {
+  const res = db
+    .insert(processedMessages)
+    .values({ wamid, receivedAt: Date.now() })
+    .onConflictDoNothing()
+    .run()
+  return res.changes > 0
 }

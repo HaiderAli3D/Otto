@@ -77,6 +77,11 @@ export function ensureSchema(): void {
       refresh_token TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS processed_messages (
+      wamid TEXT PRIMARY KEY,
+      received_at INTEGER NOT NULL
+    );
   `)
 
   // Additive columns for databases created before the column existed (CREATE IF NOT EXISTS

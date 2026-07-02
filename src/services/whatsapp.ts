@@ -64,12 +64,23 @@ export async function sendText(toWaNumber: string, text: string): Promise<boolea
   return false
 }
 
+/** Digits-only form of a WhatsApp number, for allowlist comparison across "+44 …" vs "44…". */
+export function normalizeWaNumber(n: string): string {
+  return n.replace(/\D/g, '')
+}
+
+/** One inbound message: text carries `text`, any other real message type carries text=null. */
+export type InboundMessage = { id: string; from: string; type: string; text: string | null }
+
 /**
  * Safely walk the WhatsApp webhook payload (`body.entry[].changes[].value.messages[]`) and
- * collect inbound text messages. Defensive against any missing/misshapen level; returns [].
+ * collect inbound messages (with their wamid for dedupe). Text messages carry their body; other
+ * real message types (audio/image/…) are returned with text=null so the caller can send an
+ * "only text" fallback. Status/read receipts have no `messages[]` and are naturally skipped.
+ * Defensive against any missing/misshapen level; returns [].
  */
-export function parseInboundTextMessages(body: unknown): Array<{ from: string; text: string }> {
-  const out: Array<{ from: string; text: string }> = []
+export function parseInboundMessages(body: unknown): InboundMessage[] {
+  const out: InboundMessage[] = []
   const entries = (body as { entry?: unknown[] } | null | undefined)?.entry
   if (!Array.isArray(entries)) return out
   for (const entry of entries) {
@@ -79,10 +90,13 @@ export function parseInboundTextMessages(body: unknown): Array<{ from: string; t
       const messages = (change as { value?: { messages?: unknown[] } } | null | undefined)?.value?.messages
       if (!Array.isArray(messages)) continue
       for (const message of messages) {
-        const msg = message as { type?: string; from?: string; text?: { body?: string } } | null | undefined
-        if (msg?.type === 'text' && typeof msg.from === 'string' && typeof msg.text?.body === 'string') {
-          out.push({ from: msg.from, text: msg.text.body })
-        }
+        const msg = message as
+          | { id?: string; type?: string; from?: string; text?: { body?: string } }
+          | null
+          | undefined
+        if (!msg || typeof msg.from !== 'string' || typeof msg.type !== 'string' || typeof msg.id !== 'string') continue
+        const text = msg.type === 'text' && typeof msg.text?.body === 'string' ? msg.text.body : null
+        out.push({ id: msg.id, from: msg.from, type: msg.type, text })
       }
     }
   }

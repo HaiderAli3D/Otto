@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { IANAZone } from 'luxon'
 import { z } from 'zod'
 
 // Load a local .env when present (no-op in prod, where env is injected by the host).
@@ -13,7 +14,10 @@ const raw = z
     PORT: z.coerce.number().default(3000),
     PUBLIC_ORIGIN: z.string().url().default('http://localhost:3000'),
     DATABASE_PATH: z.string().default('./data/otto.sqlite'),
-    DEFAULT_TIMEZONE: z.string().default('UTC'),
+    DEFAULT_TIMEZONE: z
+      .string()
+      .default('UTC')
+      .refine((z) => IANAZone.isValidZone(z), (z) => ({ message: `DEFAULT_TIMEZONE "${z}" is not a valid IANA zone` })),
     LOG_LEVEL: z.string().default('info'),
 
     // FCM (required — the whole point is pushing to the phone).
@@ -28,6 +32,9 @@ const raw = z
     META_VERIFY_TOKEN: z.string().optional(),
     META_WA_PHONE_NUMBER_ID: z.string().optional(),
     META_WA_ACCESS_TOKEN: z.string().optional(),
+    // Comma-separated allowlist of owner WhatsApp numbers (any format; compared digits-only).
+    // When unset, the server trusts the first number that messages it and rejects others.
+    OWNER_WA_NUMBERS: z.string().optional(),
 
     // Google Calendar/Tasks (optional).
     GOOGLE_OAUTH_CLIENT_ID: z.string().optional(),
@@ -92,6 +99,11 @@ export const config = {
         accessToken: raw.META_WA_ACCESS_TOKEN!,
       }
     : null,
+  // Digits-only owner numbers (e.g. "+44 7700 900000" → "447700900000"); empty = trust-on-first-use.
+  ownerWaNumbers: (raw.OWNER_WA_NUMBERS ?? '')
+    .split(',')
+    .map((n) => n.replace(/\D/g, ''))
+    .filter((n) => n.length > 0),
   google: googleComplete
     ? {
         clientId: raw.GOOGLE_OAUTH_CLIENT_ID!,

@@ -69,3 +69,9 @@ export const googleAccounts = sqliteTable('google_accounts', {
   refreshToken: text('refresh_token').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
+
+/** WhatsApp message ids already handled — Meta redelivers at-least-once, so we dedupe on wamid. */
+export const processedMessages = sqliteTable('processed_messages', {
+  wamid: text('wamid').primaryKey(),
+  receivedAt: integer('received_at').notNull(),
+})
