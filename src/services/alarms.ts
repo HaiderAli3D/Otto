@@ -1,4 +1,4 @@
-import { and, eq, gt, isNotNull } from 'drizzle-orm'
+import { and, eq, gt, isNotNull, sql } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { alarmEvents, alarms } from '../db/schema.js'
 import { armData, cancelData } from '../fcm/commands.js'
@@ -80,11 +80,12 @@ export async function armAlarm(
     })
     .run()
 
-  const sent = await pushArm(device, { alarmId: params.alarmId, triggerAtMillis: params.triggerAtMillis, label: params.label, allowWhileIdle })
   // Arm-ack watchdog: FCM has no delivery receipt, so if no ARMED event report arrives within the
-  // timeout we resend (see scheduler). Replace any prior watchdog for this alarm.
+  // timeout we resend (see scheduler). Enqueue the durable watchdog BEFORE awaiting the push so a
+  // crash/SIGTERM mid-send still leaves a retry behind. Replace any prior watchdog for this alarm.
   cancelJobs('arm_ack', params.alarmId)
   enqueueJob('arm_ack', now + ARM_ACK_TIMEOUT_MS, { alarmId: params.alarmId, deviceId: device.deviceId, payload: { attempt: 1 } })
+  const sent = await pushArm(device, { alarmId: params.alarmId, triggerAtMillis: params.triggerAtMillis, label: params.label, allowWhileIdle })
   // Recurring series: schedule the advance backstop for this occurrence (event-driven advance in
   // recordEvent is the primary path; this covers a phone that never reports back).
   if (params.recurrence) {
@@ -147,9 +148,16 @@ export async function cancelAlarm(device: Device, alarmId: string): Promise<bool
   return res.ok
 }
 
+const STATE_EVENTS = ['ARMED', 'RANG', 'DISMISSED', 'CANCELLED', 'MISSED']
+
 /**
- * Record an event reported by the app (deduped on alarm,event,at) and advance alarm state. An
- * ARMED report is the delivery ack that cancels the watchdog.
+ * Record an event reported by the app and advance alarm state. Because the app's outbox retries
+ * at-least-once and reports can arrive out of order, we act on an event only when it is BOTH new
+ * (the dedupe insert actually happened) AND not older than the newest event already recorded for
+ * this alarm. A replayed or late-arriving ARMED must never resurrect a CANCELLED alarm or cancel
+ * the watchdog for a newer re-arm. An ARMED report is the delivery ack that cancels the watchdog;
+ * it may also carry the phone's current trigger time (e.g. after a snooze) which we adopt as
+ * authoritative so a later SYNC lists the alarm at its real time.
  */
 export function recordEvent(
   deviceId: string,
@@ -157,16 +165,36 @@ export function recordEvent(
   event: string,
   atMillis: number,
   appVersion: string | null,
+  triggerAtMillis?: number,
 ): void {
-  db.insert(alarmEvents)
+  // Newest event time already on record for this alarm, BEFORE inserting this one.
+  const prior = db
+    .select({ max: sql<number | null>`MAX(${alarmEvents.atMillis})` })
+    .from(alarmEvents)
+    .where(eq(alarmEvents.alarmId, alarmId))
+    .get()
+  const priorMax = prior?.max ?? null
+
+  const inserted = db
+    .insert(alarmEvents)
     .values({ alarmId, deviceId, event, atMillis, appVersion, receivedAt: Date.now() })
     .onConflictDoNothing()
     .run()
 
+  // Duplicate re-delivery (same alarm,event,at) → record only, never re-apply side effects.
+  if (inserted.changes === 0) return
+  // Genuinely new but stale (an older report landing after a newer one) → keep it for the audit
+  // trail but don't let it regress state or ack a newer arm.
+  if (priorMax !== null && atMillis < priorMax) return
+
   if (event === 'ARMED') cancelJobs('arm_ack', alarmId)
-  // SNOOZED is informational (the app re-arms and reports ARMED again); every other event is a
-  // real state the server should reflect.
-  if (['ARMED', 'RANG', 'DISMISSED', 'CANCELLED', 'MISSED'].includes(event)) {
-    db.update(alarms).set({ state: event, updatedAt: Date.now() }).where(eq(alarms.alarmId, alarmId)).run()
+  // SNOOZED is informational (the app re-arms and reports ARMED again); every other listed event
+  // is a real state the server should reflect.
+  if (STATE_EVENTS.includes(event)) {
+    const set: Partial<Alarm> = { state: event, updatedAt: Date.now() }
+    // Adopt the phone-reported trigger only on ARMED (snooze/re-arm moved it); other events keep
+    // the server's time.
+    if (event === 'ARMED' && typeof triggerAtMillis === 'number') set.triggerAtMillis = triggerAtMillis
+    db.update(alarms).set(set).where(eq(alarms.alarmId, alarmId)).run()
   }
 }

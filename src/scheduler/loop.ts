@@ -2,6 +2,8 @@ import { log } from '../lib/log.js'
 import { ARM_ACK_TIMEOUT_MS, advanceRecurrence, getAlarm, pushArm } from '../services/alarms.js'
 import { getDevice } from '../services/devices.js'
 import { deleteJob, dueJobs, rescheduleJob, type Job } from '../services/jobs.js'
+import { epochMillisToLocalHuman } from '../services/time.js'
+import { sendText } from '../services/whatsapp.js'
 
 const TICK_MS = 15_000
 const MAX_ARM_ACK_ATTEMPTS = 3
@@ -17,6 +19,14 @@ async function runJob(job: Job): Promise<void> {
       const nextAttempt = job.attempts + 1
       if (nextAttempt > MAX_ARM_ACK_ATTEMPTS) {
         log.warn({ alarmId: job.alarmId }, 'arm-ack: gave up after max attempts (device may be offline)')
+        // Tell the owner their confirmed alarm was never acked by the phone, if we can reach them.
+        if (device.whatsappNumber) {
+          const when = epochMillisToLocalHuman(alarm.triggerAtMillis, device.timezone)
+          await sendText(
+            device.whatsappNumber,
+            `⚠️ I couldn't confirm your alarm "${alarm.label}" (${when}) reached your phone. Open the Otto app to make sure it's set.`,
+          )
+        }
         return deleteJob(job.id)
       }
       log.info({ alarmId: job.alarmId, attempt: nextAttempt }, 'arm-ack: no ARMED report yet; resending')
@@ -45,11 +55,22 @@ async function runJob(job: Job): Promise<void> {
 
 /** In-process durable scheduler: polls the SQLite job queue and runs due jobs. */
 export function startScheduler(): void {
+  let running = false
   const tick = async (): Promise<void> => {
     for (const job of dueJobs(Date.now())) {
       await runJob(job).catch((e) => log.error({ err: e, jobId: job.id }, 'job failed'))
     }
   }
-  setInterval(() => void tick().catch((e) => log.error(e, 'scheduler tick error')), TICK_MS)
+  setInterval(() => {
+    // Skip if the previous tick is still running so a slow job (e.g. a stalled FCM send) can't
+    // let overlapping ticks re-read and double-process the same due jobs.
+    if (running) return
+    running = true
+    void tick()
+      .catch((e) => log.error(e, 'scheduler tick error'))
+      .finally(() => {
+        running = false
+      })
+  }, TICK_MS)
   log.info({ tickMs: TICK_MS }, 'Scheduler started')
 }

@@ -86,9 +86,15 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
   app.post('/alarms/:alarmId/events', async (req, reply) => {
     const { alarmId } = req.params as { alarmId: string }
     const body = z
-      .object({ deviceId: z.string(), event: z.string(), atMillis: z.number(), appVersion: z.string().optional() })
+      .object({
+        deviceId: z.string(),
+        event: z.string(),
+        atMillis: z.number(),
+        appVersion: z.string().optional(),
+        triggerAtMillis: z.number().optional(),
+      })
       .parse(req.body)
-    recordEvent(body.deviceId, alarmId, body.event, body.atMillis, body.appVersion ?? null)
+    recordEvent(body.deviceId, alarmId, body.event, body.atMillis, body.appVersion ?? null, body.triggerAtMillis)
     log.info({ alarmId, event: body.event }, 'Recorded alarm event')
     // A completed occurrence rolls its recurring series forward (no-op for one-shot alarms).
     // Fire-and-forget: the ack must not wait on an FCM push; the scheduler backstop covers loss.
