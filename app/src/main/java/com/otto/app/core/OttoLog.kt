@@ -4,7 +4,7 @@ import android.util.Log
 import com.otto.app.BuildConfig
 
 /**
- * Thin, structured logging facade. One tag, explicit levels, debug stripped from release.
+ * Thin, structured logging facade. One tag, explicit levels, debug/info stripped from release.
  *
  * Crashlytics breadcrumb/non-fatal forwarding is intentionally wired here in a single place
  * (see the commented `record`/`breadcrumb` hooks) so enabling it is a one-file change once the
@@ -20,8 +20,11 @@ object OttoLog {
     }
 
     fun i(message: String) {
-        Log.i(TAG, message)
+        if (BuildConfig.DEBUG) Log.i(TAG, message)
     }
+
+    // Policy: w/e stay on in release — on a sideloaded personal app, `adb logcat -s Otto` is the
+    // only "why didn't it ring" trail, and output is already secret-safe via [redact].
 
     fun w(message: String, throwable: Throwable? = null) {
         Log.w(TAG, message, throwable)
