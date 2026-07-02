@@ -49,7 +49,14 @@ class SyncWorker @AssistedInject constructor(
             }
             // Delegate the safety-critical arm/cancel decision to the pure, tested reconciler so a
             // 200 with an empty/unparseable body can never wipe the user's alarms (see fix #1).
-            when (val plan = SyncReconciler.reconcile(repository.getAllArmed(), response.body())) {
+            // Pass EVERY local alarm (so RANG/terminal rows aren't re-armed, AF2) and the pending
+            // outbox ids (so an in-flight snooze isn't cancelled, AF2).
+            val plan = SyncReconciler.reconcile(
+                local = repository.getAll(),
+                serverBody = response.body(),
+                pendingAlarmIds = repository.getPendingEventAlarmIds(),
+            )
+            when (plan) {
                 SyncPlan.Retry -> {
                     OttoLog.w("Sync response not authoritative (empty/unparseable body); alarms unchanged")
                     Result.retry()

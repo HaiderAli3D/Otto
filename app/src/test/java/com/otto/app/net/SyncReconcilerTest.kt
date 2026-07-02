@@ -29,7 +29,10 @@ class SyncReconcilerTest {
     @Test
     fun nullBody_isNotAuthoritative_retriesAndChangesNothing() {
         // A 200 with no parseable body must NEVER cancel alarms.
-        assertEquals(SyncPlan.Retry, SyncReconciler.reconcile(listOf(local("a")), serverBody = null))
+        assertEquals(
+            SyncPlan.Retry,
+            SyncReconciler.reconcile(listOf(local("a")), serverBody = null, pendingAlarmIds = emptySet()),
+        )
     }
 
     @Test
@@ -37,6 +40,7 @@ class SyncReconcilerTest {
         val plan = SyncReconciler.reconcile(
             local = listOf(local("a")),
             serverBody = AlarmSyncResponse(listOf(server("a"), server("b"))),
+            pendingAlarmIds = emptySet(),
         )
         plan as SyncPlan.Apply
         assertEquals(setOf("a", "b"), plan.toArm.map { it.alarmId }.toSet())
@@ -48,6 +52,7 @@ class SyncReconcilerTest {
         val plan = SyncReconciler.reconcile(
             local = listOf(local("a"), local("b")),
             serverBody = AlarmSyncResponse(listOf(server("a"))),
+            pendingAlarmIds = emptySet(),
         )
         plan as SyncPlan.Apply
         assertEquals(setOf("a"), plan.toArm.map { it.alarmId }.toSet())
@@ -60,6 +65,7 @@ class SyncReconcilerTest {
         val plan = SyncReconciler.reconcile(
             local = listOf(local("a")),
             serverBody = AlarmSyncResponse(listOf(server("a"), server("z", state = "CANCELLED"))),
+            pendingAlarmIds = emptySet(),
         )
         plan as SyncPlan.Apply
         assertEquals(setOf("a"), plan.toArm.map { it.alarmId }.toSet())
@@ -74,7 +80,62 @@ class SyncReconcilerTest {
         val plan = SyncReconciler.reconcile(
             local = listOf(local("a"), local("b")),
             serverBody = AlarmSyncResponse(alarms = emptyList()),
+            pendingAlarmIds = emptySet(),
         )
         assertEquals(SyncPlan.Retry, plan)
+    }
+
+    // --- AF2: don't re-arm rows whose local state is the newer truth; don't cancel pending ones ---
+
+    @Test
+    fun locallyTerminalAlarm_stillServerArmed_isNotReArmed() {
+        // The DISMISSED outbox event is still in flight, so the server keeps listing "a" as ARMED.
+        // Re-arming here would resurrect a finished alarm.
+        val plan = SyncReconciler.reconcile(
+            local = listOf(local("a", state = AlarmState.DISMISSED)),
+            serverBody = AlarmSyncResponse(listOf(server("a"))),
+            pendingAlarmIds = emptySet(),
+        )
+        plan as SyncPlan.Apply
+        assertTrue(plan.toArm.isEmpty())
+        assertTrue(plan.toCancelIds.isEmpty())
+    }
+
+    @Test
+    fun locallyRingingAlarm_stillServerArmed_isNotReArmed() {
+        val plan = SyncReconciler.reconcile(
+            local = listOf(local("a", state = AlarmState.RANG)),
+            serverBody = AlarmSyncResponse(listOf(server("a"))),
+            pendingAlarmIds = emptySet(),
+        )
+        plan as SyncPlan.Apply
+        assertTrue(plan.toArm.isEmpty())
+        assertTrue(plan.toCancelIds.isEmpty())
+    }
+
+    @Test
+    fun snoozedPendingAlarm_absentFromServer_isNotCancelled() {
+        // "b" is locally ARMED (freshly snoozed) with a pending outbox event the server hasn't
+        // applied, so the authoritative list omits it. That divergence is expected — keep it.
+        val plan = SyncReconciler.reconcile(
+            local = listOf(local("a"), local("b")),
+            serverBody = AlarmSyncResponse(listOf(server("a"))),
+            pendingAlarmIds = setOf("b"),
+        )
+        plan as SyncPlan.Apply
+        assertEquals(setOf("a"), plan.toArm.map { it.alarmId }.toSet())
+        assertTrue(plan.toCancelIds.isEmpty())
+    }
+
+    @Test
+    fun fullySyncedAlarm_absentFromServer_isCancelled() {
+        // "b" is locally ARMED with NO pending event — genuinely gone server-side, so cancel it.
+        val plan = SyncReconciler.reconcile(
+            local = listOf(local("a"), local("b")),
+            serverBody = AlarmSyncResponse(listOf(server("a"))),
+            pendingAlarmIds = emptySet(),
+        )
+        plan as SyncPlan.Apply
+        assertEquals(listOf("b"), plan.toCancelIds)
     }
 }

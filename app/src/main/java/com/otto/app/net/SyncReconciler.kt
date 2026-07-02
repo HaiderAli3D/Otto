@@ -35,11 +35,18 @@ object SyncReconciler {
     const val ARMED_STATE = "ARMED"
 
     /**
-     * @param local      the alarms currently ARMED on this device (from `repository.getAllArmed()`)
-     * @param serverBody the deserialized 200 body, or `null` when the 2xx response had no
-     *                   parseable body
+     * @param local           EVERY local alarm regardless of state (from `repository.getAll()`), so
+     *                        RANG/terminal rows are visible here and not mistaken for "absent".
+     * @param serverBody      the deserialized 200 body, or `null` when the 2xx response had no
+     *                        parseable body
+     * @param pendingAlarmIds ids with an undelivered outbox event (`repository.getPendingEventAlarmIds()`);
+     *                        their local/server divergence is expected, so they are never cancelled here.
      */
-    fun reconcile(local: List<AlarmEntity>, serverBody: AlarmSyncResponse?): SyncPlan {
+    fun reconcile(
+        local: List<AlarmEntity>,
+        serverBody: AlarmSyncResponse?,
+        pendingAlarmIds: Set<String>,
+    ): SyncPlan {
         // Fail-safe guard (the safety-critical decision): only a present, NON-EMPTY authoritative
         // list is trusted to drive cancellations. A null body (unparseable 200) or an empty list —
         // indistinguishable from a malformed `{}` given the DTO defaults — changes nothing and
@@ -49,10 +56,27 @@ object SyncReconciler {
         val serverArmed = serverBody?.alarms.orEmpty().filter { it.state == ARMED_STATE }
         if (serverArmed.isEmpty()) return SyncPlan.Retry
 
+        val localById = local.associateBy { it.alarmId }
+        // Arm a server-ARMED alarm only when its local row is ABSENT or itself ARMED. A locally
+        // RANG or terminal (DISMISSED/CANCELLED/MISSED) row is the app's newer truth on its way to
+        // the server via the outbox; re-arming it here would resurrect a finished alarm or re-ring
+        // one the user is mid-dismissing (AF2).
+        val toArm = serverArmed.filter { s ->
+            val localState = localById[s.alarmId]?.state
+            localState == null || localState == AlarmState.ARMED
+        }
+
         val serverIds = serverArmed.mapTo(HashSet()) { it.alarmId }
+        // Cancel a local ARMED alarm the server no longer lists — but never one with a pending
+        // outbox event (a snooze/new trigger the server hasn't applied yet); that divergence is
+        // expected and self-heals once the report is delivered (AF2).
         val toCancel = local
-            .filter { it.state == AlarmState.ARMED && it.alarmId !in serverIds }
+            .filter {
+                it.state == AlarmState.ARMED &&
+                    it.alarmId !in serverIds &&
+                    it.alarmId !in pendingAlarmIds
+            }
             .map { it.alarmId }
-        return SyncPlan.Apply(toArm = serverArmed, toCancelIds = toCancel)
+        return SyncPlan.Apply(toArm = toArm, toCancelIds = toCancel)
     }
 }
