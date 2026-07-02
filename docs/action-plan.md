@@ -1,3 +1,7 @@
+> **HISTORICAL DOCUMENT** — this is the pre-Track-1 planning snapshot. The Track-1 correctness
+> fixes it plans have since landed on `fix/app-correctness-track1`, so the test counts and
+> gap/status claims below are stale. For the current state of the app, see `CLAUDE.md`.
+
 # Otto — Action Plans: get to "fully installable & operational"
 
 Two plans in one file:
