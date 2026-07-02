@@ -26,6 +26,25 @@ async function main(): Promise<void> {
     },
     'Otto server up',
   )
+
+  // Graceful shutdown: on a deploy/restart, stop accepting new work and let in-flight requests
+  // (an agent turn arming an alarm) finish before the process exits, so we don't drop a reply or
+  // an arm mid-flight. fly.toml sends SIGINT with a kill_timeout grace period.
+  let closing = false
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      if (closing) return
+      closing = true
+      log.info({ signal }, 'Shutting down…')
+      app.close().then(
+        () => process.exit(0),
+        (err) => {
+          log.error({ err }, 'error during shutdown')
+          process.exit(1)
+        },
+      )
+    })
+  }
 }
 
 main().catch((err) => {

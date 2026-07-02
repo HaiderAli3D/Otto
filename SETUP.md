@@ -230,6 +230,14 @@ vars; if any is missing the webhook route stays unmounted.
    META_VERIFY_TOKEN=<any secret you choose>
    ```
 
+   **Also set your owner number** so only you can control the device. Anyone who messages the
+   business number reaches the agent otherwise; the allowlist locks it down (if you skip this,
+   the server trusts the first number that messages it and rejects the rest):
+
+   ```dotenv
+   OWNER_WA_NUMBERS=<your WhatsApp number, e.g. +447700900000>
+   ```
+
 5. **Configure the webhook.** Redeploy/restart the server so the `META_*` vars load (the
    `/whatsapp/webhook` route only mounts when all four are present). Then in the App Dashboard →
    **WhatsApp → Configuration → Webhook → Edit**:
@@ -328,6 +336,12 @@ device with **401**.
   self-heals. A full reinstall instead mints a fresh `deviceId`, which starts unlatched, so that
   path also self-heals — the old device row just goes stale.
 
+**WhatsApp sender allowlist (`OWNER_WA_NUMBERS`).** The webhook signature only proves Meta
+delivered the message — not who sent it. Set `OWNER_WA_NUMBERS` to your number(s) so a stranger
+who finds the business number can't drive the agent (set alarms, read your calendar). If unset,
+the server trusts the first number that ever messages it and rejects others, but the explicit
+allowlist is safer.
+
 **Beyond this** (optional, for the cautious): run the server on a private network (VPN/tailnet)
 so only your devices reach it at all, and keep `LOG_LEVEL=info` in production — logs redact
 secrets, signatures and tokens by design, but quieter is safer.
@@ -379,5 +393,6 @@ See [`.env.example`](./.env.example) for the full annotated list. Quick summary:
 | Firebase | `FIREBASE_SERVICE_ACCOUNT` | **Required** |
 | Claude | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Optional — enables the agent |
 | WhatsApp | `META_APP_SECRET`, `META_VERIFY_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_ACCESS_TOKEN` | Optional — set **all four** |
+| WhatsApp owner | `OWNER_WA_NUMBERS` | Optional but **recommended** — allowlist of your numbers |
 | Google | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Optional — set **both** |
 | Admin | `ADMIN_TOKEN` | **Required unless `PUBLIC_ORIGIN` is localhost** (the server refuses to boot without it) |
