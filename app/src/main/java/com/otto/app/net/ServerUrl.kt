@@ -14,8 +14,14 @@ import com.otto.app.core.OttoConstants
 object ServerUrl {
 
     /** The base URL the network stack should actually target. */
-    fun effective(override: String?, default: String, allowOverride: Boolean): String =
-        if (allowOverride && !override.isNullOrBlank()) override else default
+    fun effective(override: String?, default: String, allowOverride: Boolean): String {
+        val chosen = if (allowOverride && !override.isNullOrBlank()) override else default
+        // Retrofit's baseUrl() rejects a URL whose last path segment is non-empty (e.g. a tunnel
+        // subpath like https://x.trycloudflare.com/otto-server) with an IllegalArgumentException
+        // that would crash every worker before its try/catch. Normalising here — the one choke
+        // point — keeps the UI, placeholder gate, and Retrofit factory agreeing on the same URL.
+        return if (chosen.endsWith("/")) chosen else "$chosen/"
+    }
 
     /** True while [url] is still the built-in placeholder host; workers no-op in that case. */
     fun isPlaceholder(url: String): Boolean = url.contains(OttoConstants.PLACEHOLDER_SERVER_HOST)

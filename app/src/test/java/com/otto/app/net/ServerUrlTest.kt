@@ -28,6 +28,25 @@ class ServerUrlTest {
     }
 
     @Test
+    fun missingTrailingSlash_isAppended_onOverride() {
+        // A tunnel subpath without the trailing slash Retrofit requires (bug_002): baseUrl()
+        // throws IllegalArgumentException on any URL whose last path segment is non-empty.
+        assertEquals(
+            "https://foo.trycloudflare.com/otto-server/",
+            ServerUrl.effective("https://foo.trycloudflare.com/otto-server", default, allowOverride = true),
+        )
+    }
+
+    @Test
+    fun missingTrailingSlash_isAppended_onDefault() {
+        // A release SERVER_BASE_URL typed without the slash must be tolerated at runtime too.
+        assertEquals(
+            "https://otto.example.com/api/",
+            ServerUrl.effective(null, "https://otto.example.com/api", allowOverride = false),
+        )
+    }
+
+    @Test
     fun isPlaceholder_detectsPlaceholderHost() {
         assertTrue(ServerUrl.isPlaceholder(default))
         assertFalse(ServerUrl.isPlaceholder(override))

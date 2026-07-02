@@ -12,9 +12,13 @@ val keystoreProps = Properties().apply {
 val localProps = Properties().apply {
     rootProject.file("local.properties").let { if (it.exists()) FileInputStream(it).use { s -> load(s) } }
 }
-val releaseServerUrl: String = localProps.getProperty("otto.serverBaseUrl")
-    ?: (project.findProperty("otto.serverBaseUrl") as String?)
-    ?: "https://otto.invalid/"
+// The trailing slash Retrofit's baseUrl() requires is easy to forget in a hand-edited property,
+// so tolerate its absence here rather than shipping a build that throws on first request.
+val releaseServerUrl: String = (
+    localProps.getProperty("otto.serverBaseUrl")
+        ?: (project.findProperty("otto.serverBaseUrl") as String?)
+        ?: "https://otto.invalid/"
+    ).let { if (it.endsWith("/")) it else "$it/" }
 
 plugins {
     alias(libs.plugins.android.application)

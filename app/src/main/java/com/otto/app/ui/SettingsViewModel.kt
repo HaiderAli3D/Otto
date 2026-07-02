@@ -75,6 +75,9 @@ class SettingsViewModel @Inject constructor(
             OttoLog.w("Ignoring non-HTTPS server URL override")
             return
         }
-        viewModelScope.launch { preferences.setServerUrlOverride(cleaned) }
+        // Persist with the trailing slash Retrofit's baseUrl() requires, so what's stored is what
+        // the network stack uses (ServerUrl.effective would fix it up anyway; keep them agreeing).
+        val normalized = if (cleaned == null || cleaned.endsWith("/")) cleaned else "$cleaned/"
+        viewModelScope.launch { preferences.setServerUrlOverride(normalized) }
     }
 }
