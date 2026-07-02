@@ -41,6 +41,7 @@ class HeartbeatWorker @AssistedInject constructor(
                 body = HeartbeatRequest(
                     appVersion = BuildConfig.VERSION_NAME,
                     atMillis = clock.nowMillis(),
+                    timezone = java.util.TimeZone.getDefault().id,
                 ),
             )
             if (response.isSuccessful) {

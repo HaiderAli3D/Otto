@@ -250,9 +250,12 @@ command code. Every value in `data` is a string (FCM constraint).
 | `POST /alarms/{alarmId}/events` | On ARMED, RANG, DISMISSED, SNOOZED, MISSED, CANCELLED |
 | `POST /devices/{deviceId}/heartbeat` | On PING and on app open |
 
-Reports carry `{ event, atMillis, appVersion }`. Reports are queued through
-WorkManager so they survive network loss and retry with backoff. The server uses
-RANG and DISMISSED to know whether a real-world alarm was acted on.
+Reports carry `{ event, atMillis, appVersion }`. Token registration and
+heartbeat additionally carry an optional `timezone` (IANA zone id, e.g.
+`Europe/London`) so the server knows the device's current zone when composing
+wall-clock instructions. Reports are queued through WorkManager so they survive
+network loss and retry with backoff. The server uses RANG and DISMISSED to know
+whether a real-world alarm was acted on.
 
 ---
 

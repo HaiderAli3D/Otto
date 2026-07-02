@@ -49,7 +49,11 @@ class RegistrationWorker @AssistedInject constructor(
         return try {
             val response = api.registerToken(
                 deviceId = preferences.getOrCreateDeviceId(),
-                body = TokenRegistrationRequest(token = token, appVersion = BuildConfig.VERSION_NAME),
+                body = TokenRegistrationRequest(
+                    token = token,
+                    appVersion = BuildConfig.VERSION_NAME,
+                    timezone = java.util.TimeZone.getDefault().id,
+                ),
             )
             if (response.isSuccessful) {
                 preferences.setLastRegistrationMillis(clock.nowMillis())

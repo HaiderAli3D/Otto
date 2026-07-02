@@ -7,6 +7,8 @@ import kotlinx.serialization.Serializable
 data class TokenRegistrationRequest(
     val token: String,
     val appVersion: String,
+    /** IANA zone id (e.g. "Europe/London"); nullable+default keeps older servers compatible. */
+    val timezone: String? = null,
 )
 
 /** Body of POST /alarms/{alarmId}/events — one alarm lifecycle transition (spec.md §7.4). */
@@ -23,6 +25,8 @@ data class AlarmEventRequest(
 data class HeartbeatRequest(
     val appVersion: String,
     val atMillis: Long,
+    /** IANA zone id (e.g. "Europe/London"); nullable+default keeps older servers compatible. */
+    val timezone: String? = null,
 )
 
 /** Response of GET /devices/{deviceId}/alarms — the server's authoritative alarm set. */
