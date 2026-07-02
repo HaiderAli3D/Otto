@@ -26,6 +26,8 @@ class AlarmRepository @Inject constructor(
     /**
      * Insert or replace an ARMED alarm. Idempotent on [alarmId]: re-arming an existing id
      * updates its time/label and preserves createdAt/snoozeCount/requestCode, never duplicating.
+     * The lookup-and-assign happens inside one DAO transaction so concurrent first-time arms
+     * can never be handed the same requestCode (fix #4's collision-free promise).
      */
     suspend fun upsertArmed(
         alarmId: String,
@@ -34,21 +36,19 @@ class AlarmRepository @Inject constructor(
         allowWhileIdle: Boolean,
     ): AlarmEntity {
         val now = clock.nowMillis()
-        val existing = dao.getById(alarmId)
-        val entity = AlarmEntity(
-            alarmId = alarmId,
-            triggerAtMillis = triggerAtMillis,
-            label = label,
-            state = AlarmState.ARMED,
-            allowWhileIdle = allowWhileIdle,
-            snoozeCount = existing?.snoozeCount ?: 0,
-            createdAtMillis = existing?.createdAtMillis ?: now,
-            updatedAtMillis = now,
-            reportedToServer = false,
-            // Stable code assigned once and preserved across re-arms (fix #4).
-            requestCode = existing?.requestCode ?: dao.nextRequestCode(),
+        val entity = dao.upsertPreservingIdentity(
+            AlarmEntity(
+                alarmId = alarmId,
+                triggerAtMillis = triggerAtMillis,
+                label = label,
+                state = AlarmState.ARMED,
+                allowWhileIdle = allowWhileIdle,
+                snoozeCount = 0,
+                createdAtMillis = now,
+                updatedAtMillis = now,
+                reportedToServer = false,
+            ),
         )
-        dao.upsert(entity)
         recordEvent(alarmId, AlarmState.ARMED, now)
         return entity
     }

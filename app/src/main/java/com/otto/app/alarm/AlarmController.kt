@@ -93,13 +93,21 @@ class AlarmController @Inject constructor(
         val armed = repository.getAllArmed()
         var reArmed = 0
         for (alarm in armed) {
-            // Honor the same grace window as arm(): a within-grace trigger that elapsed while
-            // the phone was off (e.g. a reboot straddling the alarm time) still fires now.
-            if (AlarmTiming.shouldReArm(alarm.triggerAtMillis, now)) {
-                scheduler.arm(alarm)
-                reArmed++
-            } else {
-                repository.markState(alarm.alarmId, AlarmState.MISSED)
+            // Guard each alarm separately: setAlarmClock() can throw (SecurityException on a
+            // permission flip after the check above, quota IllegalStateException), and one bad
+            // alarm must not silently drop the rest of the batch — or the stuck-RANG cleanup
+            // below. Mirrors registerWithOs()'s posture for the single-alarm path.
+            try {
+                // Honor the same grace window as arm(): a within-grace trigger that elapsed while
+                // the phone was off (e.g. a reboot straddling the alarm time) still fires now.
+                if (AlarmTiming.shouldReArm(alarm.triggerAtMillis, now)) {
+                    scheduler.arm(alarm)
+                    reArmed++
+                } else {
+                    repository.markState(alarm.alarmId, AlarmState.MISSED)
+                }
+            } catch (t: Throwable) {
+                OttoLog.e("Failed to re-arm ${alarm.alarmId}; continuing with remaining alarms", t)
             }
         }
         // A process killed mid-ring leaves the alarm RANG forever (AlarmReceiver marks RANG before

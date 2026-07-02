@@ -3,6 +3,7 @@ package com.otto.app.data
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -36,6 +37,26 @@ interface AlarmDao {
     /** Next stable, collision-free PendingIntent request code (fix #4). */
     @Query("SELECT COALESCE(MAX(requestCode), 0) + 1 FROM alarms")
     suspend fun nextRequestCode(): Int
+
+    /**
+     * Upsert [entity], preserving the identity fields of an existing row (requestCode,
+     * createdAtMillis, snoozeCount) and assigning the next requestCode to a new one. Returns the
+     * row as written. @Transaction makes the read-compute-write atomic: without it, two
+     * concurrent first-time arms (e.g. an FCM ARM_ALARM racing the test button) can both read the
+     * same MAX(requestCode) and collide — recreating the shared-PendingIntent failure fix #4
+     * removed, where arming one alarm silently replaces the other's OS registration.
+     */
+    @Transaction
+    suspend fun upsertPreservingIdentity(entity: AlarmEntity): AlarmEntity {
+        val existing = getById(entity.alarmId)
+        val resolved = entity.copy(
+            snoozeCount = existing?.snoozeCount ?: entity.snoozeCount,
+            createdAtMillis = existing?.createdAtMillis ?: entity.createdAtMillis,
+            requestCode = existing?.requestCode ?: nextRequestCode(),
+        )
+        upsert(resolved)
+        return resolved
+    }
 
     // --- Event outbox: append-only, drained then deleted by ReportWorker (fix #2) ---
 
