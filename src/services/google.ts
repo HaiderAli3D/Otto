@@ -6,6 +6,14 @@ import { db } from '../db/client.js'
 import { googleAccounts } from '../db/schema.js'
 import { log } from '../lib/log.js'
 import { getDevice } from './devices.js'
+import { issueOAuthState } from './oauthState.js'
+
+/** Parse a required local wall-clock ISO in the device zone, or throw so the tool surfaces it. */
+function requireLocalIso(iso: string, zone: string, field: string): string {
+  const dt = DateTime.fromISO(iso, { zone })
+  if (!dt.isValid) throw new Error(`Invalid ${field} "${iso}": ${dt.invalidReason ?? 'unparseable'}`)
+  return dt.toISO()!
+}
 
 /**
  * Google Calendar/Tasks integration. Each device links its own Google account via OAuth
@@ -65,13 +73,14 @@ export function hasGoogle(deviceId: string): boolean {
   return row !== undefined && row.refreshToken.length > 0
 }
 
-/** The consent URL to redirect the owner to; `state` carries the deviceId back to the callback. */
+/** The consent URL to redirect the owner to; `state` is an unguessable single-use CSRF nonce. */
 export function googleAuthUrl(deviceId: string): string {
+  const state = issueOAuthState(deviceId, Date.now())
   return oauthClient().generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
     scope: SCOPES,
-    state: deviceId,
+    state,
   })
 }
 
@@ -102,13 +111,15 @@ export async function listCalendarEvents(
 ): Promise<Array<{ summary: string; startIso: string; endIso: string }>> {
   const auth = authedClientFor(deviceId)
   const zone = zoneFor(deviceId)
-  const timeMin = DateTime.fromISO(timeMinLocalISO, { zone }).toISO()
-  const timeMax = DateTime.fromISO(timeMaxLocalISO, { zone }).toISO()
+  // Surface bad bounds as an error instead of silently sending an unbounded events.list (which
+  // would return years of history the agent then reports as "today").
+  const timeMin = requireLocalIso(timeMinLocalISO, zone, 'timeMinLocalISO')
+  const timeMax = requireLocalIso(timeMaxLocalISO, zone, 'timeMaxLocalISO')
   const calendar = google.calendar({ version: 'v3', auth })
   const res = await calendar.events.list({
     calendarId: 'primary',
-    timeMin: timeMin ?? undefined,
-    timeMax: timeMax ?? undefined,
+    timeMin,
+    timeMax,
     singleEvents: true,
     orderBy: 'startTime',
   })
@@ -147,9 +158,7 @@ export async function createTask(
   const auth = authedClientFor(deviceId)
   const zone = zoneFor(deviceId)
   const tasksApi = google.tasks({ version: 'v1', auth })
-  const due = params.dueIso
-    ? DateTime.fromISO(params.dueIso, { zone }).toISO() ?? undefined
-    : undefined
+  const due = params.dueIso ? requireLocalIso(params.dueIso, zone, 'dueLocalISO') : undefined
   const res = await tasksApi.tasks.insert({
     tasklist: '@default',
     requestBody: { title: params.title, due },
