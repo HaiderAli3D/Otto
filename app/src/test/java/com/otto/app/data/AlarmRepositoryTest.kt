@@ -5,6 +5,7 @@ import com.otto.app.core.ReportTrigger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -35,14 +36,23 @@ class AlarmRepositoryTest {
         override suspend fun insertEvent(event: AlarmEventEntity) { events += event }
         override suspend fun nextRequestCode(): Int = nextCode
 
+        // The @Transaction bundlers (updateStateWithEvent, upsertArmedWithEvent, snoozeWithEvents,
+        // dismissIfRingingWithEvent) are interface default methods, so the fake inherits them and
+        // they delegate to these recorded primitives — ordering assertions still hold (AF6).
+        // dismissIfRinging honours the RANG guard against the fixed `existing` row (AF1).
+        override suspend fun dismissIfRinging(alarmId: String, updatedAtMillis: Long): Int =
+            if (existing?.state == AlarmState.RANG) 1 else 0
+
         override fun observeAll(): Flow<List<AlarmEntity>> = throw NotImplementedError()
         override suspend fun getByState(state: AlarmState): List<AlarmEntity> = throw NotImplementedError()
+        override suspend fun getAll(): List<AlarmEntity> = throw NotImplementedError()
         override suspend fun getNextInState(state: AlarmState, nowMillis: Long): AlarmEntity? =
             throw NotImplementedError()
         override suspend fun updateState(alarmId: String, state: AlarmState, updatedAtMillis: Long): Int =
             throw NotImplementedError()
         override suspend fun deleteById(alarmId: String) = throw NotImplementedError()
         override suspend fun getPendingEvents(): List<AlarmEventEntity> = throw NotImplementedError()
+        override suspend fun getPendingEventAlarmIds(): List<String> = throw NotImplementedError()
         override suspend fun deleteEvent(id: Long) = throw NotImplementedError()
     }
 
@@ -114,5 +124,45 @@ class AlarmRepositoryTest {
 
         assertNull(result)
         assertTrue(dao.events.isEmpty())
+    }
+
+    @Test
+    fun snooze_nonRingingAlarm_returnsNullAndEmitsNothing() = runTest {
+        // AF1: a snooze from a stale ring screen must not resurrect an alarm the agent has since
+        // re-armed (ARMED) or cancelled — only a still-RANG alarm may snooze.
+        val armed = ringing("a").copy(state = AlarmState.ARMED)
+        val dao = RecordingDao(armed)
+        val repo = AlarmRepository(dao, FakeClock(now = 20_000L), ReportTrigger {})
+
+        val result = repo.snooze("a", newTriggerAtMillis = 999_000L)
+
+        assertNull(result)
+        assertTrue(dao.events.isEmpty())
+        assertTrue(dao.upserts.isEmpty())
+    }
+
+    @Test
+    fun markDismissedIfRinging_nonRingingAlarm_noOpsAndEmitsNothing() = runTest {
+        // AF1: dismissing a re-armed/cancelled alarm from a stale ring screen is a no-op.
+        val armed = ringing("a").copy(state = AlarmState.ARMED)
+        val dao = RecordingDao(armed)
+        val repo = AlarmRepository(dao, FakeClock(now = 20_000L), ReportTrigger {})
+
+        val changed = repo.markDismissedIfRinging("a")
+
+        assertFalse(changed)
+        assertTrue(dao.events.isEmpty())
+    }
+
+    @Test
+    fun markDismissedIfRinging_ringingAlarm_dismissesAndEmitsDismissed() = runTest {
+        val dao = RecordingDao(ringing("a"))
+        val repo = AlarmRepository(dao, FakeClock(now = 20_000L), ReportTrigger {})
+
+        val changed = repo.markDismissedIfRinging("a")
+
+        assertTrue(changed)
+        assertEquals(listOf("DISMISSED"), dao.events.map { it.event })
+        assertEquals(20_000L, dao.events.single().atMillis)
     }
 }

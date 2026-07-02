@@ -31,6 +31,18 @@ interface AlarmDao {
     @Query("UPDATE alarms SET state = :state, updatedAtMillis = :updatedAtMillis, reportedToServer = 0 WHERE alarmId = :alarmId")
     suspend fun updateState(alarmId: String, state: AlarmState, updatedAtMillis: Long): Int
 
+    /** Every alarm regardless of state — the full local picture SYNC reconciles against (AF2). */
+    @Query("SELECT * FROM alarms")
+    suspend fun getAll(): List<AlarmEntity>
+
+    /**
+     * Flip an alarm to DISMISSED only while it is still RANG (AF1). Guards against a stale ring
+     * screen dismissing an alarm the agent has meanwhile re-armed to the future or cancelled.
+     * The literal 'RANG'/'DISMISSED' match [AlarmConverters]' enum-name storage. Returns rows changed.
+     */
+    @Query("UPDATE alarms SET state = 'DISMISSED', updatedAtMillis = :updatedAtMillis, reportedToServer = 0 WHERE alarmId = :alarmId AND state = 'RANG'")
+    suspend fun dismissIfRinging(alarmId: String, updatedAtMillis: Long): Int
+
     @Query("DELETE FROM alarms WHERE alarmId = :alarmId")
     suspend fun deleteById(alarmId: String)
 
@@ -67,7 +79,66 @@ interface AlarmDao {
     @Query("SELECT * FROM alarm_events ORDER BY id ASC")
     suspend fun getPendingEvents(): List<AlarmEventEntity>
 
+    /** Distinct alarm ids with an undelivered outbox event — SYNC's "don't cancel yet" set (AF2). */
+    @Query("SELECT DISTINCT alarmId FROM alarm_events")
+    suspend fun getPendingEventAlarmIds(): List<String>
+
     /** Remove an event once the server has acknowledged it. */
     @Query("DELETE FROM alarm_events WHERE id = :id")
     suspend fun deleteEvent(id: Long)
+
+    // --- Atomic state-write + outbox-event writes (AF6) ---
+    // Each transition and its outbox event must commit together: a process kill between the two
+    // separate statements would lose the transition event, defeating the outbox's whole purpose.
+    // These @Transaction default methods bundle both writes (mirroring upsertPreservingIdentity's
+    // proven pattern). The WorkManager drain request stays in AlarmRepository, outside the txn.
+
+    /** Apply a state transition and append its event atomically. Returns rows changed (0 if gone). */
+    @Transaction
+    suspend fun updateStateWithEvent(
+        alarmId: String,
+        state: AlarmState,
+        updatedAtMillis: Long,
+        event: AlarmEventEntity,
+    ): Int {
+        val changed = updateState(alarmId, state, updatedAtMillis)
+        if (changed > 0) insertEvent(event)
+        return changed
+    }
+
+    /** Upsert an ARMED alarm (preserving identity) and append its ARMED event atomically. */
+    @Transaction
+    suspend fun upsertArmedWithEvent(entity: AlarmEntity, event: AlarmEventEntity): AlarmEntity {
+        val resolved = upsertPreservingIdentity(entity)
+        insertEvent(event)
+        return resolved
+    }
+
+    /**
+     * Re-arm a snooze atomically, preserving fix #2's SNOOZED-before-ARMED event ordering: record
+     * SNOOZED, overwrite the row as ARMED, record ARMED — all in one transaction so a kill can
+     * neither drop the snooze event nor leave a half-applied re-arm.
+     */
+    @Transaction
+    suspend fun snoozeWithEvents(
+        updated: AlarmEntity,
+        snoozedEvent: AlarmEventEntity,
+        armedEvent: AlarmEventEntity,
+    ) {
+        insertEvent(snoozedEvent)
+        upsert(updated)
+        insertEvent(armedEvent)
+    }
+
+    /** Dismiss a still-RANG alarm and append its DISMISSED event atomically (AF1 guard + AF6). */
+    @Transaction
+    suspend fun dismissIfRingingWithEvent(
+        alarmId: String,
+        updatedAtMillis: Long,
+        event: AlarmEventEntity,
+    ): Int {
+        val changed = dismissIfRinging(alarmId, updatedAtMillis)
+        if (changed > 0) insertEvent(event)
+        return changed
+    }
 }

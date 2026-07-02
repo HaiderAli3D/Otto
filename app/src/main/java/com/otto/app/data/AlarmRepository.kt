@@ -36,7 +36,9 @@ class AlarmRepository @Inject constructor(
         allowWhileIdle: Boolean,
     ): AlarmEntity {
         val now = clock.nowMillis()
-        val entity = dao.upsertPreservingIdentity(
+        // State write + ARMED outbox event commit atomically (AF6); the drain request is fired
+        // afterwards because it's WorkManager, not a DB write, and must stay out of the txn.
+        val entity = dao.upsertArmedWithEvent(
             AlarmEntity(
                 alarmId = alarmId,
                 triggerAtMillis = triggerAtMillis,
@@ -48,21 +50,42 @@ class AlarmRepository @Inject constructor(
                 updatedAtMillis = now,
                 reportedToServer = false,
             ),
+            eventFor(alarmId, AlarmState.ARMED, now),
         )
-        recordEvent(alarmId, AlarmState.ARMED, now)
+        reportTrigger.requestReport()
         return entity
     }
 
-    /** Transition an alarm to a new state and append the matching outbox event. */
+    /** Transition an alarm to a new state and append the matching outbox event (atomically, AF6). */
     suspend fun markState(alarmId: String, state: AlarmState): Boolean {
         val now = clock.nowMillis()
-        val changed = dao.updateState(alarmId, state, now) > 0
-        if (changed) recordEvent(alarmId, state, now)
+        val changed = dao.updateStateWithEvent(alarmId, state, now, eventFor(alarmId, state, now)) > 0
+        if (changed) reportTrigger.requestReport()
+        return changed
+    }
+
+    /**
+     * Dismiss [alarmId] only while it is still RANG (AF1): the state write and DISMISSED outbox
+     * event commit atomically (AF6). Returns whether it changed — false means the alarm was
+     * re-armed/cancelled out from under a stale ring screen, so the dismiss is correctly ignored.
+     */
+    suspend fun markDismissedIfRinging(alarmId: String): Boolean {
+        val now = clock.nowMillis()
+        val changed = dao.dismissIfRingingWithEvent(
+            alarmId, now, eventFor(alarmId, AlarmState.DISMISSED, now),
+        ) > 0
+        if (changed) reportTrigger.requestReport()
         return changed
     }
 
     /** All ARMED alarms regardless of time (used at boot to also detect missed ones). */
     suspend fun getAllArmed(): List<AlarmEntity> = dao.getByState(AlarmState.ARMED)
+
+    /** Every alarm regardless of state — the local picture SYNC reconciles against (AF2). */
+    suspend fun getAll(): List<AlarmEntity> = dao.getAll()
+
+    /** Alarm ids with an undelivered outbox event — SYNC must not cancel these yet (AF2). */
+    suspend fun getPendingEventAlarmIds(): Set<String> = dao.getPendingEventAlarmIds().toSet()
 
     /** Alarms currently ringing (RANG) — used to cycle through simultaneous alarms. */
     suspend fun getRinging(): List<AlarmEntity> = dao.getByState(AlarmState.RANG)
@@ -74,15 +97,14 @@ class AlarmRepository @Inject constructor(
     /**
      * Re-arm [alarmId] at [newTriggerAtMillis]. Emits a SNOOZED event first (so the server can
      * tell a snooze from a fresh arm, fix #2), then re-ARMs, incrementing snoozeCount and
-     * preserving requestCode. Returns the updated entity, or null if the alarm no longer exists.
+     * preserving requestCode. Returns the updated entity, or null if the alarm no longer exists
+     * OR is no longer RANG — a snooze may only come from a live ring, so an alarm the agent has
+     * meanwhile cancelled, dismissed, or re-armed to the future must not be resurrected (AF1).
      */
     suspend fun snooze(alarmId: String, newTriggerAtMillis: Long): AlarmEntity? {
         val existing = dao.getById(alarmId) ?: return null
+        if (existing.state != AlarmState.RANG) return null
         val now = clock.nowMillis()
-        // SNOOZED must be recorded before the re-ARM write, else the current-state row would be
-        // ARMED and the snooze would never reach the server. Both events share `now` but differ
-        // by `event`, so the server's (alarmId, event, atMillis) dedupe keeps both.
-        recordEvent(alarmId, AlarmState.SNOOZED, now)
         val updated = existing.copy(
             triggerAtMillis = newTriggerAtMillis,
             state = AlarmState.ARMED,
@@ -90,8 +112,16 @@ class AlarmRepository @Inject constructor(
             updatedAtMillis = now,
             reportedToServer = false,
         )
-        dao.upsert(updated)
-        recordEvent(alarmId, AlarmState.ARMED, now)
+        // SNOOZED must be recorded before the re-ARM write, else the current-state row would be
+        // ARMED and the snooze would never reach the server. Both events share `now` but differ
+        // by `event`, so the server's (alarmId, event, atMillis) dedupe keeps both. All three
+        // writes are one transaction (AF6) so a kill can't drop the snooze or half-apply the re-arm.
+        dao.snoozeWithEvents(
+            updated = updated,
+            snoozedEvent = eventFor(alarmId, AlarmState.SNOOZED, now),
+            armedEvent = eventFor(alarmId, AlarmState.ARMED, now),
+        )
+        reportTrigger.requestReport()
         return updated
     }
 
@@ -103,9 +133,7 @@ class AlarmRepository @Inject constructor(
 
     suspend fun delete(alarmId: String) = dao.deleteById(alarmId)
 
-    /** Append an outbox event for a transition and ask for a drain. */
-    private suspend fun recordEvent(alarmId: String, state: AlarmState, atMillis: Long) {
-        dao.insertEvent(AlarmEventEntity(alarmId = alarmId, event = state.name, atMillis = atMillis))
-        reportTrigger.requestReport()
-    }
+    /** Build the outbox event for a transition (inserted inside the state-write transaction, AF6). */
+    private fun eventFor(alarmId: String, state: AlarmState, atMillis: Long) =
+        AlarmEventEntity(alarmId = alarmId, event = state.name, atMillis = atMillis)
 }

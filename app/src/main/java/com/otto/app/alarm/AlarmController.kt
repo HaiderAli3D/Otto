@@ -35,6 +35,9 @@ class AlarmController @Inject constructor(
         allowWhileIdle: Boolean,
     ): FireDecision {
         val decision = AlarmTiming.classify(triggerAtMillis, clock.nowMillis())
+        // Capture a mid-ring re-arm (agent reschedule via ARM_ALARM, or SYNC) BEFORE the upsert
+        // overwrites the RANG row, so we can silence the now-orphaned ring afterwards (AF1).
+        val wasRinging = repository.getById(alarmId)?.state == AlarmState.RANG
         val entity = repository.upsertArmed(alarmId, triggerAtMillis, label, allowWhileIdle)
         when (decision) {
             // A past-but-within-grace trigger is handled by the OS firing immediately.
@@ -44,6 +47,9 @@ class AlarmController @Inject constructor(
                 OttoLog.i("Alarm $alarmId older than grace window; marked MISSED, not ringing")
             }
         }
+        // The row is no longer RANG; tell the ring service to re-check Room and stop the sound the
+        // previous ring left playing (mirrors cancel()'s wasRinging refresh, bug_003 / AF1).
+        if (wasRinging) RingService.refresh(context)
         OttoLog.i("Armed $alarmId -> $decision")
         return decision
     }

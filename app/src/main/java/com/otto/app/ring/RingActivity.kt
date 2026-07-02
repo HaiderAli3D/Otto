@@ -32,7 +32,6 @@ import com.otto.app.R
 import com.otto.app.alarm.AlarmController
 import com.otto.app.core.OttoConstants
 import com.otto.app.data.AlarmRepository
-import com.otto.app.data.AlarmState
 import com.otto.app.ui.theme.OttoTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -93,7 +92,10 @@ class RingActivity : ComponentActivity() {
     private fun dismiss() {
         val id = display.value.alarmId
         appScope.launch(Dispatchers.IO) {
-            if (id.isNotEmpty()) repository.markState(id, AlarmState.DISMISSED)
+            // Only dismiss while the alarm is still RANG (AF1): if the agent re-armed or cancelled
+            // it while this (possibly stale) screen was up, markDismissedIfRinging no-ops so the
+            // freshly-ARMED future alarm isn't flipped to a terminal state and lost.
+            if (id.isNotEmpty()) repository.markDismissedIfRinging(id)
             RingService.refresh(this@RingActivity)
             advanceOrFinish()
         }
