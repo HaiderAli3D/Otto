@@ -25,6 +25,11 @@ import java.util.concurrent.TimeUnit
  * deleting it on success. No-ops while the base URL is the placeholder. Because delivery is
  * at-least-once (a crash after POST but before delete re-sends), the server dedupes on
  * (alarmId, event, atMillis).
+ *
+ * ORDERING GUARANTEE (AF3): events are drained strictly in id-ASC (chronological) order and the
+ * drain STOPS at the first failure. The server applies state unconditionally, so letting a newer
+ * event overtake an older one after a mid-batch failure would corrupt state (e.g. a stale ARMED
+ * landing after a DISMISSED). The retry re-drains from the front, preserving order.
  */
 @HiltWorker
 class ReportWorker @AssistedInject constructor(
@@ -46,7 +51,7 @@ class ReportWorker @AssistedInject constructor(
         val deviceId = preferences.getOrCreateDeviceId()
         var needsRetry = false
         for (event in pending) {
-            try {
+            val delivered = try {
                 val response = api.reportEvent(
                     alarmId = event.alarmId,
                     body = AlarmEventRequest(
@@ -54,22 +59,30 @@ class ReportWorker @AssistedInject constructor(
                         event = event.event,
                         atMillis = event.atMillis,
                         appVersion = BuildConfig.VERSION_NAME,
+                        // The alarm's CURRENT trigger, so the server picks up a snooze's new time
+                        // (AF4). Null if the row is gone; the server only acts on it for ARMED.
+                        triggerAtMillis = repository.getById(event.alarmId)?.triggerAtMillis,
                     ),
                 )
-                if (response.isSuccessful) {
-                    repository.markEventReported(event.id)
-                    OttoLog.i("Reported ${event.event} for ${event.alarmId}")
-                } else {
+                if (!response.isSuccessful) {
                     OttoLog.w("Event report for ${event.alarmId} failed: HTTP ${response.code()}")
-                    needsRetry = true
                 }
+                response.isSuccessful
             } catch (io: IOException) {
                 OttoLog.w("Event report network error; will retry", io)
-                needsRetry = true
+                false
             } catch (t: Throwable) {
-                // Skip this one rather than failing the whole batch.
-                OttoLog.e("Event report error for ${event.alarmId}", t)
+                OttoLog.e("Event report error for ${event.alarmId}; will retry", t)
+                false
             }
+            if (!delivered) {
+                // Stop at the first failure to keep events strictly in order (AF3); the retry
+                // re-drains from the front. Do NOT continue to a newer event.
+                needsRetry = true
+                break
+            }
+            repository.markEventReported(event.id)
+            OttoLog.i("Reported ${event.event} for ${event.alarmId}")
         }
         return if (needsRetry) Result.retry() else Result.success()
     }

@@ -18,6 +18,12 @@ data class AlarmEventRequest(
     val event: String,
     val atMillis: Long,
     val appVersion: String,
+    /**
+     * The alarm's current trigger at report time, so a snooze's new time reaches the server (AF4).
+     * Nullable+default keeps older servers compatible (they ignore it); the server acts on it only
+     * for an ARMED event.
+     */
+    val triggerAtMillis: Long? = null,
 )
 
 /** Body of POST /devices/{deviceId}/heartbeat — liveness ping (spec.md §7.4). */
