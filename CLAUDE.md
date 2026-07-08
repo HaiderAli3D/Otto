@@ -24,8 +24,8 @@ force-stop recovery, warning card); M5 polish (settings/pairing screen, self-hea
 `NextAlarmTileService` quick-settings tile, structured `OttoLog`). A Node FCM test-push helper
 lives in `tools/send-push/`; device-only checks are scripted in `docs/manual-testing.md`.
 
-**Track-1 correctness hardening (branch `fix/app-correctness-track1`) — 6 fixes done, build
-green (47 unit tests):** (1) SYNC is fail-safe — the pure `net/SyncReconciler.kt` never cancels
+**Track-1 correctness hardening (merged to `main`) — 6 fixes done, build
+green:** (1) SYNC is fail-safe — the pure `net/SyncReconciler.kt` never cancels
 alarms on an empty/errored response; (2) a new append-only `alarm_events` outbox (`ReportWorker`
 drains+deletes events, not current state) so SNOOZED and every transition reach the server
 (dedupe on `(alarmId,event,atMillis)`); (3) heartbeat on app open; (4) a persisted `requestCode`
