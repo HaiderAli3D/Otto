@@ -3,10 +3,13 @@ import { IANAZone } from 'luxon'
 import { z } from 'zod'
 
 // Load a local .env when present (no-op in prod, where env is injected by the host).
-try {
-  process.loadEnvFile()
-} catch {
-  /* no .env file — env comes from the host */
+// Never under vitest: tests must see only what test/setup-env.ts pins, not this machine's .env.
+if (!process.env.VITEST) {
+  try {
+    process.loadEnvFile()
+  } catch {
+    /* no .env file — env comes from the host */
+  }
 }
 
 const raw = z
