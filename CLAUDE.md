@@ -43,14 +43,26 @@ the debug key so `assembleRelease` still builds); release `SERVER_BASE_URL` is c
 override is HTTPS-only; `versionName = 1.0.0`. Both `assembleDebug` and `assembleRelease` are green.
 The **Otto server** now exists as a sibling repo at `../otto-server` (Node/TS, SQLite, Fastify) — its
 `SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/Anthropic/Google/hosting/pairing).
-Still deferred: Crashlytics (needs `dl.google.com` + console) and R8 minify.
+Still deferred: R8 minify. (Crashlytics is no longer deferred — see below.)
 
-**Crashlytics — now enabled.** `implementation(libs.firebase.crashlytics)` is active in
-`app/build.gradle.kts` and `OttoLog.w/e` forward breadcrumbs/non-fatals to
-`FirebaseCrashlytics.getInstance()` (lazily resolved, `runCatching`-guarded so a missing/unconfigured
-SDK can never crash the app). No Gradle plugin is used (none is needed while R8/minify is off — the
-plugin only uploads the R8 mapping file). Actual crash upload should be confirmed once on a real
-device against the Firebase console. See `spec.md` §13.
+**Crashlytics — enabled, and the Gradle plugin is MANDATORY.** `implementation(libs.firebase.crashlytics)`
+is active in `app/build.gradle.kts`, alongside `alias(libs.plugins.firebase.crashlytics)`
+(`com.google.firebase.crashlytics` 3.0.7, catalog key `firebaseCrashlyticsPlugin`; verified compatible
+with AGP 9.2.1). `OttoLog.w/e` forward breadcrumbs/non-fatals to `FirebaseCrashlytics.getInstance()`.
+
+⚠️ **Do not remove that plugin, and do not re-derive that it's optional under R8-off.** An earlier
+revision of this file claimed "no Gradle plugin is needed while R8/minify is off — the plugin only
+uploads the R8 mapping file." **That is false and it shipped a 100%-reproducible launch crash.** The
+plugin *also* injects a build-ID resource that `CrashlyticsCore.onPreExecute()` hard-asserts on; without
+it, `FirebaseInitProvider` throws
+`IllegalStateException: The Crashlytics build ID is missing` during application bind, killing the
+process before `OttoApp` or any Otto code runs (observed on-device 2026-08-02, Samsung SM-XXXXX /
+Android 16). Two things hid it: it needs a real `app/google-services.json` to reach Firebase init, so
+it is structurally unreachable headlessly (all 67 unit tests pass regardless); and `OttoLog`'s
+`runCatching` guard only wraps Otto's *own* calls into Crashlytics — it cannot protect auto-init, which
+runs earlier and outside that guard.
+
+Actual crash *upload* to the Firebase console is still unconfirmed. See `spec.md` §13.
 
 ## Stack (do not substitute — see `spec.md` §4)
 
