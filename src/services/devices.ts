@@ -23,6 +23,8 @@ export function ensureDevice(deviceId: string): Device {
     timezone: config.defaultTimezone,
     authLatched: false,
     lastHeartbeatAt: null,
+    lastInboundAt: null,
+    lastDigestAt: null,
     createdAt: Date.now(),
   }
   db.insert(devices).values(row).run()
@@ -56,6 +58,23 @@ export function setTimezone(deviceId: string, timezone: string): void {
 
 export function linkWhatsapp(deviceId: string, whatsappNumber: string): void {
   db.update(devices).set({ whatsappNumber }).where(eq(devices.deviceId, deviceId)).run()
+}
+
+/** WhatsApp's 24h free-form window. Stamped on EVERY inbound, including non-text. */
+export function markInbound(deviceId: string, atMillis: number = Date.now()): void {
+  db.update(devices).set({ lastInboundAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
+}
+
+/**
+ * Meta just told us the window is shut (error 131047) even though we believed it was open —
+ * our clock was wrong, so drop the belief rather than retrying into the same rejection.
+ */
+export function clearInboundWindow(deviceId: string): void {
+  db.update(devices).set({ lastInboundAt: null }).where(eq(devices.deviceId, deviceId)).run()
+}
+
+export function markDigestSent(deviceId: string, atMillis: number = Date.now()): void {
+  db.update(devices).set({ lastDigestAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
 }
 
 export function listDevices(): Device[] {

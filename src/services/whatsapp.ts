@@ -23,13 +23,38 @@ const RETRY_DELAYS_MS = [500, 1500]
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Send a plain-text WhatsApp reply via the Cloud API. Transient failures (network throw, 429,
- * 5xx) are retried up to 3 attempts; a permanent failure (other 4xx) is not. Logged, never
- * thrown — a broken reply must not crash the webhook. Returns whether the message was accepted.
- * No-op (false) when WhatsApp isn't configured.
+ * Meta's "you are outside the 24-hour customer service window" error. Because the owner chose not
+ * to register message templates, this is the expected failure for any proactive send while the
+ * window is shut — it must be visible and actionable, not swallowed as a generic 4xx.
  */
-export async function sendText(toWaNumber: string, text: string): Promise<boolean> {
-  if (config.meta === null) return false
+export const META_ERROR_REENGAGEMENT = 131047
+
+export type SendResult =
+  | { ok: true }
+  | { ok: false; permanent: boolean; status: number; metaCode?: number; outOfWindow: boolean; body: string }
+
+function metaErrorCode(body: string): number | undefined {
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown } }
+    const code = parsed.error?.code
+    return typeof code === 'number' ? code : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Send a plain-text WhatsApp message via the Cloud API. Transient failures (network throw, 429,
+ * 5xx) are retried up to 3 attempts; a permanent failure (other 4xx) is not. Logged, never
+ * thrown — a broken reply must not crash the webhook.
+ *
+ * Returns a structured result so the outbox can tell "the window is shut, keep this queued" apart
+ * from "this message is bad, give up". No-op when WhatsApp isn't configured.
+ */
+export async function sendText(toWaNumber: string, text: string): Promise<SendResult> {
+  if (config.meta === null) {
+    return { ok: false, permanent: true, status: 0, outOfWindow: false, body: 'whatsapp not configured' }
+  }
   const url = `https://graph.facebook.com/v22.0/${config.meta.phoneNumberId}/messages`
   const body = JSON.stringify({
     messaging_product: 'whatsapp',
@@ -48,11 +73,17 @@ export async function sendText(toWaNumber: string, text: string): Promise<boolea
         },
         body,
       })
-      if (res.ok) return true
+      if (res.ok) return { ok: true }
       const responseText = await res.text().catch(() => '')
       if (res.status !== 429 && res.status < 500) {
-        log.error({ status: res.status, body: responseText, attempt }, 'WhatsApp sendText failed (permanent)')
-        return false
+        const metaCode = metaErrorCode(responseText)
+        const outOfWindow = metaCode === META_ERROR_REENGAGEMENT
+        if (outOfWindow) {
+          log.warn({ metaCode, toWaNumber }, 'WhatsApp send rejected: outside the 24h window')
+        } else {
+          log.error({ status: res.status, metaCode, body: responseText, attempt }, 'WhatsApp sendText failed (permanent)')
+        }
+        return { ok: false, permanent: true, status: res.status, metaCode, outOfWindow, body: responseText }
       }
       log.warn({ status: res.status, attempt }, 'WhatsApp sendText failed; retrying')
     } catch (err) {
@@ -60,8 +91,8 @@ export async function sendText(toWaNumber: string, text: string): Promise<boolea
     }
     if (attempt < SEND_ATTEMPTS) await sleep(RETRY_DELAYS_MS[attempt - 1] ?? 1500)
   }
-  log.error({ attempts: SEND_ATTEMPTS }, 'WhatsApp sendText failed after all retries — reply dropped')
-  return false
+  log.error({ attempts: SEND_ATTEMPTS }, 'WhatsApp sendText failed after all retries — message dropped')
+  return { ok: false, permanent: false, status: 0, outOfWindow: false, body: 'retries exhausted' }
 }
 
 /** Digits-only form of a WhatsApp number, for allowlist comparison across "+44 …" vs "44…". */

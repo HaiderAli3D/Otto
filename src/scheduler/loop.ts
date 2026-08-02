@@ -1,12 +1,15 @@
 import { log } from '../lib/log.js'
 import { ARM_ACK_TIMEOUT_MS, advanceRecurrence, getAlarm, pushArm } from '../services/alarms.js'
 import { getDevice } from '../services/devices.js'
-import { deleteJob, dueJobs, rescheduleJob, type Job } from '../services/jobs.js'
+import { collectGarbage } from '../services/gc.js'
+import { deleteJob, dueJobs, enqueueJob, rescheduleJob, type Job } from '../services/jobs.js'
+import { runNudge } from '../services/nagging.js'
+import { enqueueOutbound } from '../services/outbox.js'
 import { epochMillisToLocalHuman } from '../services/time.js'
-import { sendText } from '../services/whatsapp.js'
 
 const TICK_MS = 15_000
 const MAX_ARM_ACK_ATTEMPTS = 3
+const GC_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 async function runJob(job: Job): Promise<void> {
   switch (job.kind) {
@@ -19,13 +22,18 @@ async function runJob(job: Job): Promise<void> {
       const nextAttempt = job.attempts + 1
       if (nextAttempt > MAX_ARM_ACK_ATTEMPTS) {
         log.warn({ alarmId: job.alarmId }, 'arm-ack: gave up after max attempts (device may be offline)')
-        // Tell the owner their confirmed alarm was never acked by the phone, if we can reach them.
+        // Tell the owner their confirmed alarm was never acked by the phone. Goes through the
+        // outbox like every other non-reply message, so it respects the 24h window and survives
+        // being generated while the owner is unreachable.
         if (device.whatsappNumber) {
           const when = epochMillisToLocalHuman(alarm.triggerAtMillis, device.timezone)
-          await sendText(
-            device.whatsappNumber,
-            `⚠️ I couldn't confirm your alarm "${alarm.label}" (${when}) reached your phone. Open the Otto app to make sure it's set.`,
-          )
+          enqueueOutbound({
+            waUserId: device.whatsappNumber,
+            deviceId: device.deviceId,
+            kind: 'system_warning',
+            body: `⚠️ I couldn't confirm your alarm "${alarm.label}" (${when}) reached your phone. Open the Otto app to make sure it's set.`,
+            dedupeKey: `armack:${job.alarmId}`,
+          })
         }
         return deleteJob(job.id)
       }
@@ -47,7 +55,18 @@ async function runJob(job: Job): Promise<void> {
       }
       return deleteJob(job.id)
     }
-    // 'nudge' is reserved for future calendar/reminder features; drop unknowns safely.
+    case 'nudge': {
+      if (!job.reminderId) return deleteJob(job.id)
+      await runNudge(job.reminderId)
+      return deleteJob(job.id)
+    }
+    case 'gc': {
+      collectGarbage()
+      deleteJob(job.id)
+      enqueueJob('gc', Date.now() + GC_INTERVAL_MS)
+      return
+    }
+    // Unknown kinds are dropped safely rather than retried forever.
     default:
       return deleteJob(job.id)
   }
@@ -72,5 +91,7 @@ export function startScheduler(): void {
         running = false
       })
   }, TICK_MS)
+  // Self-rescheduling housekeeping job. Enqueued once on boot; each run queues the next.
+  enqueueJob('gc', Date.now() + 60_000)
   log.info({ tickMs: TICK_MS }, 'Scheduler started')
 }

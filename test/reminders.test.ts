@@ -1,0 +1,156 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('../src/fcm/sender.js', () => ({
+  sendData: vi.fn(async () => ({ ok: true as const })),
+}))
+
+import { DateTime } from 'luxon'
+import { ensureSchema } from '../src/db/client.js'
+import { getAlarm } from '../src/services/alarms.js'
+import { dueJobs } from '../src/services/jobs.js'
+import {
+  cancelReminder,
+  completeReminder,
+  createReminder,
+  getReminder,
+  listReminders,
+  onReminderAlarmEvent,
+  reopenReminder,
+  snoozeReminder,
+} from '../src/services/reminders.js'
+import { makeDevice } from './helpers.js'
+
+beforeEach(() => ensureSchema())
+
+const ZONE = 'Europe/London'
+const inHours = (h: number): number => Date.now() + h * 3_600_000
+
+describe('reminder lifecycle', () => {
+  it('creates an OPEN reminder and schedules its first nudge', async () => {
+    const device = makeDevice('dev_r1')
+    const due = inHours(2)
+    const r = await createReminder(device, { title: 'take the bins out', dueAtMillis: due })
+
+    expect(r.state).toBe('OPEN')
+    expect(r.nextNagAtMillis).toBe(due)
+    // A nudge job exists for it — this is what the scheduler will pick up.
+    const jobs = dueJobs(due + 1000).filter((j) => j.kind === 'nudge' && j.reminderId === r.reminderId)
+    expect(jobs.length).toBe(1)
+  })
+
+  it('completing stops the chase and clears the ladder', async () => {
+    const device = makeDevice('dev_r2')
+    const r = await createReminder(device, { title: 'call the dentist', dueAtMillis: inHours(1) })
+    const res = await completeReminder(device, r.reminderId)
+
+    expect(res.completed).toBe(true)
+    const after = getReminder(r.reminderId)!
+    expect(after.state).toBe('DONE')
+    expect(after.nextNagAtMillis).toBeNull()
+    expect(dueJobs(inHours(48)).filter((j) => j.kind === 'nudge' && j.reminderId === r.reminderId)).toHaveLength(0)
+  })
+
+  it('completing twice is a no-op rather than an error', async () => {
+    const device = makeDevice('dev_r3')
+    const r = await createReminder(device, { title: 'x', dueAtMillis: inHours(1) })
+    await completeReminder(device, r.reminderId)
+    expect((await completeReminder(device, r.reminderId)).completed).toBe(false)
+  })
+
+  it('ring=true arms an alarm that carries NO recurrence, even when the reminder repeats', async () => {
+    const device = makeDevice('dev_r4')
+    const due = DateTime.now().setZone(ZONE).plus({ hours: 3 }).toMillis()
+    const r = await createReminder(device, {
+      title: 'take meds',
+      dueAtMillis: due,
+      recurrence: 'FREQ=DAILY',
+      ring: true,
+    })
+    expect(r.alarmId).toBeTruthy()
+    const alarm = getAlarm(r.alarmId!)!
+    // The load-bearing assertion: the reminder owns the recurrence, the alarm never does. Without
+    // this, a DISMISSED event would call advanceRecurrence and silently roll the series forward.
+    expect(alarm.recurrence).toBeNull()
+    expect(r.recurrence).toBe('FREQ=DAILY')
+  })
+
+  it('completing a recurring occurrence rolls forward and stays OPEN', async () => {
+    const device = makeDevice('dev_r5')
+    const due = DateTime.now().setZone(ZONE).plus({ hours: 1 }).toMillis()
+    const r = await createReminder(device, { title: 'meds', dueAtMillis: due, recurrence: 'FREQ=DAILY' })
+    const res = await completeReminder(device, r.reminderId)
+
+    expect(res.completed).toBe(true)
+    expect(res.rolledTo).toBeGreaterThan(due)
+    const after = getReminder(r.reminderId)!
+    expect(after.state).toBe('OPEN')
+    expect(after.completedCount).toBe(1)
+    expect(after.nagCount).toBe(0) // ladder reset for the new occurrence
+  })
+
+  it('cancelling a recurring reminder ends the whole series', async () => {
+    const device = makeDevice('dev_r6')
+    const r = await createReminder(device, {
+      title: 'meds',
+      dueAtMillis: inHours(1),
+      recurrence: 'FREQ=DAILY',
+    })
+    await cancelReminder(device, r.reminderId)
+    const after = getReminder(r.reminderId)!
+    expect(after.state).toBe('CANCELLED')
+    expect(after.recurrence).toBeNull()
+    expect(after.nextNagAtMillis).toBeNull()
+  })
+
+  it('snoozing moves the next nudge without completing', async () => {
+    const device = makeDevice('dev_r7')
+    const r = await createReminder(device, { title: 'x', dueAtMillis: inHours(1) })
+    const until = inHours(5)
+    expect(snoozeReminder(r.reminderId, until)).toBe(true)
+    const after = getReminder(r.reminderId)!
+    expect(after.state).toBe('OPEN')
+    expect(after.nextNagAtMillis).toBe(until)
+  })
+
+  it('reopen undoes a completion', async () => {
+    const device = makeDevice('dev_r8')
+    const r = await createReminder(device, { title: 'x', dueAtMillis: inHours(1) })
+    await completeReminder(device, r.reminderId)
+    expect(reopenReminder(device, r.reminderId)).toBe(true)
+    expect(getReminder(r.reminderId)!.state).toBe('OPEN')
+  })
+
+  it('a dismissed reminder alarm starts the follow-up instead of completing it', async () => {
+    const device = makeDevice('dev_r9')
+    const r = await createReminder(device, {
+      title: 'post the parcel',
+      dueAtMillis: Date.now() - 60_000, // just went off
+      ring: true,
+      nagPolicy: 'persistent',
+    })
+    onReminderAlarmEvent(r.alarmId!, 'DISMISSED', ZONE)
+
+    const after = getReminder(r.reminderId)!
+    // Swiping the ring away is NOT doing the task.
+    expect(after.state).toBe('OPEN')
+    expect(after.nextNagAtMillis).not.toBeNull()
+  })
+
+  it('lists open reminders and filters overdue', async () => {
+    const device = makeDevice('dev_r10')
+    await createReminder(device, { title: 'past', dueAtMillis: Date.now() - 60_000 })
+    await createReminder(device, { title: 'future', dueAtMillis: inHours(5) })
+    expect(listReminders(device.deviceId, { state: 'open' })).toHaveLength(2)
+    const overdue = listReminders(device.deviceId, { state: 'open', overdueOnly: true })
+    expect(overdue).toHaveLength(1)
+    expect(overdue[0]!.title).toBe('past')
+  })
+
+  it('an undated reminder is created but never scheduled to nag', async () => {
+    const device = makeDevice('dev_r11')
+    const r = await createReminder(device, { title: 'someday: fix the shed' })
+    expect(r.state).toBe('OPEN')
+    expect(r.dueAtMillis).toBeNull()
+    expect(r.nextNagAtMillis).toBeNull()
+  })
+})

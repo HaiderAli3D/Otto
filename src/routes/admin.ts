@@ -6,6 +6,10 @@ import { sendData } from '../fcm/sender.js'
 import { newAlarmId } from '../lib/ids.js'
 import { armAlarm, cancelAlarm } from '../services/alarms.js'
 import { getDevice, listDevices, type Device } from '../services/devices.js'
+import { listFacts } from '../services/facts.js'
+import { pendingFor } from '../services/outbox.js'
+import { listReminders } from '../services/reminders.js'
+import { epochMillisToLocalHuman } from '../services/time.js'
 
 /**
  * Owner-only helpers: read a device's pairing secret (to paste into the app) and fire a test
@@ -32,6 +36,43 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       lastHeartbeatAt: d.lastHeartbeatAt,
     })),
   )
+
+  /**
+   * Read-only introspection of the assistant's state: what it is chasing, what it remembers, and
+   * anything queued because the WhatsApp window was shut. Debug surface only — every mutation
+   * still goes through the agent so the conversation stays the single source of truth.
+   */
+  app.get('/admin/state', async (req) => {
+    const query = req.query as { deviceId?: string }
+    const device = query.deviceId ? getDevice(query.deviceId) : listDevices()[0]
+    if (!device) return { error: 'no device registered yet' }
+    const zone = device.timezone
+    return {
+      deviceId: device.deviceId,
+      timezone: zone,
+      whatsappNumber: device.whatsappNumber,
+      lastInboundAt: device.lastInboundAt,
+      windowOpenUntil:
+        device.lastInboundAt === null
+          ? null
+          : epochMillisToLocalHuman(device.lastInboundAt + 24 * 60 * 60 * 1000, zone),
+      reminders: listReminders(device.deviceId, { state: 'all' }).map((r) => ({
+        reminderId: r.reminderId,
+        title: r.title,
+        state: r.state,
+        dueLocal: r.dueAtMillis === null ? null : epochMillisToLocalHuman(r.dueAtMillis, zone),
+        repeats: r.recurrence,
+        nagPolicy: r.nagPolicy,
+        nagCount: r.nagCount,
+        nextNagLocal: r.nextNagAtMillis === null ? null : epochMillisToLocalHuman(r.nextNagAtMillis, zone),
+        rings: Boolean(r.alarmId),
+      })),
+      facts: listFacts(device.deviceId).map((f) => ({ key: f.key, value: f.value, category: f.category })),
+      queued: device.whatsappNumber
+        ? pendingFor(device.whatsappNumber).map((o) => ({ kind: o.kind, body: o.body, createdAt: o.createdAt }))
+        : [],
+    }
+  })
 
   // Prove the pipe: arm a real alarm on the device N seconds from now.
   app.post('/admin/test-alarm', async (req, reply) => {

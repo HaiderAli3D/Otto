@@ -6,6 +6,7 @@ import { log } from '../lib/log.js'
 import { advanceRecurrence, listArmed, recordEvent } from '../services/alarms.js'
 import { verifyRequestSig } from '../services/deviceAuth.js'
 import { getDevice, latchAuth, setHeartbeat, setTimezone, setToken } from '../services/devices.js'
+import { onReminderAlarmEvent } from '../services/reminders.js'
 import { isValidZone } from '../services/time.js'
 
 /**
@@ -100,6 +101,11 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     // Fire-and-forget: the ack must not wait on an FCM push; the scheduler backstop covers loss.
     if (body.event === 'DISMISSED' || body.event === 'MISSED') {
       void advanceRecurrence(alarmId).catch((err) => log.error({ err, alarmId }, 'recurrence advance failed'))
+      // If this alarm belongs to a reminder, the ring firing is NOT the task being done — start
+      // the chat follow-up. (Reminder-owned alarms carry no recurrence, so advanceRecurrence
+      // above hits its guard and no-ops for them.)
+      const device = getDevice(body.deviceId)
+      if (device) onReminderAlarmEvent(alarmId, body.event, device.timezone)
     }
     return reply.code(204).send()
   })

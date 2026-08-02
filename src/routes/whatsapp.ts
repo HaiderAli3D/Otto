@@ -2,7 +2,18 @@ import type { FastifyInstance } from 'fastify'
 import { runAgentTurn } from '../agent/runner.js'
 import { config } from '../config.js'
 import { log } from '../lib/log.js'
-import { anyWhatsappLinked, claimWhatsappMessage, deviceForWhatsapp, linkWhatsapp } from '../services/devices.js'
+import {
+  anyWhatsappLinked,
+  claimWhatsappMessage,
+  deviceForWhatsapp,
+  getDevice,
+  linkWhatsapp,
+  markInbound,
+} from '../services/devices.js'
+import { maybeCollapseBacklog } from '../services/digest.js'
+import { flushOutbox } from '../services/outbox.js'
+import { listReminders } from '../services/reminders.js'
+import { appendAssistantTurns } from '../services/sessions.js'
 import { normalizeWaNumber, parseInboundMessages, sendText, verifySignature } from '../services/whatsapp.js'
 
 /**
@@ -86,14 +97,36 @@ async function handleInbound(from: string, type: string, text: string | null): P
     await sendText(from, 'Open the Otto app on your phone first so it can pair.')
     return
   }
-  // Non-text (voice note, image, …): tell the owner instead of silently eating the command.
+  // Stamp the 24h window FIRST, for every inbound including non-text: a voice note still reopens
+  // the window even though Otto can't read it, and everything proactive depends on this clock.
+  markInbound(device.deviceId)
+
+  // Non-text (voice note, image, …): tell the owner instead of silently eating the command. Make
+  // it reminder-aware — answering a nudge with a voice note would otherwise leave the reminder
+  // unresolved and Otto nagging forever, which is the worst failure mode of the whole feature.
   if (text === null) {
     log.info({ from, type }, 'Ignoring non-text WhatsApp message')
-    await sendText(from, "I can only read text messages right now — please type your request (e.g. “wake me at 7am”).")
+    const open = listReminders(device.deviceId, { state: 'open' })
+    const hint =
+      open.length === 1 && open[0]
+        ? ` If that was about "${open[0].title}", just send "done".`
+        : open.length > 1
+          ? ' If that was about a reminder, send "done" and tell me which one.'
+          : ''
+    await sendText(from, `I can only read text messages right now — please type your request.${hint}`)
     return
   }
   // Link only when the device has no number yet; never overwrite an existing owner binding.
   if (!device.whatsappNumber) linkWhatsapp(device.deviceId, from)
-  const reply = await runAgentTurn({ waUserId: from, device, text })
+
+  // Deliver anything queued while we couldn't reach them, BEFORE the agent turn, and record it as
+  // Otto's own earlier turns — otherwise the model has no idea what it just said and a bare
+  // "yep, done" is unresolvable.
+  const fresh = getDevice(device.deviceId) ?? device
+  await maybeCollapseBacklog(fresh, from)
+  const delivered = await flushOutbox(from, device.deviceId)
+  if (delivered.length > 0) appendAssistantTurns(from, device.deviceId, delivered)
+
+  const reply = await runAgentTurn({ waUserId: from, device: fresh, text })
   await sendText(from, reply)
 }
