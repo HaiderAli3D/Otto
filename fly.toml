@@ -15,7 +15,7 @@
 # min_machines_running = 1 and auto_stop_machines = false keep it up. DO NOT run
 # `fly scale count 0` or enable scale-to-zero — a stopped machine misses alarms.
 
-app = "otto-server"        # rename to your unique Fly app name
+app = "your-otto-server"  # created 2026-08-02; "otto-server" was taken globally
 primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https://fly.io/docs/reference/regions/
 
 [build]
@@ -23,8 +23,13 @@ primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https:
 
 [env]
   PORT = "3000"
-  # PUBLIC_ORIGIN is best set via `fly secrets set` once you know the URL, e.g.
-  #   PUBLIC_ORIGIN = "https://otto-server.fly.dev"
+  # Must live on the mounted volume below, or the SQLite DB (devices, pairing
+  # secrets, alarm series) is wiped on every deploy.
+  DATABASE_PATH = "/data/otto.sqlite"
+  DEFAULT_TIMEZONE = "Europe/London"
+  ANTHROPIC_MODEL = "claude-opus-4-8"
+  # Not a secret, so it lives here rather than in `fly secrets`.
+  PUBLIC_ORIGIN = "https://your-otto-server.fly.dev"
 
 [http_service]
   internal_port = 3000
