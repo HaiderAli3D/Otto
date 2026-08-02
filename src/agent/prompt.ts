@@ -1,7 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import type { Device } from '../services/devices.js'
 import { renderFacts } from '../services/facts.js'
-import { nowIsoInZone } from '../services/time.js'
+import { listReminders } from '../services/reminders.js'
+import { epochMillisToLocalHuman, nowIsoInZone } from '../services/time.js'
 
 /**
  * Frozen instruction block. Any edit invalidates the prompt cache for every user, which is fine —
@@ -59,9 +60,13 @@ with them.
 # Proactive messages
 - Messages you sent while the owner was away appear in this conversation as your own earlier
   turns. Treat them as things you already said — don't repeat them.
-- When there's a backlog you'll see an "[Otto context]" note listing what's outstanding. Open with
-  one natural summary of what matters, not a list of every stale nudge. Lead with what needs
-  action.
+- After a long gap the conversation starts fresh, so you may have no transcript at all. That is
+  normal and is not something to mention. What you remember about the owner, and everything you
+  are currently chasing, is given to you below regardless — work from that.
+- The open reminders listed below are always current, straight from the database. Use them to
+  answer "what have I got on?" without calling list_reminders, and to work out which reminder
+  someone means when they say "done". You still need list_reminders when you want ids for
+  anything other than the obvious single match.
 
 # Time
 - Resolve relative times ("in 20 minutes", "tomorrow at 6", "next Monday morning") against the
@@ -97,8 +102,28 @@ export function systemPrompt(device: Device): Anthropic.TextBlockParam[] {
       cache_control: { type: 'ephemeral' },
     },
     {
+      // Volatile tail, deliberately AFTER the breakpoint so it can change every turn for free.
+      // Open reminders live here rather than in the cached block precisely because they change
+      // often — and having them always present is what lets the conversation reset safely.
       type: 'text',
-      text: `Current local time: ${nowIsoInZone(device.timezone)} (timezone ${device.timezone}).`,
+      text: [
+        `Current local time: ${nowIsoInZone(device.timezone)} (timezone ${device.timezone}).`,
+        renderOpenReminders(device),
+      ].join('\n\n'),
     },
   ]
+}
+
+/** The live chase-list. Small, always accurate, and worth a tool round-trip on most turns. */
+function renderOpenReminders(device: Device): string {
+  const open = listReminders(device.deviceId, { state: 'open' })
+  if (open.length === 0) return 'You are not currently chasing the owner about anything.'
+  const now = Date.now()
+  const lines = open.map((r) => {
+    const when = r.dueAtMillis === null ? 'no date' : epochMillisToLocalHuman(r.dueAtMillis, device.timezone)
+    const overdue = r.dueAtMillis !== null && r.dueAtMillis < now ? ', OVERDUE' : ''
+    const nagged = r.nagCount > 0 ? `, nudged ${r.nagCount}×` : ''
+    return `- ${r.title} [${r.reminderId}] (${when}${overdue}${nagged})`
+  })
+  return `Open reminders you are chasing:\n${lines.join('\n')}`
 }

@@ -13,7 +13,7 @@ import {
 import { maybeCollapseBacklog } from '../services/digest.js'
 import { flushOutbox } from '../services/outbox.js'
 import { listReminders } from '../services/reminders.js'
-import { appendAssistantTurns } from '../services/sessions.js'
+import { appendAssistantTurns, maybeResetIdleSession } from '../services/sessions.js'
 import { normalizeWaNumber, parseInboundMessages, sendText, verifySignature } from '../services/whatsapp.js'
 
 /**
@@ -118,6 +118,13 @@ async function handleInbound(from: string, type: string, text: string | null): P
   }
   // Link only when the device has no number yet; never overwrite an existing owner binding.
   if (!device.whatsappNumber) linkWhatsapp(device.deviceId, from)
+
+  // Start a fresh thread after a long silence — BEFORE the flush below, so anything delivered on
+  // this contact lands in the new session and "done" stays resolvable. Durable knowledge (facts)
+  // and the open-reminder list are injected from the database, so nothing is actually lost.
+  if (maybeResetIdleSession(from)) {
+    log.info({ from }, 'conversation idle; starting a fresh thread')
+  }
 
   // Deliver anything queued while we couldn't reach them, BEFORE the agent turn, and record it as
   // Otto's own earlier turns — otherwise the model has no idea what it just said and a bare
