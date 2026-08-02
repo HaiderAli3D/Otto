@@ -25,6 +25,7 @@ export function ensureDevice(deviceId: string): Device {
     lastHeartbeatAt: null,
     lastInboundAt: null,
     lastDigestAt: null,
+    lastTemplateAt: null,
     createdAt: Date.now(),
   }
   db.insert(devices).values(row).run()

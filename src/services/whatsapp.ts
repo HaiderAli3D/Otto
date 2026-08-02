@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { config } from '../config.js'
 import { log } from '../lib/log.js'
+import { GRAPH_ATTEMPTS, GRAPH_BASE, graphFetch } from './metaGraph.js'
 
 /**
  * Verify Meta's `X-Hub-Signature-256` header against the raw request bytes.
@@ -18,14 +19,14 @@ export function verifySignature(rawBody: Buffer, signatureHeader: string | undef
   return timingSafeEqual(expectedBuf, actualBuf)
 }
 
-const SEND_ATTEMPTS = 3
-const RETRY_DELAYS_MS = [500, 1500]
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
 /**
- * Meta's "you are outside the 24-hour customer service window" error. Because the owner chose not
- * to register message templates, this is the expected failure for any proactive send while the
- * window is shut — it must be visible and actionable, not swallowed as a generic 4xx.
+ * Meta's "you are outside the 24-hour customer service window" error — the expected failure for any
+ * free-form proactive send while the window is shut, so it must be visible and actionable rather
+ * than swallowed as a generic 4xx.
+ *
+ * A registered message template (`config.meta.template`) is the only legal way through a shut
+ * window. It is optional: with none configured this error is simply terminal for that send and the
+ * row waits in the outbox for the owner to make contact.
  */
 export const META_ERROR_REENGAGEMENT = 131047
 
@@ -44,55 +45,50 @@ function metaErrorCode(body: string): number | undefined {
 }
 
 /**
- * Send a plain-text WhatsApp message via the Cloud API. Transient failures (network throw, 429,
- * 5xx) are retried up to 3 attempts; a permanent failure (other 4xx) is not. Logged, never
+ * Send a plain-text WhatsApp message via the Cloud API. Transient failures (network throw, abort,
+ * 429, 5xx) are retried up to 3 attempts; a permanent failure (other 4xx) is not. Logged, never
  * thrown — a broken reply must not crash the webhook.
  *
- * Returns a structured result so the outbox can tell "the window is shut, keep this queued" apart
- * from "this message is bad, give up". No-op when WhatsApp isn't configured.
+ * The retry envelope now lives in metaGraph.graphFetch, shared with the other Graph callers; what
+ * stays here is the only part that is about WhatsApp text specifically — reading Meta's error code
+ * out of the body so the outbox can tell "the window is shut, keep this queued" apart from "this
+ * message is bad, give up". No-op when WhatsApp isn't configured.
  */
 export async function sendText(toWaNumber: string, text: string): Promise<SendResult> {
   if (config.meta === null) {
     return { ok: false, permanent: true, status: 0, outOfWindow: false, body: 'whatsapp not configured' }
   }
-  const url = `https://graph.facebook.com/v22.0/${config.meta.phoneNumberId}/messages`
-  const body = JSON.stringify({
-    messaging_product: 'whatsapp',
-    to: toWaNumber,
-    type: 'text',
-    text: { body: text },
+  const result = await graphFetch(`${GRAPH_BASE}/${config.meta.phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.meta.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: toWaNumber,
+      type: 'text',
+      text: { body: text },
+    }),
   })
+  if (result.ok) return { ok: true }
 
-  for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${config.meta.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-      })
-      if (res.ok) return { ok: true }
-      const responseText = await res.text().catch(() => '')
-      if (res.status !== 429 && res.status < 500) {
-        const metaCode = metaErrorCode(responseText)
-        const outOfWindow = metaCode === META_ERROR_REENGAGEMENT
-        if (outOfWindow) {
-          log.warn({ metaCode, toWaNumber }, 'WhatsApp send rejected: outside the 24h window')
-        } else {
-          log.error({ status: res.status, metaCode, body: responseText, attempt }, 'WhatsApp sendText failed (permanent)')
-        }
-        return { ok: false, permanent: true, status: res.status, metaCode, outOfWindow, body: responseText }
-      }
-      log.warn({ status: res.status, attempt }, 'WhatsApp sendText failed; retrying')
-    } catch (err) {
-      log.warn({ err, attempt }, 'WhatsApp sendText threw; retrying')
-    }
-    if (attempt < SEND_ATTEMPTS) await sleep(RETRY_DELAYS_MS[attempt - 1] ?? 1500)
+  if (!result.permanent) {
+    log.error({ attempts: GRAPH_ATTEMPTS }, 'WhatsApp sendText failed after all retries — message dropped')
+    return { ok: false, permanent: false, status: 0, outOfWindow: false, body: 'retries exhausted' }
   }
-  log.error({ attempts: SEND_ATTEMPTS }, 'WhatsApp sendText failed after all retries — message dropped')
-  return { ok: false, permanent: false, status: 0, outOfWindow: false, body: 'retries exhausted' }
+
+  const metaCode = metaErrorCode(result.body)
+  const outOfWindow = metaCode === META_ERROR_REENGAGEMENT
+  if (outOfWindow) {
+    log.warn({ metaCode, toWaNumber }, 'WhatsApp send rejected: outside the 24h window')
+  } else {
+    log.error(
+      { status: result.status, metaCode, body: result.body, attempts: result.attempts },
+      'WhatsApp sendText failed (permanent)',
+    )
+  }
+  return { ok: false, permanent: true, status: result.status, metaCode, outOfWindow, body: result.body }
 }
 
 /** Digits-only form of a WhatsApp number, for allowlist comparison across "+44 …" vs "44…". */

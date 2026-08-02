@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { sessions } from '../db/schema.js'
-import { trimToValidStart, type Msg } from '../lib/history.js'
+import { stripAttachments, trimToValidStart, type Msg } from '../lib/history.js'
 
 export type { Msg }
 export { trimToValidStart }
@@ -17,8 +17,10 @@ export function loadSession(waUserId: string): Msg[] {
 }
 
 export function saveSession(waUserId: string, deviceId: string | null, messages: Msg[], max?: number): void {
-  // Always persist a valid leading shape so a long, tool-heavy thread can't poison itself.
-  const json = JSON.stringify(trimToValidStart(messages, max))
+  // Strip attachments BEFORE trimming, never after: stripping rewrites a message's shape (an image
+  // array becomes a plain string), and the leading-shape check has to see that final form. It also
+  // means the byte cap is measured on what actually gets stored.
+  const json = JSON.stringify(trimToValidStart(stripAttachments(messages), max))
   const now = Date.now()
   db.insert(sessions)
     .values({ waUserId, deviceId, messages: json, updatedAt: now })

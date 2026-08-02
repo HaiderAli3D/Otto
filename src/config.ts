@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { IANAZone } from 'luxon'
 import { z } from 'zod'
+import { parseQuietHours } from './lib/quietHours.js'
 
 // Load a local .env when present (no-op in prod, where env is injected by the host).
 // Never under vitest: tests must see only what test/setup-env.ts pins, not this machine's .env.
@@ -10,6 +11,54 @@ if (!process.env.VITEST) {
   } catch {
     /* no .env file — env comes from the host */
   }
+}
+
+/** What both schedule defaults accept as a deliberate "no window / no review", vs. a typo. */
+const OFF_SPECS = new Set(['', 'off', 'none'])
+
+/**
+ * Is this a usable QUIET_HOURS_DEFAULT?
+ *
+ * `parseQuietHours` returns null for BOTH "off" and "22-00:07" — it is a 3am-safe reader, so garbage
+ * has to degrade to "no quiet hours" rather than throw. Boot is the one place that can afford to
+ * tell the two apart, and must: a typo'd window would otherwise silently disable quiet hours
+ * forever, and the owner would only find out when a nudge landed at 04:00.
+ */
+function isQuietHoursSpec(value: string): boolean {
+  if (OFF_SPECS.has(value.trim().toLowerCase())) return true
+  return parseQuietHours(value) !== null
+}
+
+/** A weekly slot as a luxon weekday (1 = Monday … 7 = Sunday) plus a LOCAL wall-clock time. */
+export type WeeklyReviewSlot = { weekday: number; hour: number; minute: number } | null
+
+const WEEKDAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
+
+/**
+ * Parse `"SUN:18:00"`. `"off"`, `""` and anything unparseable all give null — same never-throws
+ * contract as `parseQuietHours`, and for the same reason: this value reaches the scheduler.
+ *
+ * Exported from config.ts (like `adminTokenRequired`) so it is unit-testable without booting, and so
+ * the weekly-review feature branch reads the owner's column with the exact parser boot validated.
+ */
+export function parseWeeklyReview(spec: string | null | undefined): WeeklyReviewSlot {
+  if (!spec) return null
+  const trimmed = spec.trim()
+  if (OFF_SPECS.has(trimmed.toLowerCase())) return null
+  const m = /^([A-Za-z]{3}):(\d{1,2}):(\d{2})$/.exec(trimmed)
+  if (!m) return null
+  const weekday = WEEKDAYS.indexOf(m[1]!.toUpperCase()) + 1
+  if (weekday === 0) return null
+  const hour = Number(m[2])
+  const minute = Number(m[3])
+  if (hour > 23 || minute > 59) return null
+  return { weekday, hour, minute }
+}
+
+/** Same "deliberate off vs. typo" split as `isQuietHoursSpec`. */
+function isWeeklyReviewSpec(value: string): boolean {
+  if (OFF_SPECS.has(value.trim().toLowerCase())) return true
+  return parseWeeklyReview(value) !== null
 }
 
 const raw = z
@@ -38,10 +87,34 @@ const raw = z
     // Comma-separated allowlist of owner WhatsApp numbers (any format; compared digits-only).
     // When unset, the server trusts the first number that messages it and rejects others.
     OWNER_WA_NUMBERS: z.string().optional(),
+    // An APPROVED WhatsApp message template, the only legal way to speak first once the 24h window
+    // has shut (optional). Nested under `meta` below, never beside it.
+    META_TEMPLATE_NAME: z.string().optional(),
+    META_TEMPLATE_LANG: z.string().default('en'),
 
     // Google Calendar/Tasks (optional).
     GOOGLE_OAUTH_CLIENT_ID: z.string().optional(),
     GOOGLE_OAUTH_CLIENT_SECRET: z.string().optional(),
+
+    // Speech-to-text for WhatsApp voice notes (optional). Any OpenAI-compatible
+    // /audio/transcriptions endpoint; the default base URL is Groq's Whisper.
+    STT_API_KEY: z.string().optional(),
+    STT_BASE_URL: z.string().default('https://api.groq.com/openai/v1'),
+    STT_MODEL: z.string().default('whisper-large-v3-turbo'),
+
+    // Google Maps Routes/Distance Matrix (optional) — real travel time for leave-by alarms.
+    GOOGLE_MAPS_API_KEY: z.string().optional(),
+
+    // Server-wide fallbacks for the per-device settings columns (device_settings). Both are
+    // validated HERE, at boot, rather than where they are read — which is a scheduler job at 3am.
+    QUIET_HOURS_DEFAULT: z
+      .string()
+      .default('22:00-07:00')
+      .refine(isQuietHoursSpec, (v) => ({ message: `QUIET_HOURS_DEFAULT "${v}" is not "HH:MM-HH:MM" or "off"` })),
+    WEEKLY_REVIEW_DEFAULT: z
+      .string()
+      .default('SUN:18:00')
+      .refine(isWeeklyReviewSpec, (v) => ({ message: `WEEKLY_REVIEW_DEFAULT "${v}" is not "DDD:HH:MM" or "off"` })),
 
     // Optional admin auth for /admin routes (recommended in production).
     ADMIN_TOKEN: z.string().optional(),
@@ -83,6 +156,10 @@ const metaComplete =
 
 const googleComplete = raw.GOOGLE_OAUTH_CLIENT_ID && raw.GOOGLE_OAUTH_CLIENT_SECRET
 
+const sttComplete = raw.STT_API_KEY
+
+const mapsComplete = raw.GOOGLE_MAPS_API_KEY
+
 export const config = {
   port: raw.PORT,
   publicOrigin: raw.PUBLIC_ORIGIN.replace(/\/$/, ''),
@@ -100,6 +177,10 @@ export const config = {
         verifyToken: raw.META_VERIFY_TOKEN!,
         phoneNumberId: raw.META_WA_PHONE_NUMBER_ID!,
         accessToken: raw.META_WA_ACCESS_TOKEN!,
+        // NESTED inside meta, not beside it: a template send needs the phone number id and the
+        // access token, so "template configured but WhatsApp isn't" must be unrepresentable rather
+        // than a state some future caller has to remember to check for.
+        template: raw.META_TEMPLATE_NAME ? { name: raw.META_TEMPLATE_NAME, lang: raw.META_TEMPLATE_LANG } : null,
       }
     : null,
   // Digits-only owner numbers (e.g. "+44 7700 900000" → "447700900000"); empty = trust-on-first-use.
@@ -114,6 +195,14 @@ export const config = {
         redirectUri: `${raw.PUBLIC_ORIGIN.replace(/\/$/, '')}/oauth/google/callback`,
       }
     : null,
+  stt: sttComplete
+    ? { apiKey: raw.STT_API_KEY!, baseUrl: raw.STT_BASE_URL.replace(/\/$/, ''), model: raw.STT_MODEL }
+    : null,
+  maps: mapsComplete ? { apiKey: raw.GOOGLE_MAPS_API_KEY! } : null,
+  // Raw strings, not parsed windows: the per-device column is also a raw string, so both sides go
+  // through the same parser at the point of use and can never disagree about what "off" means.
+  quietHoursDefault: raw.QUIET_HOURS_DEFAULT,
+  weeklyReviewDefault: raw.WEEKLY_REVIEW_DEFAULT,
 } as const
 
 if (adminTokenRequired(config.publicOrigin, config.adminToken)) {

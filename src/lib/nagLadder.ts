@@ -1,4 +1,4 @@
-import { DateTime } from 'luxon'
+import { nextLocalTimeAt } from '../services/time.js'
 
 export type NagPolicy = 'off' | 'gentle' | 'persistent'
 
@@ -14,13 +14,8 @@ export const MAX_NAGS = 8
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 
-/** 09:00 local on the next day strictly after `fromMillis`, in the owner's zone. */
-function nextMorning(fromMillis: number, zone: string, hour = 9): number {
-  const from = DateTime.fromMillis(fromMillis, { zone })
-  let target = from.set({ hour, minute: 0, second: 0, millisecond: 0 })
-  if (target <= from) target = target.plus({ days: 1 })
-  return target.toMillis()
-}
+/** The hour a morning rung lands on: late enough to be awake, early enough to still act on it. */
+const MORNING_HOUR = 9
 
 /**
  * When to nudge next, or null when the ladder is exhausted (the reminder stays OPEN and still
@@ -53,7 +48,7 @@ export function nextNagAt(params: {
   if (policy === 'gentle') {
     // due → +2h → next morning → stop
     if (nagCount === 1) return dueAtMillis + 2 * HOUR
-    if (nagCount === 2) return nextMorning(base, zone)
+    if (nagCount === 2) return nextLocalTimeAt(base, zone, MORNING_HOUR)
     return null
   }
 
@@ -61,7 +56,7 @@ export function nextNagAt(params: {
   if (nagCount === 1) return dueAtMillis + 30 * MINUTE
   if (nagCount === 2) return dueAtMillis + 2 * HOUR
   if (nagCount === 3) return dueAtMillis + 6 * HOUR
-  return nextMorning(base, zone)
+  return nextLocalTimeAt(base, zone, MORNING_HOUR)
 }
 
 /**

@@ -1,21 +1,15 @@
-import { DateTime } from 'luxon'
 import { composeDigest, type DigestItem } from '../agent/compose.js'
 import { log } from '../lib/log.js'
 import { markDigestSent, type Device } from './devices.js'
 import { enqueueOutbound, markSuperseded, pendingFor } from './outbox.js'
 import { listReminders } from './reminders.js'
-import { epochMillisToLocalHuman } from './time.js'
+import { epochMillisToLocalHuman, localDateKey, sameLocalDay } from './time.js'
 
 /** Queued nudges older than this are considered a backlog worth collapsing rather than replaying. */
 const BACKLOG_AGE_MS = 2 * 60 * 60 * 1000
 
 /** Below this, just deliver the messages normally — a digest of one is noise. */
 const MIN_BACKLOG = 2
-
-function sameLocalDay(a: number | null, b: number, zone: string): boolean {
-  if (a === null) return false
-  return DateTime.fromMillis(a, { zone }).toISODate() === DateTime.fromMillis(b, { zone }).toISODate()
-}
 
 /**
  * Collapse a stale queue into one catch-up message.
@@ -55,7 +49,7 @@ export async function maybeCollapseBacklog(device: Device, waUserId: string): Pr
     deviceId: device.deviceId,
     kind: 'digest',
     body,
-    dedupeKey: `digest:${DateTime.fromMillis(now, { zone: device.timezone }).toISODate()}`,
+    dedupeKey: `digest:${localDateKey(now, device.timezone)}`,
   })
   markDigestSent(device.deviceId, now)
   log.info({ waUserId, collapsed: stale.length, open: items.length }, 'collapsed nudge backlog into a digest')

@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { config } from '../config.js'
 import { nudgeText } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
+import { unquote } from '../lib/text.js'
 import { renderFacts } from '../services/facts.js'
 import { nudgeHistory } from '../services/outbox.js'
 import type { Reminder } from '../services/reminders.js'
@@ -91,10 +92,4 @@ export async function writeNudge(r: Reminder, zone: string, overdueDescription?:
     log.warn({ err, reminderId: r.reminderId }, 'nudge composition failed; using the templated fallback')
     return templated
   }
-}
-
-/** Models occasionally wrap a "reply with only the message" answer in quotes. Strip one layer. */
-function unquote(s: string): string {
-  const m = /^"([\s\S]+)"$/.exec(s.trim())
-  return m ? m[1]!.trim() : s.trim()
 }

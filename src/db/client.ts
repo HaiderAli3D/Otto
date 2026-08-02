@@ -53,6 +53,9 @@ export function ensureSchema(): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS alarm_events_dedupe
       ON alarm_events (alarm_id, event, at_millis);
+    -- Covers signals.ownerRecord, which runs on EVERY agent turn and aggregates by device + time.
+    -- The dedupe index leads with alarm_id and is useless to it; without this those were full scans.
+    CREATE INDEX IF NOT EXISTS alarm_events_device_time ON alarm_events (device_id, at_millis);
 
     CREATE TABLE IF NOT EXISTS sessions (
       wa_user_id TEXT PRIMARY KEY,
@@ -70,6 +73,15 @@ export function ensureSchema(): void {
       payload TEXT,
       attempts INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
+    );
+
+    -- Owner-authored settings. Deliberately MINIMAL here: every other column arrives through an
+    -- ensureColumn line below, so a database created by an old build and one created today converge
+    -- on exactly the same shape. CREATE TABLE IF NOT EXISTS never alters an existing table, so a
+    -- column listed only here would be missing from every database that already exists.
+    CREATE TABLE IF NOT EXISTS device_settings (
+      device_id TEXT PRIMARY KEY,
+      updated_at INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS google_accounts (
@@ -148,9 +160,29 @@ export function ensureSchema(): void {
   ensureColumn('devices', 'auth_latched', 'auth_latched INTEGER NOT NULL DEFAULT 0')
   ensureColumn('devices', 'last_inbound_at', 'last_inbound_at INTEGER')
   ensureColumn('devices', 'last_digest_at', 'last_digest_at INTEGER')
+  ensureColumn('devices', 'last_template_at', 'last_template_at INTEGER')
   ensureColumn('sessions', 'fail_count', 'fail_count INTEGER NOT NULL DEFAULT 0')
   ensureColumn('jobs', 'reminder_id', 'reminder_id TEXT')
   ensureColumn('reminders', 'defer_count', 'defer_count INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('alarms', 'wake_check', 'wake_check INTEGER NOT NULL DEFAULT 0')
+
+  // device_settings: the entire column set, matching `deviceSettings` in schema.ts. SQLite accepts
+  // ADD COLUMN ... NOT NULL only with a constant DEFAULT, which every non-null column here supplies.
+  ensureColumn('device_settings', 'brief_enabled', 'brief_enabled INTEGER NOT NULL DEFAULT 1')
+  ensureColumn('device_settings', 'brief_hour', 'brief_hour INTEGER NOT NULL DEFAULT 7')
+  ensureColumn('device_settings', 'brief_minute', 'brief_minute INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('device_settings', 'evening_brief_enabled', 'evening_brief_enabled INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('device_settings', 'evening_brief_hour', 'evening_brief_hour INTEGER NOT NULL DEFAULT 21')
+  ensureColumn('device_settings', 'evening_brief_minute', 'evening_brief_minute INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('device_settings', 'last_brief_at', 'last_brief_at INTEGER')
+  ensureColumn('device_settings', 'last_evening_brief_at', 'last_evening_brief_at INTEGER')
+  ensureColumn('device_settings', 'quiet_hours', 'quiet_hours TEXT')
+  ensureColumn('device_settings', 'weekly_review_at', 'weekly_review_at TEXT')
+  ensureColumn('device_settings', 'last_weekly_review_at', 'last_weekly_review_at INTEGER')
+  ensureColumn('device_settings', 'auto_wake_alarm', 'auto_wake_alarm INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('device_settings', 'auto_leave_by_alarm', 'auto_leave_by_alarm INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('device_settings', 'default_travel_minutes', 'default_travel_minutes INTEGER NOT NULL DEFAULT 30')
+  ensureColumn('device_settings', 'get_ready_minutes', 'get_ready_minutes INTEGER NOT NULL DEFAULT 45')
 }
 
 function ensureColumn(table: string, column: string, ddl: string): void {

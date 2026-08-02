@@ -7,9 +7,18 @@ vi.mock('../src/services/whatsapp.js', async (orig) => {
   return { ...actual, sendText: sendMock }
 })
 
-import { ensureSchema } from '../src/db/client.js'
+import { eq } from 'drizzle-orm'
+import { db, ensureSchema } from '../src/db/client.js'
+import { outbox } from '../src/db/schema.js'
 import { markInbound } from '../src/services/devices.js'
-import { enqueueOutbound, flushOutbox, pendingFor, supersedePending, windowOpen } from '../src/services/outbox.js'
+import {
+  MAX_OUTBOX_ATTEMPTS,
+  enqueueOutbound,
+  flushOutbox,
+  pendingFor,
+  supersedePending,
+  windowOpen,
+} from '../src/services/outbox.js'
 import { makeDevice } from './helpers.js'
 
 beforeEach(() => {
@@ -90,6 +99,32 @@ describe('outbox', () => {
     expect(delivered).toEqual([])
     expect(sendMock).not.toHaveBeenCalled()
     expect(pendingFor('4481')).toHaveLength(0)
+  })
+
+  it('retires a row that has exhausted its attempts instead of blocking the queue behind it', async () => {
+    const device = makeDevice('dev_o7')
+    markInbound(device.deviceId)
+    // Transient forever: the transport is down, or this one message is somehow unsendable.
+    sendMock.mockResolvedValue({ ok: false, permanent: false, status: 0, outOfWindow: false, body: 'retries exhausted' })
+    const common = { waUserId: '4483', deviceId: device.deviceId, kind: 'nudge' as const }
+    enqueueOutbound({ ...common, body: 'stuck', dedupeKey: 'n:stuck' })
+    enqueueOutbound({ ...common, body: 'behind it', dedupeKey: 'n:behind' })
+
+    // Each flush burns one attempt on the head row and stops — the row behind it is never tried.
+    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS - 1; i++) await flushOutbox('4483', device.deviceId)
+    expect(pendingFor('4483').map((r) => r.body)).toEqual(['stuck', 'behind it'])
+
+    // The attempt that reaches the cap gives up on the head row rather than blocking on it forever.
+    await flushOutbox('4483', device.deviceId)
+    expect(pendingFor('4483').map((r) => r.body)).toEqual(['behind it'])
+    const retired = db.select().from(outbox).where(eq(outbox.body, 'stuck')).get()
+    // FAILED, not deleted: the audit trail is the point of keeping outbox rows around.
+    expect(retired?.state).toBe('FAILED')
+    expect(retired?.attempts).toBe(MAX_OUTBOX_ATTEMPTS)
+
+    // …and the message that was stuck behind it goes out as soon as sending works again.
+    sendMock.mockResolvedValue({ ok: true })
+    expect(await flushOutbox('4483', device.deviceId)).toEqual(['behind it'])
   })
 
   it('supersedes queued nudges when the reminder is completed', () => {

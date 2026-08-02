@@ -22,7 +22,14 @@ async function main(): Promise<void> {
     {
       port: config.port,
       origin: config.publicOrigin,
-      features: { whatsapp: Boolean(config.meta), agent: Boolean(config.anthropic), google: Boolean(config.google) },
+      features: {
+        whatsapp: Boolean(config.meta),
+        agent: Boolean(config.anthropic),
+        google: Boolean(config.google),
+        voice: Boolean(config.stt),
+        template: Boolean(config.meta?.template),
+        maps: Boolean(config.maps),
+      },
     },
     'Otto server up',
   )

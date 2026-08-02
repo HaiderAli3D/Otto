@@ -17,7 +17,48 @@ export const devices = sqliteTable('devices', {
   lastInboundAt: integer('last_inbound_at'),
   // Day-boundary marker (device timezone) for the once-a-day backlog digest.
   lastDigestAt: integer('last_digest_at'),
+  // Last time a paid template message was sent to prise the 24h window back open. A transport fact
+  // written by the sender, NOT an owner setting — hence here and not in device_settings.
+  lastTemplateAt: integer('last_template_at'),
   createdAt: integer('created_at').notNull(),
+})
+
+/**
+ * Owner-authored settings, one row per device. Deliberately NOT more columns on `devices`.
+ *
+ * `devices` is transport and identity — fcm token, zone, heartbeat, the 24h window clock — and every
+ * one of those columns is written BY THE SYSTEM from a device signal, on paths that run on every
+ * request. These are the opposite: the owner authors them from chat, the list keeps growing as
+ * features land, and they are read on a handful of scheduler paths. Mixing the two would mean a
+ * "move my brief to 7:30" chat message rewrites the row that push delivery depends on.
+ *
+ * Every hour/minute here is LOCAL WALL-CLOCK time in `devices.timezone`, never a UTC offset: 07:00
+ * means 07:00 to the owner in July and in January. The instant is computed only when a job is
+ * scheduled (services/time.ts `nextLocalTimeAt`), so DST moves the offset, not the wake-up.
+ *
+ * `services/settings.ts getSettings()` fills every default, so a device with no row here is never a
+ * special case for a caller. The WHOLE column set lands in one migration even though most of it is
+ * unused until its feature arrives — four parallel feature branches must never each edit the same
+ * migration, and SQLite has no cheap way to reconcile that after the fact.
+ */
+export const deviceSettings = sqliteTable('device_settings', {
+  deviceId: text('device_id').primaryKey(),
+  briefEnabled: integer('brief_enabled', { mode: 'boolean' }).notNull().default(true),
+  briefHour: integer('brief_hour').notNull().default(7),
+  briefMinute: integer('brief_minute').notNull().default(0),
+  eveningBriefEnabled: integer('evening_brief_enabled', { mode: 'boolean' }).notNull().default(false),
+  eveningBriefHour: integer('evening_brief_hour').notNull().default(21),
+  eveningBriefMinute: integer('evening_brief_minute').notNull().default(0),
+  lastBriefAt: integer('last_brief_at'),
+  lastEveningBriefAt: integer('last_evening_brief_at'),
+  quietHours: text('quiet_hours'), // "22:00-07:00" | "off" | null => config.quietHoursDefault
+  weeklyReviewAt: text('weekly_review_at'), // "SUN:18:00" | "off" | null => config.weeklyReviewDefault
+  lastWeeklyReviewAt: integer('last_weekly_review_at'),
+  autoWakeAlarm: integer('auto_wake_alarm', { mode: 'boolean' }).notNull().default(false),
+  autoLeaveByAlarm: integer('auto_leave_by_alarm', { mode: 'boolean' }).notNull().default(false),
+  defaultTravelMinutes: integer('default_travel_minutes').notNull().default(30),
+  getReadyMinutes: integer('get_ready_minutes').notNull().default(45),
+  updatedAt: integer('updated_at').notNull(),
 })
 
 /** The authoritative alarm set. The app arms `state='ARMED'` alarms and reports back events. */
@@ -29,6 +70,9 @@ export const alarms = sqliteTable('alarms', {
   state: text('state').notNull().default('ARMED'),
   allowWhileIdle: integer('allow_while_idle', { mode: 'boolean' }).notNull().default(true),
   recurrence: text('recurrence'), // optional RRULE for recurring reminders
+  // This alarm is a wake-up the wake-check feature follows up on ("are you actually up?"). Landed
+  // with the rest of the Phase 0 migration so that feature branch adds no DDL of its own.
+  wakeCheck: integer('wake_check', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -45,7 +89,14 @@ export const alarmEvents = sqliteTable(
     appVersion: text('app_version'),
     receivedAt: integer('received_at').notNull(),
   },
-  (t) => ({ dedupe: uniqueIndex('alarm_events_dedupe').on(t.alarmId, t.event, t.atMillis) }),
+  (t) => ({
+    dedupe: uniqueIndex('alarm_events_dedupe').on(t.alarmId, t.event, t.atMillis),
+    // signals.ownerRecord runs on EVERY agent turn (agent/prompt.ts renders the record into the
+    // volatile prompt tail) and issues four aggregates filtered by device_id + at_millis. The dedupe
+    // index leads with alarm_id, so not one of them could use it: four full scans of a table that
+    // deliberately keeps 90 days of history, on the hot path of every single message.
+    deviceTime: index('alarm_events_device_time').on(t.deviceId, t.atMillis),
+  }),
 )
 
 /** Per-WhatsApp-user conversation state for the Claude agent. */
@@ -159,9 +210,10 @@ export const facts = sqliteTable(
 /**
  * Queued outbound WhatsApp messages. Everything Otto says that is NOT a direct reply goes here.
  *
- * The owner chose no message templates, so free-form sends are only legal inside the 24h window.
- * A row stays PENDING while the window is shut and is flushed on next contact (collapsed into a
- * digest if stale), rather than being dropped or rejected by Meta.
+ * Free-form sends are only legal inside Meta's 24h window (an approved template is optional config
+ * and can only re-open it, never carry arbitrary text). A row stays PENDING while the window is shut
+ * and is flushed on next contact (collapsed into a digest if stale), rather than being dropped or
+ * rejected by Meta.
  */
 export const outbox = sqliteTable(
   'outbox',
@@ -169,7 +221,9 @@ export const outbox = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     waUserId: text('wa_user_id').notNull(),
     deviceId: text('device_id'),
-    kind: text('kind').notNull(), // nudge | digest | missed_alarm | system_warning
+    // Free-form TEXT, so a new kind needs no DDL — the authority on the set is OutboxKind in
+    // services/outbox.ts: nudge | digest | missed_alarm | system_warning | brief | weekly | wake_check
+    kind: text('kind').notNull(),
     body: text('body').notNull(),
     reminderId: text('reminder_id'),
     dedupeKey: text('dedupe_key'), // e.g. "nag:rem_01H...:3"

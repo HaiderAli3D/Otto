@@ -6,7 +6,20 @@ import { clearInboundWindow, getDevice, type Device } from './devices.js'
 import { sendText } from './whatsapp.js'
 
 export type OutboxRow = typeof outbox.$inferSelect
-export type OutboxKind = 'nudge' | 'digest' | 'missed_alarm' | 'system_warning'
+
+/**
+ * Every kind of proactive message. Declared in full here rather than grown per feature branch, for
+ * the same reason as JobKind in services/jobs.ts: four branches must not each edit one union.
+ * The column is free-form TEXT, so adding a member needs no migration.
+ */
+export type OutboxKind =
+  | 'nudge'
+  | 'digest'
+  | 'missed_alarm'
+  | 'system_warning'
+  | 'brief'
+  | 'weekly'
+  | 'wake_check'
 
 const WINDOW_MS = 24 * 60 * 60 * 1000
 /** Meta's clock is authoritative; don't race the edge of the window and eat a 131047. */
@@ -16,8 +29,27 @@ const WINDOW_SAFETY_MS = 30 * 60 * 1000
 export const DEFAULT_TTL_MS = 18 * 60 * 60 * 1000
 
 /**
- * Is the WhatsApp free-form window open? The owner chose not to register message templates, so
- * this gates every proactive send: outside it, Meta rejects free-form text with error 131047.
+ * Hard backstop for a PENDING row, enforced by gc. `expiresAtMillis` covers the normal case, but a
+ * row enqueued with an explicit long TTL — or with none, if a future caller forgets — can otherwise
+ * sit PENDING forever: every other sweep in gc only looks at terminal states.
+ */
+export const PENDING_HARD_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * Give up on a message after this many delivery attempts.
+ *
+ * flushOutbox stops the whole pass on a transient failure, so without a cap the head-of-queue row is
+ * retried on every flush forever and every message queued BEHIND it is never even attempted. Ten
+ * attempts is a row that has survived ten separate flushes: whatever is wrong is not transient.
+ */
+export const MAX_OUTBOX_ATTEMPTS = 10
+
+/**
+ * Is the WhatsApp free-form window open? This gates every proactive send: outside it, Meta rejects
+ * free-form text with error 131047.
+ *
+ * Closed does not mean unreachable — a registered message template can knock on a shut window —
+ * but it does mean nothing Otto composes can go out as written until the owner replies.
  */
 export function windowOpen(device: Device, now: number = Date.now()): boolean {
   return device.lastInboundAt !== null && now - device.lastInboundAt < WINDOW_MS - WINDOW_SAFETY_MS
@@ -134,8 +166,20 @@ export async function flushOutbox(waUserId: string, deviceId: string | null): Pr
         .run()
       continue
     }
-    // Transient — leave PENDING, count the attempt, stop this pass.
-    db.update(outbox).set({ attempts: row.attempts + 1 }).where(eq(outbox.id, row.id)).run()
+    // Transient — count the attempt and stop this pass, EXCEPT once the row has exhausted its
+    // attempts. This row is at the head of the queue and the `break` below is unconditional, so a
+    // row that can never be sent used to block every message behind it for as long as it existed.
+    // Retire it and carry on to the next one instead.
+    const attempts = row.attempts + 1
+    if (attempts >= MAX_OUTBOX_ATTEMPTS) {
+      db.update(outbox)
+        .set({ state: 'FAILED', attempts, lastError: res.body.slice(0, 500) })
+        .where(eq(outbox.id, row.id))
+        .run()
+      log.warn({ waUserId, id: row.id, attempts }, 'outbox: giving up on a message after max attempts')
+      continue
+    }
+    db.update(outbox).set({ attempts }).where(eq(outbox.id, row.id)).run()
     break
   }
   return delivered
