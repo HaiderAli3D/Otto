@@ -2,7 +2,8 @@ import { and, eq, sql } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { reminders } from '../db/schema.js'
 import { newAlarmId } from '../lib/ids.js'
-import { nextNagAt, nudgeText, type NagPolicy } from '../lib/nagLadder.js'
+import { writeNudge } from '../agent/nudge.js'
+import { nextNagAt, type NagPolicy } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
 import { armAlarm } from './alarms.js'
 import { getDevice } from './devices.js'
@@ -86,11 +87,14 @@ export async function runNudge(reminderId: string): Promise<void> {
       before.dueAtMillis !== null && before.dueAtMillis < now
         ? `due ${epochMillisToLocalHuman(before.dueAtMillis, device.timezone)}`
         : undefined
+    // Composed after the claim, so only the winner pays for the call. `before` is the pre-increment
+    // snapshot, which is what both the writer and its templated fallback expect.
+    const body = await writeNudge(before, device.timezone, overdue)
     const sent = await enqueueAndTryFlush({
       waUserId,
       deviceId: device.deviceId,
       kind: 'nudge',
-      body: nudgeText(before.title, before.nagCount, overdue),
+      body,
       reminderId,
       dedupeKey: `nag:${reminderId}:${before.nagCount}`,
     })

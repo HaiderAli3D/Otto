@@ -27,7 +27,7 @@ primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https:
   # secrets, alarm series) is wiped on every deploy.
   DATABASE_PATH = "/data/otto.sqlite"
   DEFAULT_TIMEZONE = "Europe/London"
-  ANTHROPIC_MODEL = "claude-opus-4-8"
+  ANTHROPIC_MODEL = "claude-sonnet-5"
   # Not a secret, so it lives here rather than in `fly secrets`.
   PUBLIC_ORIGIN = "https://your-otto-server.fly.dev"
 

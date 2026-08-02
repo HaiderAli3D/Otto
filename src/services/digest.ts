@@ -40,6 +40,8 @@ export async function maybeCollapseBacklog(device: Device, waUserId: string): Pr
     title: r.title,
     due: r.dueAtMillis === null ? null : epochMillisToLocalHuman(r.dueAtMillis, device.timezone),
     overdue: r.dueAtMillis !== null && r.dueAtMillis < now,
+    chased: r.nagCount,
+    moved: r.deferCount,
   }))
   if (items.length === 0) {
     markSuperseded(stale.map((r) => r.id))

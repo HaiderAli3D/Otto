@@ -113,6 +113,9 @@ export const reminders = sqliteTable(
     nextNagAtMillis: integer('next_nag_at_millis'), // null = ladder exhausted / nagging off
     nagCount: integer('nag_count').notNull().default(0),
     lastNaggedAtMillis: integer('last_nagged_at_millis'),
+    // Times the owner has pushed this back without finishing it. Never reset — it is the record
+    // Otto cites when he pushes back, and a deferral the owner later "fixed" is still a deferral.
+    deferCount: integer('defer_count').notNull().default(0),
     // Opt-in: ring the phone when WhatsApp is out of window and this is badly overdue. FCM can
     // only ring (CommandParser accepts ARM_ALARM|CANCEL_ALARM|SYNC|PING), so this WILL wake them.
     escalateWithAlarm: integer('escalate_with_alarm', { mode: 'boolean' }).notNull().default(false),

@@ -99,6 +99,7 @@ export async function createReminder(
     nextNagAtMillis: firstNag,
     nagCount: 0,
     lastNaggedAtMillis: null,
+    deferCount: 0,
     escalateWithAlarm: params.escalateWithAlarm ?? false,
     alarmId,
     completedAtMillis: null,
@@ -196,12 +197,18 @@ export async function cancelReminder(device: Device, reminderId: string): Promis
   return true
 }
 
-/** Push the next follow-up back without completing. "Snoozed" is just a future nextNagAtMillis. */
+/**
+ * Push the next follow-up back without completing. "Snoozed" is just a future nextNagAtMillis.
+ *
+ * This is the only deferral path in the system — there is no reschedule tool — so it is the only
+ * place `deferCount` moves. That counter is what lets Otto say "fourth move" and be telling the
+ * truth rather than bluffing.
+ */
 export function snoozeReminder(reminderId: string, untilMillis: number): boolean {
   const r = getReminder(reminderId)
   if (!r || r.state !== 'OPEN') return false
   db.update(reminders)
-    .set({ nextNagAtMillis: untilMillis, updatedAt: Date.now() })
+    .set({ nextNagAtMillis: untilMillis, deferCount: r.deferCount + 1, updatedAt: Date.now() })
     .where(eq(reminders.reminderId, reminderId))
     .run()
   cancelNudges(reminderId)

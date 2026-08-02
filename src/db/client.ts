@@ -96,6 +96,7 @@ export function ensureSchema(): void {
       next_nag_at_millis INTEGER,
       nag_count INTEGER NOT NULL DEFAULT 0,
       last_nagged_at_millis INTEGER,
+      defer_count INTEGER NOT NULL DEFAULT 0,
       escalate_with_alarm INTEGER NOT NULL DEFAULT 0,
       alarm_id TEXT,
       completed_at_millis INTEGER,
@@ -149,6 +150,7 @@ export function ensureSchema(): void {
   ensureColumn('devices', 'last_digest_at', 'last_digest_at INTEGER')
   ensureColumn('sessions', 'fail_count', 'fail_count INTEGER NOT NULL DEFAULT 0')
   ensureColumn('jobs', 'reminder_id', 'reminder_id TEXT')
+  ensureColumn('reminders', 'defer_count', 'defer_count INTEGER NOT NULL DEFAULT 0')
 }
 
 function ensureColumn(table: string, column: string, ddl: string): void {

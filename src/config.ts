@@ -28,7 +28,7 @@ const raw = z
 
     // Claude agent (optional — endpoints/FCM work without it).
     ANTHROPIC_API_KEY: z.string().optional(),
-    ANTHROPIC_MODEL: z.string().default('claude-opus-4-8'),
+    ANTHROPIC_MODEL: z.string().default('claude-sonnet-5'),
 
     // WhatsApp Cloud API (optional — enables the inbound webhook + replies).
     META_APP_SECRET: z.string().optional(),

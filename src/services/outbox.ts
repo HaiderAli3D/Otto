@@ -64,6 +64,26 @@ export function pendingFor(waUserId: string): OutboxRow[] {
     .all()
 }
 
+/**
+ * Nudges already written for this reminder, oldest first — what the owner has seen, or is about to.
+ *
+ * PENDING counts alongside SENT: a queued nudge goes out immediately before the next one in the
+ * same flush, so for the purpose of "don't say that again" it has effectively been said.
+ * SUPERSEDED, EXPIRED and FAILED rows are excluded — nobody ever read those.
+ */
+export function nudgeHistory(reminderId: string, limit = 6): string[] {
+  return db
+    .select({ body: outbox.body })
+    .from(outbox)
+    .where(
+      and(eq(outbox.reminderId, reminderId), eq(outbox.kind, 'nudge'), inArray(outbox.state, ['SENT', 'PENDING'])),
+    )
+    .orderBy(asc(outbox.createdAt))
+    .all()
+    .slice(-limit)
+    .map((r) => r.body)
+}
+
 /** Drop queued messages for a reminder — it was completed or cancelled before they went out. */
 export function supersedePending(reminderId: string): void {
   db.update(outbox)

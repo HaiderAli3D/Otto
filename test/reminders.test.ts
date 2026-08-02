@@ -154,3 +154,43 @@ describe('reminder lifecycle', () => {
     expect(r.nextNagAtMillis).toBeNull()
   })
 })
+
+describe('the defer counter', () => {
+  // This is the number Otto cites when he pushes back. If it were wrong he would be bluffing, and
+  // a coach the owner can catch out is a coach the owner stops reading.
+  it('starts at zero', async () => {
+    const device = makeDevice('dev_d1')
+    const r = await createReminder(device, { title: 'the gym', dueAtMillis: inHours(2) })
+    expect(r.deferCount).toBe(0)
+  })
+
+  it('counts every snooze', async () => {
+    const device = makeDevice('dev_d2')
+    const r = await createReminder(device, { title: 'the gym', dueAtMillis: inHours(2) })
+
+    snoozeReminder(r.reminderId, inHours(3))
+    snoozeReminder(r.reminderId, inHours(4))
+    snoozeReminder(r.reminderId, inHours(5))
+
+    expect(getReminder(r.reminderId)!.deferCount).toBe(3)
+  })
+
+  it('does not count a snooze that was rejected', async () => {
+    const device = makeDevice('dev_d3')
+    const r = await createReminder(device, { title: 'the gym', dueAtMillis: inHours(2) })
+    await completeReminder(device, r.reminderId)
+
+    expect(snoozeReminder(r.reminderId, inHours(3))).toBe(false)
+    expect(getReminder(r.reminderId)!.deferCount).toBe(0)
+  })
+
+  it('survives completing and reopening — a deferral already happened', async () => {
+    const device = makeDevice('dev_d4')
+    const r = await createReminder(device, { title: 'the gym', dueAtMillis: inHours(2) })
+    snoozeReminder(r.reminderId, inHours(3))
+    await completeReminder(device, r.reminderId)
+    reopenReminder(device, r.reminderId)
+
+    expect(getReminder(r.reminderId)!.deferCount).toBe(1)
+  })
+})
