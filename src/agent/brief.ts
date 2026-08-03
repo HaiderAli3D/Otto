@@ -33,6 +33,8 @@ export const BRIEF_SYSTEM = [
     'A morning brief is about TODAY. An evening brief is about TOMORROW. Only ever one of the two.',
     'The data below is the WHOLE of your evidence. Invent no traffic, no weather, no travel time and',
     'no history you were not given.',
+    'If the calendar says it could not be read, say so in a few words and never imply the day is',
+    'clear — you do not know that. An empty calendar and an unreadable one are different messages.',
     'Three or four items at most. Drop the least important rather than listing everything.',
     'One short line per item is allowed HERE ONLY. That narrowly overrides the one-to-three-sentence',
     'rule in # Writing, for this message and nothing else.',
@@ -55,6 +57,14 @@ export type BriefInput = {
   reminders: Array<{ title: string; evidence: string }>
   /** Alarms already armed for the window, excluding any a reminder is renting. */
   alarms: Array<{ label: string; firesAtLocal: string }>
+  /**
+   * The calendar could not be read at all — revoked grant, expired token, Google down.
+   *
+   * Distinct from an empty `events`, and the distinction is the whole point: "nothing on today" is a
+   * claim about their day, and making it because we could not ask is how the owner misses a 09:30
+   * appointment on the strength of a message that sounded certain.
+   */
+  calendarUnreachable: boolean
 }
 
 /**
@@ -68,6 +78,11 @@ export type BriefInput = {
 export function briefFallback(input: BriefInput): string {
   const day = input.slot === 'morning' ? 'Today' : 'Tomorrow'
   const lines: string[] = []
+  if (input.calendarUnreachable) {
+    // Said even though it is a fourth line, because the alternative is a brief that reads as a
+    // complete picture of the day while silently missing every appointment in it.
+    lines.push("I can't see your calendar right now.")
+  }
   if (input.events.length > 0) {
     lines.push(`${day}: ${input.events.map((e) => `${e.startLocal} ${e.summary}`).join(', ')}.`)
   }
@@ -87,7 +102,9 @@ function renderInput(input: BriefInput): string {
     `This is the ${input.slot} brief, about ${day}. Timezone ${input.zone}.`,
     input.events.length > 0
       ? `Calendar (${day}):\n${input.events.map((e) => `- ${e.startLocal} ${e.summary}`).join('\n')}`
-      : `Calendar (${day}): nothing.`,
+      : input.calendarUnreachable
+        ? `Calendar (${day}): COULD NOT BE READ. This is not an empty calendar — it is no calendar.`
+        : `Calendar (${day}): nothing.`,
     input.reminders.length > 0
       ? `Open reminders:\n${input.reminders.map((r) => `- ${r.title} (${r.evidence})`).join('\n')}`
       : 'Open reminders: none.',

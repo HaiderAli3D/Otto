@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // vi.mock is hoisted above the file body, so the mock fns must be created inside vi.hoisted.
 const { sendMock, templateMock } = vi.hoisted(() => ({
@@ -10,14 +10,23 @@ vi.mock('../src/services/whatsapp.js', async (orig) => {
   return { ...actual, sendText: sendMock, sendTemplate: templateMock }
 })
 
+import { DateTime } from 'luxon'
 import { eq } from 'drizzle-orm'
 import { config } from '../src/config.js'
 import { db, ensureSchema } from '../src/db/client.js'
 import { outbox } from '../src/db/schema.js'
-import { getDevice, linkWhatsapp, markInbound, markTemplateSent, type Device } from '../src/services/devices.js'
+import {
+  clearInboundWindow,
+  getDevice,
+  linkWhatsapp,
+  markInbound,
+  markTemplateSent,
+  type Device,
+} from '../src/services/devices.js'
 import {
   MAX_OUTBOX_ATTEMPTS,
   TEMPLATE_COOLDOWN_MS,
+  enqueueAndTryFlush,
   enqueueOutbound,
   flushOutbox,
   pendingFor,
@@ -42,7 +51,27 @@ beforeEach(() => {
   templateMock.mockResolvedValue({ ok: true })
 })
 
+// One case fakes Date to drive a claim past STALE_CLAIM_MS; a fake clock leaking into the next file
+// would be far harder to diagnose than it is to reset here.
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 const DAY = 24 * 60 * 60 * 1000
+
+/** A quiet window that certainly contains `at`, in the device zone (UTC under vitest). */
+function windowAround(at: number): string {
+  const dt = DateTime.fromMillis(at, { zone: 'UTC' })
+  const hhmm = (d: DateTime): string => d.toFormat('HH:mm')
+  return `${hhmm(dt.minus({ minutes: 90 }))}-${hhmm(dt.plus({ hours: 3 }))}`
+}
+
+/** A window that certainly does NOT contain `at`, and ends comfortably before it. */
+function windowBefore(at: number): string {
+  const dt = DateTime.fromMillis(at, { zone: 'UTC' })
+  const hhmm = (d: DateTime): string => d.toFormat('HH:mm')
+  return `${hhmm(dt.minus({ hours: 5 }))}-${hhmm(dt.minus({ hours: 2 }))}`
+}
 
 describe('24h window', () => {
   it('is shut when the owner has never messaged', () => {
@@ -237,13 +266,160 @@ describe('shouldKnock', () => {
   })
 })
 
+/** A device with a linked number, fetched back so lastInboundAt/lastTemplateAt are current. */
+const linked = (deviceId: string, waNumber: string): Device => {
+  const device = makeDevice(deviceId, null)
+  linkWhatsapp(device.deviceId, waNumber)
+  return getDevice(device.deviceId)!
+}
+
+/**
+ * Quiet hours are a DELIVERY-time gate, not a per-producer convention.
+ *
+ * `promptSections.ts` (# Quiet hours) promises the owner that anything Otto schedules inside their
+ * window is moved to the end of it, and names exactly four exceptions. Until the four features were
+ * merged, the only code enforcing that was the nudge ladder — so the brief, the weekly review and
+ * the five-minute sweep, all built beside it, each spoke first inside a window Otto had just
+ * confirmed. Every case below pins the window explicitly rather than leaning on the 22:00–07:00
+ * default, because the suite runs at whatever the wall clock happens to be.
+ */
+describe('quiet hours gate proactive delivery', () => {
+  it('holds a brief queued inside the window, and delivers it once the window ends', async () => {
+    const device = linked('dev_q1', '447700900201')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: windowAround(Date.now()) })
+
+    const sent = await enqueueAndTryFlush({
+      waUserId: '447700900201',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'Dentist 14:00.',
+      dedupeKey: 'q:brief',
+    })
+
+    // Otto told them "nothing before 8". The row waits rather than making a liar of him.
+    expect(sent).toBe(false)
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(pendingFor('447700900201')).toHaveLength(1)
+
+    // Held, not retired: the very next sweep after the window ends delivers it.
+    updateSettings(device.deviceId, { quietHours: windowBefore(Date.now()) })
+    await sweepOutbox(Date.now())
+    expect(sendMock).toHaveBeenCalledTimes(1)
+    expect(pendingFor('447700900201')).toHaveLength(0)
+  })
+
+  it('holds the 02:00 system warning the sweep used to deliver', async () => {
+    // `shouldKnock` already refuses to light up a lock screen at 3am for exactly this row. The
+    // free-form path had no such check, so the same warning went out at 02:12 whenever the 24h
+    // window happened to be open — two code paths for one message, disagreeing about 2am.
+    const device = linked('dev_q2', '447700900202')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: windowAround(Date.now()) })
+    enqueueOutbound({
+      waUserId: '447700900202',
+      deviceId: device.deviceId,
+      kind: 'system_warning',
+      body: "⚠️ I couldn't confirm your alarm reached your phone.",
+    })
+
+    await sweepOutbox(Date.now())
+
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(pendingFor('447700900202')).toHaveLength(1)
+    // Shut the window on the way out. The DB is shared across this file and `sweepOutbox` walks
+    // every device, so a leftover row behind an OPEN window makes later sweeps yield here first —
+    // which is exactly what the overlap case below is timing. Every other test in this file that
+    // parks a PENDING row leaves it behind a shut window for the same reason.
+    clearInboundWindow(device.deviceId)
+  })
+
+  it('never holds a wake-check or a nudge — those are two of the four exceptions', async () => {
+    // A 06:30 "you up?" inside a 22:00–07:00 window is the entire wake-check feature, and the nudge
+    // ladder has already applied its own quiet-hours rules (owner-chosen due time, escalating
+    // reminder) before a rung ever reaches the outbox. Gating either here would undo both.
+    const device = linked('dev_q3', '447700900203')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: windowAround(Date.now()) })
+
+    expect(
+      await enqueueAndTryFlush({
+        waUserId: '447700900203',
+        deviceId: device.deviceId,
+        kind: 'wake_check',
+        body: 'You up?',
+        dedupeKey: 'q:wake',
+      }),
+    ).toBe(true)
+    expect(
+      await enqueueAndTryFlush({
+        waUserId: '447700900203',
+        deviceId: device.deviceId,
+        kind: 'nudge',
+        body: 'Still need to call the dentist?',
+        dedupeKey: 'q:nudge',
+      }),
+    ).toBe(true)
+    expect(sendMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('lets an exempt row past a held one instead of queueing behind it', async () => {
+    // `continue`, not `break`. A brief held until 07:00 must not take the wake-check queued behind
+    // it down as well — that one is the whole reason the owner is being asked anything.
+    const device = linked('dev_q4', '447700900204')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: windowAround(Date.now()) })
+    const common = { waUserId: '447700900204', deviceId: device.deviceId }
+    enqueueOutbound({ ...common, kind: 'brief', body: 'the brief', dedupeKey: 'q2:brief' })
+    enqueueOutbound({ ...common, kind: 'wake_check', body: 'You up?', dedupeKey: 'q2:wake' })
+
+    await sweepOutbox(Date.now())
+
+    expect(sendMock).toHaveBeenCalledTimes(1)
+    expect(pendingFor('447700900204').map((r) => r.kind)).toEqual(['brief'])
+    clearInboundWindow(device.deviceId)
+  })
+
+  it('never holds the owner\'s own queue back from them when THEY message', async () => {
+    // "Replying to them is never held back. Quiet hours are about you speaking first." An inbound
+    // at 02:00 is the owner awake and asking; withholding what is queued for them is not what quiet
+    // hours mean, and it is the one flush that passes no `proactiveFor`.
+    const device = linked('dev_q5', '447700900205')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: windowAround(Date.now()) })
+    enqueueOutbound({ waUserId: '447700900205', deviceId: device.deviceId, kind: 'brief', body: 'the brief' })
+
+    expect(await flushOutbox('447700900205', device.deviceId)).toEqual(['the brief'])
+  })
+})
+
+describe('enqueueAndTryFlush records what it delivered', () => {
+  it('writes the delivered message into the transcript, exactly as the sweep does', async () => {
+    // The perverse half of this hole was WHICH case lost the record: this path only flushes when
+    // the window is OPEN — precisely when the owner is around to reply to the message. So the 07:00
+    // brief was invisible at 07:02, and `promptSections.ts` (# Proactive messages) tells the model
+    // those turns are there. Otto re-lists what he named ninety seconds earlier.
+    const device = linked('dev_q6', '447700900206')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    saveSession('447700900206', device.deviceId, [{ role: 'user', content: 'morning' }])
+
+    await enqueueAndTryFlush({
+      waUserId: '447700900206',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'Dentist 14:00. Bins still not out — chased 3×.',
+      dedupeKey: 'q:brief2',
+    })
+
+    expect(loadSession('447700900206')).toEqual([
+      { role: 'user', content: 'morning' },
+      { role: 'assistant', content: 'Dentist 14:00. Bins still not out — chased 3×.' },
+    ])
+  })
+})
+
 describe('sweepOutbox', () => {
-  /** A device with a linked number, fetched back so lastInboundAt/lastTemplateAt are current. */
-  const linked = (deviceId: string, waNumber: string): Device => {
-    const device = makeDevice(deviceId, null)
-    linkWhatsapp(device.deviceId, waNumber)
-    return getDevice(device.deviceId)!
-  }
 
   it('flushes the queue when the window is open', async () => {
     const device = linked('dev_s1', '447700900101')
@@ -398,6 +574,41 @@ describe('sweepOutbox', () => {
     expect(pendingFor('447700900108')).toHaveLength(0)
 
     expect(await flushOutbox('447700900108', device.deviceId)).toEqual(['orphaned'])
+  })
+
+  it('stamps each claim with its OWN instant, so a slow flush cannot release its own rows', async () => {
+    // `sentAtMillis` doubles as the claim stamp and `releaseStaleClaims` hands back anything older
+    // than STALE_CLAIM_MS. Stamped with the `now` captured before the loop, a flush that has already
+    // been running longer than that — five rows against a Meta throwing 429s is ~32s each — marks
+    // every row it claims from then on as stale ON ARRIVAL. The next sweep takes one back mid-send
+    // and the owner gets it twice.
+    const device = linked('dev_s11', '447700900110')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    const common = { waUserId: '447700900110', deviceId: device.deviceId, kind: 'nudge' as const }
+    enqueueOutbound({ ...common, body: 'first', dedupeKey: 'c:1' })
+    enqueueOutbound({ ...common, body: 'second', dedupeKey: 'c:2' })
+
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(start)
+    let call = 0
+    let competing: string[] = []
+    sendMock.mockImplementation(async () => {
+      call += 1
+      // The first send takes longer than the whole stale-claim window.
+      if (call === 1) vi.setSystemTime(start + 130_000)
+      // The five-minute sweep lands while the SECOND row is on the wire. It must find nothing.
+      if (call === 2) competing = await flushOutbox('447700900110', device.deviceId)
+      return { ok: true }
+    })
+
+    const delivered = await flushOutbox('447700900110', device.deviceId)
+
+    expect(delivered).toEqual(['first', 'second'])
+    expect(competing).toEqual([])
+    // Two sends, not three: 'second' went out exactly once.
+    expect(sendMock).toHaveBeenCalledTimes(2)
   })
 
   it('starts the knock cooldown on the ATTEMPT, not on the outcome', async () => {

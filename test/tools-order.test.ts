@@ -5,6 +5,7 @@ vi.mock('../src/fcm/sender.js', () => ({
   sendData: vi.fn(async () => ({ ok: true as const })),
 }))
 
+import { ACCOUNTABILITY, PREFERENCES } from '../src/agent/promptSections.js'
 import { buildTools, runTool } from '../src/agent/tools.js'
 
 /**
@@ -68,5 +69,45 @@ describe('tool list is deterministic', () => {
     // tool_result the model can recover from, not an exception that kills the turn.
     const device = { deviceId: 'dev_unused', timezone: 'Europe/London' } as never
     expect(await runTool(device, 'no_such_tool', {})).toEqual({ error: 'unknown tool no_such_tool' })
+  })
+})
+
+/**
+ * Tool descriptions and prompt sections sit ~7,000 tokens apart in the SAME cached prefix, and the
+ * model reads both. Two branches wrote them, and where they disagreed the tool block won the
+ * argument in the worst places — the model reaches for the tool, reads its description, and
+ * confirms the opposite of what the code does.
+ */
+describe('the cached prefix does not contradict itself', () => {
+  const schemaOf = (tool: string): Record<string, { description?: string }> =>
+    (buildTools().find((t) => t.name === tool)!.input_schema.properties ?? {}) as Record<
+      string,
+      { description?: string }
+    >
+
+  it('does not claim quiet hours suppress everything proactive', () => {
+    // The claim was "Nothing proactive goes out inside it." ACCOUNTABILITY names four things that
+    // go through regardless, and the CODE agrees with ACCOUNTABILITY: `nagQuietHours` returns null
+    // for an escalating reminder, `runNudge` exempts a due time the owner picked, and the
+    // wake-check never touches the ladder at all. So "remind me to take my pills at 2am" IS chased
+    // at 02:00, while the tool block had Otto promising to wait until 07:00 — about a medication
+    // reminder, which is the worst thing in the system to be wrong about.
+    const quietHours = schemaOf('set_preferences').quietHours!.description!
+    expect(quietHours).not.toMatch(/nothing proactive/i)
+    expect(quietHours).toMatch(/wake-check/i)
+    expect(quietHours).toMatch(/alarm/i)
+    expect(ACCOUNTABILITY).toContain('Four things go through regardless')
+  })
+
+  it('does not promise proactive leave-by arming that nothing implements', () => {
+    // `mayArm`'s autoLeaveByAlarm branch is unreachable: the only caller of `planLeaveBy` is the
+    // tool, which hard-codes `explicit: true`, and DEVICE_SEEDERS has no leave-by producer. "Just
+    // set my leave-by alarms automatically, I trust you" got a confident yes and then nothing,
+    // forever, with no error and no log line. Until something plans journeys on its own, neither
+    // the tool nor the prompt may say otherwise.
+    const autoLeaveBy = schemaOf('set_preferences').autoLeaveByAlarm!.description!
+    expect(autoLeaveBy).toMatch(/nothing currently plans journeys on its own/i)
+    expect(PREFERENCES).toContain('You never plan a journey they did not ask you to plan.')
+    expect(PREFERENCES).not.toContain('whether you arm wake-up\n  and leave-by alarms on your own')
   })
 })

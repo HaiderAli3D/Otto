@@ -5,9 +5,9 @@ import { log } from '../lib/log.js'
 import { listArmed } from './alarms.js'
 import { getDevice, type Device } from './devices.js'
 import { BACKLOG_AGE_MS } from './digest.js'
-import { hasGoogle, listCalendarEvents } from './google.js'
+import { hasGoogle, tryListCalendarEvents } from './google.js'
 import { cancelJobsForDevice, ensureSingletonJob } from './jobs.js'
-import { enqueueAndTryFlush, markSuperseded, pendingFor, windowOpen } from './outbox.js'
+import { enqueueAndTryFlush, heldByQuietHours, markSuperseded, pendingFor, windowOpen } from './outbox.js'
 import { listReminders, type Reminder } from './reminders.js'
 import { getSettings, markBriefSent } from './settings.js'
 import { reminderEvidence } from './signals.js'
@@ -48,25 +48,35 @@ function byDue(a: Reminder, b: Reminder): number {
 }
 
 /**
- * Calendar events, or null — NEVER a throw.
+ * Calendar events, and whether the calendar could be read at all — NEVER a throw.
  *
  * A revoked Google grant, an expired refresh token, or Google being down are all ordinary states of
  * the world for a token the owner granted months ago. Any of them propagating out of here would kill
  * the job, and because the handler advances the chain in a finally-shaped path, an unsettled row
  * re-runs every 15 seconds forever. The brief is still worth sending without the calendar.
+ *
+ * Through `tryListCalendarEvents` — the leave-by branch's wrapper — rather than a private try/catch
+ * around `listCalendarEvents`, and that matters twice over. It is the thing that queues the
+ * one-per-day "your Google access has been revoked, send me link google" warning on `invalid_grant`,
+ * so a private catch here meant the daily path, the ONE path guaranteed to hit a dead token every
+ * morning, was also the one path that never told the owner: the calendar stayed silently dead until
+ * they happened to ask for a leave-by alarm.
+ *
+ * And the caller must be able to tell "nothing on today" from "could not ask" — see `unreachable`.
+ * A brief that flattens the second into the first states, as fact, that the day is clear.
  */
 async function safeCalendarEvents(
   deviceId: string,
   fromIso: string,
   toIso: string,
-): Promise<Array<{ summary: string; startIso: string }> | null> {
-  if (!hasGoogle(deviceId)) return null
-  try {
-    return await listCalendarEvents(deviceId, fromIso, toIso)
-  } catch (err) {
-    log.warn({ err, deviceId }, 'brief: calendar read failed; carrying on without it')
-    return null
+): Promise<{ events: Array<{ summary: string; startIso: string }>; unreachable: boolean }> {
+  if (!hasGoogle(deviceId)) return { events: [], unreachable: false }
+  const events = await tryListCalendarEvents(deviceId, fromIso, toIso)
+  if (events === null) {
+    log.warn({ deviceId }, 'brief: calendar unreachable; saying so rather than implying an empty day')
+    return { events: [], unreachable: true }
   }
+  return { events, unreachable: false }
 }
 
 /**
@@ -91,8 +101,8 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
   const from = slot === 'morning' ? nowLocal : day.startOf('day')
   const to = day.endOf('day')
 
-  const raw = (await safeCalendarEvents(device.deviceId, localIso(from), localIso(to))) ?? []
-  const events = raw
+  const calendar = await safeCalendarEvents(device.deviceId, localIso(from), localIso(to))
+  const events = calendar.events
     // Timed events only. An all-day entry comes back as a bare date with no 'T' and is a label on
     // the day rather than a moment in it — rendering it as "00:00" would be a lie.
     .filter((e) => e.startIso.includes('T'))
@@ -118,8 +128,13 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
     .sort((a, b) => a.triggerAtMillis - b.triggerAtMillis)
     .map((a) => ({ label: a.label, firesAtLocal: DateTime.fromMillis(a.triggerAtMillis, { zone }).toFormat('HH:mm') }))
 
+  // An unreachable calendar on its own is NOT worth a message: `tryListCalendarEvents` has already
+  // queued the "send me link google" warning for the one cause that never heals by itself, and a
+  // 07:00 "I couldn't read your calendar" next to nothing else is the empty proactive message this
+  // whole module is built to avoid. Silence stays the rule; honesty only applies to a brief that
+  // was going out anyway.
   if (events.length === 0 && reminders.length === 0 && alarms.length === 0) return null
-  return { slot, zone, events, reminders, alarms }
+  return { slot, zone, events, reminders, alarms, calendarUnreachable: calendar.unreachable }
 }
 
 /**
@@ -196,8 +211,15 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
   // sit on a socket for 15s, and an inbound message arriving in that window is exactly what opens
   // the window. `enqueueAndTryFlush` re-reads for the same reason. No await between this read and
   // the write it decides, so the flush below cannot deliver a nudge we meant to retire.
+  //
+  // "Actually about to be read" now also means "not held for quiet hours". An owner who moved their
+  // brief to 06:30 inside a 22:00–07:00 window gets a row the delivery gate holds until 07:00, which
+  // is every bit as undelivered as a shut window — while the nudges it would retire are exempt and
+  // about to go out on their own.
   const current = getDevice(device.deviceId) ?? device
-  if (windowOpen(current, nowMillis)) supersedeStaleNudges(waUserId, nowMillis)
+  if (windowOpen(current, nowMillis) && !heldByQuietHours(current, 'brief', nowMillis)) {
+    supersedeStaleNudges(waUserId, nowMillis)
+  }
 
   await enqueueAndTryFlush({
     waUserId,

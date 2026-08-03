@@ -6,6 +6,7 @@ import { rescheduleBriefChain } from './brief.js'
 import type { Device } from './devices.js'
 import { getSettings, quietHoursFor, updateSettings, type DeviceSettings } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
+import { rescheduleWeeklyReviewChain } from './weeklyReview.js'
 
 /**
  * The owner's settings as the agent changes them, and as Otto reads them back.
@@ -178,6 +179,14 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
   if (BRIEF_TIMING_FIELDS.some((k) => before[k] !== after[k])) {
     rescheduleBriefChain(device)
     log.info({ deviceId: device.deviceId }, 'brief timing changed; chain moved')
+  }
+  // Same rule, same reason, for the other standing chain. "Drop the weekly thing" at 17:00 must not
+  // still deliver a review at 18:00, and "move it to Wednesday" must not fire on Sunday first —
+  // `seedWeeklyReview` is the only other thing that touches that row and it runs at boot and on the
+  // six-hourly gc pass, which is not soon enough to match the confirmation Otto just gave.
+  if (before.weeklyReviewAt !== after.weeklyReviewAt) {
+    rescheduleWeeklyReviewChain(device)
+    log.info({ deviceId: device.deviceId }, 'weekly review slot changed; chain moved')
   }
   return effective(device, after)
 }

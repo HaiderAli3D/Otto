@@ -1,9 +1,18 @@
 import { composeDigest, type DigestItem } from '../agent/compose.js'
 import { log } from '../lib/log.js'
 import { markDigestSent, type Device } from './devices.js'
-import { enqueueOutbound, markSuperseded, pendingFor } from './outbox.js'
+import { enqueueOutbound, markSuperseded, pendingFor, type OutboxKind } from './outbox.js'
 import { listReminders } from './reminders.js'
 import { epochMillisToLocalHuman, localDateKey, sameLocalDay } from './time.js'
+
+/**
+ * The queued messages that already enumerate the owner's open items, so a digest would say it twice.
+ *
+ * A list rather than a literal `=== 'brief'`, because that is exactly the shape that let the weekly
+ * review slip past: the next branch that adds a summarising kind adds it here, in one place, next to
+ * the reason.
+ */
+const SUMMARY_KINDS: readonly OutboxKind[] = ['brief', 'weekly']
 
 /**
  * Queued nudges older than this are considered a backlog worth collapsing rather than replaying.
@@ -35,10 +44,15 @@ export async function maybeCollapseBacklog(device: Device, waUserId: string): Pr
   const stale = pending.filter((r) => r.kind === 'nudge' && now - r.createdAt > BACKLOG_AGE_MS)
   if (stale.length < MIN_BACKLOG) return false
 
-  // A brief is already queued, and it lists these same reminders. A digest on top would restate them
-  // in a different voice within seconds of each other — the exact double-up the brief's own
-  // supersede pass exists to prevent, seen from the other side (the brief was written first, this
-  // contact is what flushes it). Retire the nudges and let the brief speak.
+  // A summary is already queued, and it lists these same reminders. A digest on top would restate
+  // them in a different voice within seconds of each other — the exact double-up the brief's own
+  // supersede pass exists to prevent, seen from the other side (the summary was written first, this
+  // contact is what flushes it). Retire the nudges and let it speak.
+  //
+  // 'weekly' belongs here alongside 'brief'. The weekly review is the other message that opens by
+  // enumerating what is still open ("3 still open", plus the slipping items by name), and it was
+  // added by a different branch than this guard — so a Sunday review queued against a shut window
+  // was followed, on the owner's next message, by a catch-up digest naming the same reminders again.
   //
   // STILL LIVE, not merely PENDING. `pendingFor` filters on state alone, and a row's TTL is applied
   // lazily by `flushOutbox` — which runs AFTER this, on the very next line of the inbound path. So a
@@ -50,9 +64,13 @@ export async function maybeCollapseBacklog(device: Device, waUserId: string): Pr
   // Deliberately NO markDigestSent: no digest went out, so the day's one digest is still available
   // if a genuine backlog builds up later. Returning false is what tells the caller to flush the
   // queue normally, which is how the brief itself gets delivered.
-  if (pending.some((r) => r.kind === 'brief' && (r.expiresAtMillis === null || r.expiresAtMillis > now))) {
+  if (
+    pending.some(
+      (r) => SUMMARY_KINDS.includes(r.kind as OutboxKind) && (r.expiresAtMillis === null || r.expiresAtMillis > now),
+    )
+  ) {
     markSuperseded(stale.map((r) => r.id))
-    log.info({ waUserId, collapsed: stale.length }, 'brief already queued; retiring the nudge backlog without a digest')
+    log.info({ waUserId, collapsed: stale.length }, 'a summary is already queued; retiring the nudge backlog without a digest')
     return false
   }
 

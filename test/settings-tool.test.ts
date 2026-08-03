@@ -9,6 +9,7 @@ import { db, ensureSchema } from '../src/db/client.js'
 import { jobs } from '../src/db/schema.js'
 import { scheduleBriefChain } from '../src/services/brief.js'
 import type { Device } from '../src/services/devices.js'
+import { seedWeeklyReview } from '../src/services/handlers/weeklyReview.js'
 import { getSettings, updateSettings } from '../src/services/settings.js'
 import { makeDevice } from './helpers.js'
 
@@ -32,6 +33,9 @@ const setPrefs = async (device: Device, input: Record<string, unknown>): Promise
 
 const briefJob = (deviceId: string) =>
   db.select().from(jobs).where(and(eq(jobs.kind, 'brief'), eq(jobs.deviceId, deviceId))).all()
+
+const weeklyJob = (deviceId: string) =>
+  db.select().from(jobs).where(and(eq(jobs.kind, 'weekly_review'), eq(jobs.deviceId, deviceId))).all()
 
 describe('set_preferences returns the EFFECTIVE settings', () => {
   it('reports the server default for a device that has never configured quiet hours', async () => {
@@ -239,5 +243,71 @@ describe('the brief chain follows the setting', () => {
     const after = briefJob(device.deviceId)
     expect(after).toHaveLength(1)
     expect(after[0]!.runAtMillis).toBe(Date.UTC(2026, 7, 3, 9, 0, 0))
+  })
+})
+
+/**
+ * The weekly review needed the same hook and never got one.
+ *
+ * `preferences.ts` is the file the brief branch and the accountability branch could not see each
+ * other in: the brief added `rescheduleBriefChain` there for exactly this reason, and
+ * `weeklyReviewAt` was left out of the change detection. Both directions were wrong, and both are
+ * things Otto has already confirmed to the owner by the time they bite.
+ */
+describe('the weekly review chain follows the setting too', () => {
+  it('drops the queued review the moment the owner switches it off', async () => {
+    // Sunday 17:00: "drop the weekly thing". Otto is handed `weeklyReview: 'off'` and says so. The
+    // pending row for 18:00 was untouched, and `seedWeeklyReview` — boot, or a gc pass up to six
+    // hours out — was the only thing that would ever have cleared it.
+    const device = makeDevice('dev_t14')
+    seedWeeklyReview(device, NOW)
+    expect(weeklyJob(device.deviceId)).toHaveLength(1)
+
+    const res = await setPrefs(device, { weeklyReview: 'off' })
+
+    expect(res.weeklyReview).toBe('off')
+    expect(weeklyJob(device.deviceId)).toHaveLength(0)
+  })
+
+  it('moves the row to the new slot rather than firing on the old one first', async () => {
+    // "Move it to Wednesday" on a Sunday afternoon still fired that same Sunday evening, and the
+    // six-day cooldown then pushed the first Wednesday review out another ten days.
+    const device = makeDevice('dev_t15')
+    seedWeeklyReview(device, NOW)
+    // Monday 3 August 2026 05:00 UTC ⇒ the default SUN:18:00 is Sunday the 9th.
+    expect(weeklyJob(device.deviceId)[0]!.runAtMillis).toBe(Date.UTC(2026, 7, 9, 18, 0, 0))
+
+    await setPrefs(device, { weeklyReview: 'WED:09:00' })
+
+    const after = weeklyJob(device.deviceId)
+    expect(after).toHaveLength(1)
+    expect(after[0]!.runAtMillis).toBe(Date.UTC(2026, 7, 5, 9, 0, 0))
+  })
+
+  it('seeds a chain again when the owner turns reviews back on', async () => {
+    // The other direction, and the quieter of the two: with the chain already gone, nothing seeded
+    // a new one until the next gc pass. Land that pass after the slot and `nextWeeklyReviewAt` can
+    // only offer the FOLLOWING week — Otto said "on, Sundays at 6" and nothing arrives for eight days.
+    const device = makeDevice('dev_t16')
+    await setPrefs(device, { weeklyReview: 'off' })
+    expect(weeklyJob(device.deviceId)).toHaveLength(0)
+
+    await setPrefs(device, { weeklyReview: 'SUN:18:00' })
+
+    const after = weeklyJob(device.deviceId)
+    expect(after).toHaveLength(1)
+    expect(after[0]!.runAtMillis).toBe(Date.UTC(2026, 7, 9, 18, 0, 0))
+  })
+
+  it('leaves the chain alone when the slot did not change', async () => {
+    const device = makeDevice('dev_t17')
+    seedWeeklyReview(device, NOW)
+    const before = weeklyJob(device.deviceId)[0]!
+
+    await setPrefs(device, { briefHour: 8 })
+
+    const after = weeklyJob(device.deviceId)
+    expect(after).toHaveLength(1)
+    expect(after[0]!.id).toBe(before.id)
   })
 })

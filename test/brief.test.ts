@@ -4,7 +4,10 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 const { sendMock, hasGoogleMock, listEventsMock } = vi.hoisted(() => ({
   sendMock: vi.fn(async (): Promise<unknown> => ({ ok: true })),
   hasGoogleMock: vi.fn((): boolean => false),
-  listEventsMock: vi.fn(async (): Promise<Array<{ summary: string; startIso: string; endIso: string }>> => []),
+  // `tryListCalendarEvents`, not `listCalendarEvents`: the wrapper IS what the brief must call — it
+  // is the only thing that queues the "your Google access has been revoked" warning — and it
+  // answers `null` for an unreachable calendar rather than throwing.
+  listEventsMock: vi.fn(async (): Promise<Array<{ summary: string; startIso: string; endIso: string }> | null> => []),
 }))
 vi.mock('../src/fcm/sender.js', () => ({ sendData: vi.fn(async () => ({ ok: true as const })) }))
 vi.mock('../src/services/whatsapp.js', async (orig) => {
@@ -15,7 +18,7 @@ vi.mock('../src/services/whatsapp.js', async (orig) => {
 // and the test environment has no Google credentials at all.
 vi.mock('../src/services/google.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>
-  return { ...actual, hasGoogle: hasGoogleMock, listCalendarEvents: listEventsMock }
+  return { ...actual, hasGoogle: hasGoogleMock, tryListCalendarEvents: listEventsMock }
 })
 
 import { and, eq } from 'drizzle-orm'
@@ -272,7 +275,7 @@ describe('what goes in it', () => {
     // forever. The brief is still worth sending without the calendar.
     const device = owner('dev_b15', '447700900015')
     hasGoogleMock.mockReturnValue(true)
-    listEventsMock.mockRejectedValue(new Error('invalid_grant'))
+    listEventsMock.mockResolvedValue(null)
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
 
     const input = await collectBrief(device, 'morning', NOW)
@@ -280,6 +283,33 @@ describe('what goes in it', () => {
     expect(input!.events).toEqual([])
     expect(input!.reminders).toHaveLength(1)
     expect(await runBrief(device, NOW)).toBe(true)
+  })
+
+  it('says the calendar could not be read instead of implying an empty day', async () => {
+    // "Nothing on today" is a claim ABOUT THEIR DAY, and the brief was making it whenever Google
+    // was unreachable — a revoked refresh token reads exactly like a clear diary. The owner puts
+    // the phone down on the strength of it and misses the 09:30 they never heard about.
+    //
+    // The mock is on `tryListCalendarEvents` for a second reason: routing through that wrapper is
+    // also what queues the one-per-day "send me link google" warning (pinned in
+    // test/google-events.test.ts), and a private try/catch in the brief meant the daily path — the
+    // one guaranteed to hit a dead token every morning — was the one path that never told them.
+    const device = owner('dev_b25', '447700900025')
+    hasGoogleMock.mockReturnValue(true)
+    listEventsMock.mockResolvedValue(null)
+    await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+
+    const input = await collectBrief(device, 'morning', NOW)
+
+    expect(listEventsMock).toHaveBeenCalled()
+    expect(input!.calendarUnreachable).toBe(true)
+    expect(briefFallback(input!)).toContain("I can't see your calendar right now.")
+
+    // …and a calendar that answers with no events is still reported as an ordinary empty day.
+    listEventsMock.mockResolvedValue([])
+    const clear = await collectBrief(device, 'morning', NOW)
+    expect(clear!.calendarUnreachable).toBe(false)
+    expect(briefFallback(clear!)).not.toContain("can't see your calendar")
   })
 })
 
@@ -480,6 +510,42 @@ describe('interaction with the backlog digest', () => {
 
     expect(await maybeCollapseBacklog(device, '447700900024')).toBe(false)
     expect(pendingFor('447700900024').map((r) => r.kind)).toEqual(['brief'])
+  })
+
+  it('lets a queued WEEKLY REVIEW cancel the digest too', async () => {
+    // The guard was written as `kind === 'brief'` by the branch that built the digest, and the
+    // accountability branch then added a second kind that opens by enumerating the same open items
+    // ("3 still open", plus the slipping ones by name). Sunday's review queued against a shut
+    // window was therefore followed, on the owner's next message, by a catch-up digest restating
+    // the identical list in a different voice — the exact double-up this handshake exists to stop.
+    const device = owner('dev_b26', '447700900026')
+    await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+
+    vi.setSystemTime(NOW - 3 * HOUR)
+    for (const n of [1, 2, 3]) {
+      enqueueOutbound({ waUserId: '447700900026', deviceId: device.deviceId, kind: 'nudge', body: `nudge ${n}`, dedupeKey: `w:${n}` })
+    }
+    vi.setSystemTime(NOW)
+    enqueueOutbound({
+      waUserId: '447700900026',
+      deviceId: device.deviceId,
+      kind: 'weekly',
+      body: 'This week: 0 finished, 0 dropped, 3 still open.',
+      dedupeKey: 'weekly:x',
+      ttlMs: 36 * HOUR,
+    })
+
+    expect(await maybeCollapseBacklog(device, '447700900026')).toBe(false)
+
+    const states = statesByBody('447700900026')
+    expect([states.get('nudge 1'), states.get('nudge 2'), states.get('nudge 3')]).toEqual([
+      'SUPERSEDED',
+      'SUPERSEDED',
+      'SUPERSEDED',
+    ])
+    expect(pendingFor('447700900026').map((r) => r.kind)).toEqual(['weekly'])
+    // No digest went out, so the day's one digest is still available if a real backlog builds later.
+    expect(getDevice(device.deviceId)!.lastDigestAt).toBeNull()
   })
 
   it('lets a queued brief cancel the digest without spending the day\'s digest', async () => {

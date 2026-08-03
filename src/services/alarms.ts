@@ -5,7 +5,7 @@ import { armData, cancelData } from '../fcm/commands.js'
 import { sendData } from '../fcm/sender.js'
 import { newAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
-import { cancelJobs, enqueueJob } from './jobs.js'
+import { cancelJobs, deleteJob, enqueueJob, jobPayload, jobsForAlarm, reanchorJob } from './jobs.js'
 import { clearToken, getDevice, type Device } from './devices.js'
 import { nextOccurrence } from './recurrence.js'
 
@@ -150,6 +150,35 @@ export async function advanceRecurrence(alarmId: string): Promise<{ advanced: bo
   return { advanced: true, nextAlarmId }
 }
 
+/**
+ * Hand a leave-by recheck to a surviving sibling, or drop it.
+ *
+ * A leave-by PLAN arms up to two alarms — the departure and the get-up — but leaves exactly ONE
+ * recheck, anchored on whichever of them exists. Cancelling that anchor used to delete the recheck
+ * outright, which quietly left the other alarm with nothing watching it: cancel the 08:30 departure,
+ * keep the 07:45 wake, the dentist cancels the appointment overnight, and the phone still rings
+ * "Up — leave 08:30 for Dentist" for a meeting that no longer exists. `runLeaveBy` already handles a
+ * half-cancelled pair (see `liveId` there); it was simply never reached from this direction.
+ *
+ * Synchronous throughout — the read, the state check and the write are all better-sqlite3 statements
+ * with no await between them, and the caller has already marked THIS alarm CANCELLED, so the sibling
+ * lookup below can never resolve back to it.
+ */
+function releaseLeaveByRecheck(alarmId: string): void {
+  for (const job of jobsForAlarm('leave_by', alarmId)) {
+    const payload = jobPayload<{ alarmId: string | null; wakeId: string | null }>(job)
+    const sibling = [payload?.alarmId ?? null, payload?.wakeId ?? null].find(
+      (id): id is string => id !== null && id !== alarmId,
+    )
+    if (sibling !== undefined && getAlarm(sibling)?.state === 'ARMED') {
+      reanchorJob(job.id, sibling)
+      log.info({ from: alarmId, to: sibling, jobId: job.id }, 'leave-by recheck re-anchored onto the surviving alarm')
+      continue
+    }
+    deleteJob(job.id)
+  }
+}
+
 /** Mark an alarm cancelled and push CANCEL. Cancelling the pending occurrence ends its series. */
 export async function cancelAlarm(device: Device, alarmId: string): Promise<boolean> {
   db.update(alarms)
@@ -162,7 +191,8 @@ export async function cancelAlarm(device: Device, alarmId: string): Promise<bool
   // recheck re-arms the SAME derived id when the meeting moves, so a chain that outlived its alarm
   // would take a CANCELLED row back to ARMED and ring the phone for a journey the owner explicitly
   // called off — three quarters of an hour after they cancelled it, with no way to see it coming.
-  cancelJobs('leave_by', alarmId)
+  // Unless it is also guarding the other half of a two-alarm plan, which is what this weighs up.
+  releaseLeaveByRecheck(alarmId)
   if (!device.fcmToken) return false
   const res = await sendData(device.fcmToken, cancelData(alarmId, device.hmacSecret))
   if (!res.ok && res.unregistered) clearToken(device.deviceId)

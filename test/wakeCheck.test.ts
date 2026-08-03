@@ -75,6 +75,17 @@ async function wakeAlarm(device: Device, alarmId: string, wakeCheck: boolean): P
 
 const wakeJobs = (): Job[] => dueJobs(FAR_FUTURE).filter((j) => j.kind === 'wake_check')
 
+/**
+ * Start a ladder for a dismissal the phone reported PROMPTLY — `now` is the dismissal instant.
+ *
+ * Most cases below back-date the dismissal so every rung is already due and the ladder can be driven
+ * synchronously, which is a statement about test time, not about report latency. Since
+ * `scheduleWakeCheck` refuses a dismissal it hears about more than a ladder-span late (see
+ * STALE_DISMISSAL_MS), those cases have to say which of the two they mean.
+ */
+const scheduleReportedAt = (alarmId: string, device: Device, dismissedAt: number): boolean =>
+  scheduleWakeCheck(alarmId, device, dismissedAt, dismissedAt)
+
 const outboxRows = (deviceId: string) =>
   db.select().from(outbox).where(eq(outbox.deviceId, deviceId)).all()
 
@@ -116,14 +127,15 @@ describe('scheduling the ladder', () => {
     const alarmId = await wakeAlarm(device, 'alm_wc12', true)
     const dismissedAt = Date.now() - 60 * 60_000
 
-    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(true)
+    expect(scheduleReportedAt(alarmId, device, dismissedAt)).toBe(true)
     const originalJobId = wakeJobs()[0]!.id
     await runWakeCheck(wakeJobs()[0]!)
     await runWakeCheck(wakeJobs()[0]!)
     expect(sends).toHaveLength(2)
 
-    // The duplicate report. Same alarm, same instant.
-    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(false)
+    // The duplicate report. Same alarm, same instant, and reported just as promptly — so the latch
+    // is what refuses it, not the staleness gate.
+    expect(scheduleReportedAt(alarmId, device, dismissedAt)).toBe(false)
     expect(wakeJobs()).toHaveLength(1)
     expect(wakeJobs()[0]!.id).toBe(originalJobId)
 
@@ -144,7 +156,7 @@ describe('scheduling the ladder', () => {
     const alarmId = await wakeAlarm(device, 'alm_wc15', true)
     const dismissedAt = Date.now() - 60 * 60_000
 
-    scheduleWakeCheck(alarmId, device, dismissedAt)
+    scheduleReportedAt(alarmId, device, dismissedAt)
     for (let round = 0; round <= MAX_WAKE_ROUNDS; round++) {
       const job = wakeJobs()[0]
       if (!job) break
@@ -153,7 +165,7 @@ describe('scheduling the ladder', () => {
     db.delete(jobsTable).run() // the scheduler settles a null outcome by deleting the row
     expect(armed).toHaveLength(1)
 
-    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(false)
+    expect(scheduleReportedAt(alarmId, device, dismissedAt)).toBe(false)
     expect(wakeJobs()).toHaveLength(0)
     expect(armed).toHaveLength(1)
   })
@@ -165,11 +177,45 @@ describe('scheduling the ladder', () => {
     const alarmId = await wakeAlarm(device, 'alm_wc16', true)
     const first = Date.now() - 60 * 60_000
 
-    expect(scheduleWakeCheck(alarmId, device, first)).toBe(true)
-    expect(scheduleWakeCheck(alarmId, device, first + 1)).toBe(true)
+    expect(scheduleReportedAt(alarmId, device, first)).toBe(true)
+    expect(scheduleReportedAt(alarmId, device, first + 1)).toBe(true)
     const queued = wakeJobs()
     expect(queued).toHaveLength(1)
     expect(queued[0]!.runAtMillis).toBe(wakeCheckAt(0, first + 1))
+  })
+
+  it('refuses a dismissal the phone only got round to reporting hours later', async () => {
+    // `atMillis` is when the owner SWIPED, not when we heard about it. The Android app drains an
+    // append-only event outbox under NetworkType.CONNECTED with Result.retry(), so a phone with no
+    // signal at 06:31 reports at 09:20 still carrying 06:31 — and every rung derived from that
+    // dismissal is already in the past. The 15s tick walked the whole ladder in 45 seconds, armed a
+    // REAL alarm that rings on the commute three hours after they got up, and wrote
+    // WAKE_CHECK_FAILED against someone who had been awake all morning.
+    //
+    // Neither existing guard catches it: the stand-down compares lastInboundAt against the
+    // DISMISSAL, so last night's message does not count, and WAKE_TTL_MS is measured from the
+    // enqueue rather than from the dismissal.
+    const device = reachableDevice('dev_wc17')
+    const alarmId = await wakeAlarm(device, 'alm_wc17', true)
+    const dismissedAt = Date.now() - 3 * 3_600_000
+
+    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(false)
+
+    expect(wakeJobs()).toHaveLength(0)
+    expect(sends).toHaveLength(0)
+    expect(armed).toHaveLength(0)
+    expect(ownerRecord(device.deviceId).sleptThroughAfterDismiss).toBe(0)
+  })
+
+  it('still starts a ladder for a report that is merely a little late', async () => {
+    // The threshold is the ladder's own span, not zero: a report delayed by a couple of minutes is
+    // an ordinary retry and every rung still lands roughly where it was meant to.
+    const device = reachableDevice('dev_wc18')
+    const alarmId = await wakeAlarm(device, 'alm_wc18', true)
+    const dismissedAt = Date.now() - 2 * 60_000
+
+    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(true)
+    expect(wakeJobs()[0]!.runAtMillis).toBe(wakeCheckAt(0, dismissedAt))
   })
 
   it('carries wakeCheck across a recurring re-arm — day two still gets checked', async () => {
@@ -219,7 +265,7 @@ describe('running the ladder', () => {
     const device = reachableDevice('dev_wc7')
     const alarmId = await wakeAlarm(device, 'alm_wc7', true)
     const dismissedAt = Date.now() - 60 * 60_000
-    scheduleWakeCheck(alarmId, device, dismissedAt)
+    scheduleReportedAt(alarmId, device, dismissedAt)
 
     let job: Job | undefined = wakeJobs()[0]!
     for (let round = 0; round < MAX_WAKE_ROUNDS; round++) {
@@ -247,7 +293,7 @@ describe('running the ladder', () => {
     const device = reachableDevice('dev_wc8')
     const alarmId = await wakeAlarm(device, 'alm_wc8', true)
     const dismissedAt = Date.now() - 60 * 60_000
-    scheduleWakeCheck(alarmId, device, dismissedAt)
+    scheduleReportedAt(alarmId, device, dismissedAt)
 
     let job: Job | undefined = wakeJobs()[0]!
     for (let round = 0; round <= MAX_WAKE_ROUNDS; round++) {
@@ -299,7 +345,7 @@ describe('running the ladder', () => {
     // and then a window that shut is a real unanswered check, and belongs on the record.
     const device = reachableDevice('dev_wc14')
     const alarmId = await wakeAlarm(device, 'alm_wc14', true)
-    scheduleWakeCheck(alarmId, device, Date.now() - 60 * 60_000)
+    scheduleReportedAt(alarmId, device, Date.now() - 60 * 60_000)
 
     await runWakeCheck(wakeJobs()[0]!)
     expect(sends).toHaveLength(1)

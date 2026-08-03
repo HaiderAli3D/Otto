@@ -27,6 +27,29 @@ import { enqueueAndTryFlush, windowOpen } from './outbox.js'
 /** A wake-check delivered three hours late is absurd — it answers a question nobody is asking. */
 const WAKE_TTL_MS = 45 * 60 * 1000
 
+/**
+ * How late a DISMISSED report may arrive and still be worth starting a ladder for.
+ *
+ * `atMillis` is the instant the owner SWIPED, not the instant we heard about it. The Android app
+ * drains an append-only event outbox under NetworkType.CONNECTED with Result.retry(), so a phone
+ * with no signal at 06:31 reports at 09:20 still carrying 06:31 — and every rung `wakeCheckAt`
+ * derives from that dismissal is then already in the past. The 15s tick walks the whole ladder in
+ * under a minute ("You up?", "Still nothing…", the last ask), `escalate` arms a REAL alarm that
+ * rings on the commute three hours after they got up, and `WAKE_CHECK_FAILED` goes on the permanent
+ * record — the exact false accusation the WAKE_CHECK_UNREACHABLE split exists to prevent.
+ *
+ * Neither existing guard catches it: the stand-down compares `lastInboundAt` against `startedAt`, so
+ * last night's message does not count, and WAKE_TTL_MS is measured from the enqueue rather than from
+ * the dismissal.
+ *
+ * The threshold is the ladder's OWN span — round 0 through the escalation tick — derived rather than
+ * guessed, because past it there is no rung left that could run at the time it was meant to. Same
+ * shape as STALE_NUDGE_MS, STALE_BRIEF_MS and LATE_GRACE_MS: no proactive path in this server fires
+ * its backlog the moment it reconnects. Deliberately NOT re-anchored on `now`, which would ask "you
+ * up?" three hours late instead of not at all.
+ */
+const STALE_DISMISSAL_MS = wakeCheckAt(MAX_WAKE_ROUNDS, 0)
+
 /** Far enough out that the ARM push can land, close enough that it is still a wake-up. */
 const BACKUP_ALARM_DELAY_MS = 60_000
 
@@ -40,10 +63,28 @@ export type WakePayload = { round: number; startedAt: number }
  * The check therefore starts when they actually got rid of it, not on the first swipe.
  *
  * Keyed on the ALARM, not on an owning reminder, so a standalone wake-up alarm works too.
+ *
+ * `nowMillis` is when the REPORT reached us, which is not the same thing as when the alarm was
+ * dismissed — see STALE_DISMISSAL_MS.
  */
-export function scheduleWakeCheck(alarmId: string, device: Device, dismissedAtMillis: number): boolean {
+export function scheduleWakeCheck(
+  alarmId: string,
+  device: Device,
+  dismissedAtMillis: number,
+  nowMillis: number = Date.now(),
+): boolean {
   const alarm = getAlarm(alarmId)
   if (!alarm || !alarm.wakeCheck) return false
+
+  // Checked BEFORE the latch below: a report we are not acting on must not consume the claim that a
+  // genuine, timely re-delivery of the same dismissal would need.
+  if (nowMillis - dismissedAtMillis > STALE_DISMISSAL_MS) {
+    log.info(
+      { alarmId, dismissedAtMillis, lateBy: nowMillis - dismissedAtMillis },
+      'wake-check: dismissal reported too late to check on; the whole ladder is already behind us',
+    )
+    return false
+  }
 
   // At-least-once guard, keyed on the DISMISSAL rather than on the alarm.
   //

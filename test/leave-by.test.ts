@@ -344,6 +344,32 @@ describe('re-planning the same event never leaves an orphan armed', () => {
     expect(getAlarm(plan.alarmId!)!.state).toBe('CANCELLED')
     expect(leaveByJobs()).toHaveLength(0)
   })
+
+  it('hands the recheck to the surviving alarm instead of taking it down with the anchor', async () => {
+    // A plan arms TWO alarms and leaves ONE recheck, anchored on the departure. `cancelAlarm` drops
+    // `leave_by` jobs keyed on the id being cancelled, so "don't bother with the leave-now alarm,
+    // just wake me" destroyed the only thing watching the 07:45 wake alarm as well. The dentist
+    // then cancels the appointment overnight and the phone still rings "Up — leave 11:30 for
+    // Standup" for a meeting that no longer exists.
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: true, explicit: true })
+    expect(plan.mergedWithWake).toBe(false)
+    expect(leaveByJobs()[0]!.alarmId).toBe(plan.alarmId)
+
+    await runTool(device, 'cancel_alarm', { alarmId: plan.alarmId })
+
+    expect(getAlarm(plan.alarmId!)!.state).toBe('CANCELLED')
+    expect(listArmed(device.deviceId).map((a) => a.alarmId)).toEqual([plan.wakeId])
+    // One recheck, still, now anchored on the alarm that is left — which is the case `liveId` in
+    // handlers/leaveBy.ts was written for and could not previously be reached from this direction.
+    const jobsAfter = leaveByJobs()
+    expect(jobsAfter).toHaveLength(1)
+    expect(jobsAfter[0]!.alarmId).toBe(plan.wakeId)
+
+    // …and cancelling the last one really does end the chain: nothing is left to guard.
+    await runTool(device, 'cancel_alarm', { alarmId: plan.wakeId })
+    expect(leaveByJobs()).toHaveLength(0)
+  })
 })
 
 describe('the model is told what makes live traffic possible', () => {

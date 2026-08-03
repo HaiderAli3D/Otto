@@ -39,7 +39,9 @@ export const settingsTools: Anthropic.Tool[] = [
           type: 'string',
           description:
             'Do-not-disturb window as "HH:MM-HH:MM" local, or "off". Spans midnight, e.g. ' +
-            '"22:00-07:00". Nothing proactive goes out inside it.',
+            '"22:00-07:00". Briefs, reviews and follow-up chases wait for it to end. It does NOT ' +
+            'hold back the four things listed under "Quiet hours" — a real alarm, an escalating ' +
+            'reminder, a wake-check, or the first chase at a due time they picked themselves.',
         },
         weeklyReview: {
           type: 'string',
@@ -47,11 +49,17 @@ export const settingsTools: Anthropic.Tool[] = [
         },
         autoWakeAlarm: {
           type: 'boolean',
-          description: 'Automatically arm a wake-up alarm ahead of the first thing in the day.',
+          description:
+            'When a leave-by alarm is set, add a get-up alarm ahead of it by default, without ' +
+            'being asked each time. Only affects create_leave_by_alarm; alsoWakeMe on that call ' +
+            'still wins for one journey.',
         },
         autoLeaveByAlarm: {
           type: 'boolean',
-          description: 'Automatically arm a leave-by alarm ahead of an event they have to travel to.',
+          description:
+            'Standing consent to arm a leave-by alarm without being asked. Nothing currently plans ' +
+            'journeys on its own, so this changes nothing today — never tell the owner you will ' +
+            'start setting leave-by alarms for them.',
         },
       },
     },

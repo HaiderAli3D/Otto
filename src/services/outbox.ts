@@ -60,6 +60,36 @@ export const MAX_OUTBOX_ATTEMPTS = 10
 const STALE_CLAIM_MS = 2 * 60 * 1000
 
 /**
+ * The kinds that go out inside quiet hours anyway.
+ *
+ * This list IS the promise `agent/promptSections.ts` (# Quiet hours) makes to the owner: a real
+ * alarm, an escalating reminder, a wake-check, and the first chase at a due time they picked
+ * themselves. Alarms never touch the outbox at all, and the two nudge exemptions are decided by the
+ * ladder itself — `nagLadder.nextNagAt` and `nagging.runNudge` already defer every rung that is NOT
+ * exempt, so a `nudge` that reaches a flush has passed its own gate and must not be held a second
+ * time. `wake_check` is exempt outright: a 06:30 "you up?" inside a 22:00–07:00 window is the entire
+ * feature.
+ *
+ * Everything else — brief, weekly, digest, system_warning, missed_alarm — waits for the window to
+ * end. Before this the check lived in the nudge ladder ONLY, so the three proactive producers added
+ * beside it (brief, weekly review, and the five-minute sweep) each spoke first inside a window Otto
+ * had just promised to respect.
+ */
+export const QUIET_EXEMPT_KINDS: readonly OutboxKind[] = ['nudge', 'wake_check']
+
+/**
+ * Would delivering `kind` to this device right now break its quiet hours?
+ *
+ * Only ever consulted for a PROACTIVE delivery — Otto speaking first. A flush triggered by the
+ * owner's own inbound message is never held: "Replying to them is never held back. Quiet hours are
+ * about you speaking first."
+ */
+export function heldByQuietHours(device: Device, kind: OutboxKind, now: number = Date.now()): boolean {
+  if (QUIET_EXEMPT_KINDS.includes(kind)) return false
+  return inQuietHours(now, device.timezone, quietHoursFor(device))
+}
+
+/**
  * Is the WhatsApp free-form window open? This gates every proactive send: outside it, Meta rejects
  * free-form text with error 131047.
  *
@@ -199,8 +229,17 @@ function releaseStaleClaims(waUserId: string, now: number): void {
  *
  * Expired rows are retired silently. A 131047 means our window belief was wrong: clear it and
  * leave the row PENDING for real next contact rather than burning attempts against a shut door.
+ *
+ * `proactiveFor` marks this flush as Otto speaking first (the sweep, or a producer delivering what
+ * it just queued) and turns on the quiet-hours gate for the kinds that are not exempt. The inbound
+ * path passes nothing: the owner is right there, and holding their own queue back from them is not
+ * what quiet hours mean.
  */
-export async function flushOutbox(waUserId: string, deviceId: string | null): Promise<string[]> {
+export async function flushOutbox(
+  waUserId: string,
+  deviceId: string | null,
+  opts: { proactiveFor?: Device } = {},
+): Promise<string[]> {
   const now = Date.now()
   releaseStaleClaims(waUserId, now)
   const rows = pendingFor(waUserId)
@@ -212,12 +251,24 @@ export async function flushOutbox(waUserId: string, deviceId: string | null): Pr
       markExpired([row.id])
       continue
     }
+    // Held, not retired: the row keeps its TTL and goes out on the first sweep after the window
+    // ends, or sooner if the owner messages first. `continue` rather than `break` so an exempt
+    // wake-check queued behind a held brief is not held behind it.
+    if (opts.proactiveFor && heldByQuietHours(opts.proactiveFor, row.kind as OutboxKind, now)) {
+      log.debug({ waUserId, id: row.id, kind: row.kind }, 'outbox: holding a proactive message for quiet hours')
+      continue
+    }
     // `sentAtMillis` doubles as the claim stamp — the column is written nowhere else and read
     // nowhere at all, so it costs no migration on a branch that deliberately adds no DDL, and it is
     // what lets a claim orphaned by a crash be told apart from one that is genuinely in flight.
+    //
+    // Stamped with the CLAIM's own instant, never with the `now` captured before the loop: a flush
+    // that has already been running longer than STALE_CLAIM_MS (five rows against a Meta that is
+    // throwing 429s is ~32s each) would otherwise stamp every remaining row stale on arrival, and
+    // the next sweep would take a row back mid-send and deliver it twice.
     const claimed = db
       .update(outbox)
-      .set({ state: 'SENDING', sentAtMillis: now })
+      .set({ state: 'SENDING', sentAtMillis: Date.now() })
       .where(and(eq(outbox.id, row.id), eq(outbox.state, 'PENDING')))
       .run()
     if (claimed.changes === 0) {
@@ -276,8 +327,21 @@ export async function flushOutbox(waUserId: string, deviceId: string | null): Pr
 }
 
 /**
- * Queue a proactive message and deliver it immediately when the window allows. Used by the nudge
- * path; returns whether it went out now.
+ * Queue a proactive message and deliver it immediately when the window allows. Every proactive
+ * producer goes through here — nudges, the brief, the weekly review, the wake-check — and it
+ * returns whether the message went out now.
+ *
+ * Two things are NOT optional and both used to be missing here, which is how four features ended up
+ * with one seam wired on only some of its paths:
+ *
+ * 1. The delivery is PROACTIVE, so it carries the quiet-hours gate. Without it the producer's own
+ *    schedule was the only thing standing between the owner and a 06:30 brief inside the window Otto
+ *    had just confirmed.
+ * 2. What was delivered is recorded as Otto's own turns, exactly as `sweepOutbox` and
+ *    routes/whatsapp.ts do. The perverse part of leaving it out was WHICH case lost the record: this
+ *    path only flushes when the window is OPEN, i.e. precisely when the owner is around to reply to
+ *    the message. `promptSections.ts` (# Proactive messages) promises the model those turns are
+ *    there, so without this the brief at 07:00 is invisible at 07:02 and Otto restates it.
  */
 export async function enqueueAndTryFlush(params: {
   waUserId: string
@@ -291,7 +355,8 @@ export async function enqueueAndTryFlush(params: {
   enqueueOutbound(params)
   const device = getDevice(params.deviceId)
   if (!device || !windowOpen(device)) return false
-  const delivered = await flushOutbox(params.waUserId, params.deviceId)
+  const delivered = await flushOutbox(params.waUserId, params.deviceId, { proactiveFor: device })
+  if (delivered.length > 0) appendAssistantTurns(params.waUserId, params.deviceId, delivered)
   return delivered.length > 0
 }
 
@@ -363,7 +428,8 @@ function knockSummary(rows: OutboxRow[]): string {
  * 2. If the window is open, flush, AND THEN record what was delivered as Otto's own turns. That
  *    second half is NOT optional: the inbound path does exactly this (routes/whatsapp.ts), and
  *    without it the model has no idea what it said between turns, so the owner's "done" answers a
- *    message the transcript never contains.
+ *    message the transcript never contains. The flush is PROACTIVE — nobody asked for this pass —
+ *    so quiet hours hold back everything that is not a nudge or a wake-check.
  * 3. Otherwise knock, once, subject to every rule in `shouldKnock`.
  */
 export async function sweepOutbox(now: number = Date.now()): Promise<void> {
@@ -385,7 +451,7 @@ export async function sweepOutbox(now: number = Date.now()): Promise<void> {
     if (live.length === 0) continue
 
     if (windowOpen(device, now)) {
-      const delivered = await flushOutbox(waUserId, device.deviceId)
+      const delivered = await flushOutbox(waUserId, device.deviceId, { proactiveFor: device })
       if (delivered.length > 0) appendAssistantTurns(waUserId, device.deviceId, delivered)
       continue
     }

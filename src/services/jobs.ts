@@ -64,6 +64,26 @@ export function cancelJobs(kind: JobKind, alarmId: string): void {
   db.delete(jobs).where(and(eq(jobs.kind, kind), eq(jobs.alarmId, alarmId))).run()
 }
 
+/** Pending jobs of a kind anchored on an alarm — the read half of `cancelJobs`. */
+export function jobsForAlarm(kind: JobKind, alarmId: string): Job[] {
+  return db
+    .select()
+    .from(jobs)
+    .where(and(eq(jobs.kind, kind), eq(jobs.alarmId, alarmId)))
+    .orderBy(asc(jobs.id))
+    .all()
+}
+
+/**
+ * Move a job's anchor to a different alarm, leaving its run time and payload alone.
+ *
+ * For a chain that guards MORE THAN ONE alarm: cancelling the one it happens to be keyed on must
+ * hand the chain to a surviving sibling rather than take it down with it.
+ */
+export function reanchorJob(id: number, alarmId: string): void {
+  db.update(jobs).set({ alarmId }).where(eq(jobs.id, id)).run()
+}
+
 /** Drop every pending nudge for a reminder — called the moment it is completed or cancelled. */
 export function cancelNudges(reminderId: string): void {
   db.delete(jobs).where(and(eq(jobs.kind, 'nudge'), eq(jobs.reminderId, reminderId))).run()

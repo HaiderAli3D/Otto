@@ -313,6 +313,22 @@ describe('deliverWeeklyReview', () => {
     expect(outboxFor(device.deviceId)).toHaveLength(0)
   })
 
+  it('stays quiet once the owner has switched reviews off, even with a row already queued', async () => {
+    // "Drop the weekly thing" at 17:00 used to still deliver a review at 18:00. `setPreferences`
+    // wrote 'off' and handed back `weeklyReview: 'off'` for Otto to confirm, but nothing consulted
+    // the setting again at delivery — the brief has had that gate from day one (`slotForRunAt`) and
+    // this never got one, so the only thing that could stop the pending row was `seedWeeklyReview`
+    // on the next boot or gc pass, up to six hours away.
+    const device = reachableDevice('dev_wr17')
+    const now = Date.now()
+    event(device.deviceId, 'alm_a', 'RANG', now - DAY)
+    updateSettings(device.deviceId, { weeklyReviewAt: 'off' })
+
+    expect(await deliverWeeklyReview(device, now, now)).toBe(false)
+    expect(outboxFor(device.deviceId)).toHaveLength(0)
+    expect(sends).toHaveLength(0)
+  })
+
   it('stays quiet for a device with no WhatsApp number', async () => {
     makeDevice('dev_wr12')
     const device = getDevice('dev_wr12')!

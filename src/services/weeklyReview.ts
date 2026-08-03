@@ -3,6 +3,7 @@ import { composeWeeklyReview } from '../agent/review.js'
 import { config, parseWeeklyReview, type WeeklyReviewSlot } from '../config.js'
 import { log } from '../lib/log.js'
 import type { Device } from './devices.js'
+import { cancelJobsForDevice, ensureSingletonJob } from './jobs.js'
 import { enqueueAndTryFlush } from './outbox.js'
 import { getSettings, markWeeklyReviewSent } from './settings.js'
 import { isWorthSaying, weeklyRecord } from './signals.js'
@@ -108,6 +109,19 @@ export async function deliverWeeklyReview(
   scheduledAtMillis: number,
   nowMillis: number = Date.now(),
 ): Promise<boolean> {
+  // Are reviews still ON? Read live, at delivery, not trusted from whenever the job row was written.
+  //
+  // The brief has had this gate from the start (`runBrief` bails on `slotForRunAt` returning null)
+  // and this one did not, which made "drop the weekly thing" a lie for up to a week: `setPreferences`
+  // wrote 'off', handed back `weeklyReview: 'off'` for Otto to confirm, and the already-queued job
+  // row delivered one more review anyway — the only thing that ever cancelled it was `seedWeeklyReview`,
+  // reachable at boot and from a gc pass up to six hours away. The chain is now moved eagerly (see
+  // `rescheduleWeeklyReviewChain`); this is the backstop for a row that is already in flight.
+  if (weeklyReviewSlot(device) === null) {
+    log.info({ deviceId: device.deviceId }, 'weekly review: switched off since this run was scheduled; staying quiet')
+    return false
+  }
+
   const waUserId = device.whatsappNumber
   if (!waUserId) {
     log.debug({ deviceId: device.deviceId }, 'weekly review: no WhatsApp number linked')
@@ -144,4 +158,24 @@ export async function deliverWeeklyReview(
   })
   markWeeklyReviewSent(device.deviceId, nowMillis)
   return true
+}
+
+/**
+ * Move the chain NOW, because the owner just changed (or cleared) their review slot.
+ *
+ * The peer of `brief.rescheduleBriefChain`, and missing until now for no better reason than that the
+ * two features were built on different branches and `preferences.ts` is the file neither could see
+ * the other in. It fixes both directions of the same hole: switching reviews OFF left a pending row
+ * to fire once more, and switching them back ON seeded nothing until the next gc pass — up to six
+ * hours later, by which point `nextWeeklyReviewAt` could only offer the FOLLOWING week.
+ *
+ * Cancel-then-ensure with no await between them, exactly like the brief: better-sqlite3 is
+ * synchronous, so a tick cannot land in the middle, and a `settle` racing the delete updates an id
+ * that no longer exists.
+ */
+export function rescheduleWeeklyReviewChain(device: Device, nowMillis: number = Date.now()): void {
+  cancelJobsForDevice('weekly_review', device.deviceId)
+  const at = nextWeeklyReviewAt(device, nowMillis)
+  if (at === null) return
+  ensureSingletonJob('weekly_review', at, { deviceId: device.deviceId })
 }
