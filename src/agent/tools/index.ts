@@ -6,6 +6,7 @@ import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
 import { createCalendarEvent, createTask, hasGoogle, listCalendarEvents } from '../../services/google.js'
 import { supersedePending } from '../../services/outbox.js'
+import { setPreferences } from '../../services/preferences.js'
 import { parseRecurrence } from '../../services/recurrence.js'
 import {
   cancelReminder,
@@ -21,6 +22,7 @@ import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
 import { googleTools } from './google.js'
 import { reminderTools } from './reminders.js'
+import { settingsTools } from './settings.js'
 
 /**
  * The tool surface the Claude agent can call.
@@ -38,7 +40,7 @@ import { reminderTools } from './reminders.js'
  * test/tools-order.test.ts pins the names and the order as the regression net.
  */
 export function buildTools(): Anthropic.Tool[] {
-  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools]
+  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...settingsTools]
 }
 
 function reminderView(r: { reminderId: string; title: string; dueAtMillis: number | null; state: string; recurrence: string | null; nagPolicy: string; nagCount: number }, zone: string) {
@@ -222,6 +224,13 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         dueIso: a.dueLocalISO ? String(a.dueLocalISO) : undefined,
       })
     }
+    case 'set_preferences': {
+      // Handed straight through unvalidated ON PURPOSE: `a` is a bag of unknowns from a model, and
+      // setPreferences is the trust boundary that type-checks every field. Coercing here would
+      // duplicate that and lose the error messages the model needs to correct itself.
+      return setPreferences(device, a)
+    }
+
     default:
       return { error: `unknown tool ${name}` }
   }

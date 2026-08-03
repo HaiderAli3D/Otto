@@ -47,12 +47,19 @@ export function nowIsoInZone(zone: string): string {
  *
  * `<=` (not `<`) is load-bearing: "next" must never return the instant it was asked about, or a
  * once-a-day job scheduled exactly on its own boundary re-fires immediately.
+ *
+ * Tomorrow is reached by advancing the DAY and then imposing the wall clock, never by adding a day
+ * to an already-resolved target. On a spring-forward morning the requested local time may not exist
+ * — 01:30 does not happen at all in London on 28 March 2027 — and luxon resolves it forward to
+ * 02:30. Adding a day to THAT carries the correction into a day that has no gap in it, so a 01:30
+ * job would come back at 02:30 the following morning too, an hour adrift and no longer on its own
+ * boundary. Setting the time last means the correction lasts exactly as long as the gap does.
  */
 export function nextLocalTimeAt(fromMillis: number, zone: string, hour: number, minute = 0): number {
   const from = DateTime.fromMillis(fromMillis, { zone })
-  let target = from.set({ hour, minute, second: 0, millisecond: 0 })
-  if (target <= from) target = target.plus({ days: 1 })
-  return target.toMillis()
+  const atTime = (dt: DateTime): DateTime => dt.set({ hour, minute, second: 0, millisecond: 0 })
+  const target = atTime(from)
+  return (target <= from ? atTime(from.plus({ days: 1 })) : target).toMillis()
 }
 
 /**
