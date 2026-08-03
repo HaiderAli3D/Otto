@@ -116,24 +116,43 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
     return null
   }
 
-  // The departure is already behind us, and that reaches here as two very different situations.
+  // `blocked: 'past'` reaches here as three different situations, and only ONE of them may cancel.
   //
-  // The event moved EARLIER: this recheck runs 45 minutes BEFORE the alarm, so the alarm is still
-  // sitting in the future, and when it rings it will announce a departure for a meeting that
-  // started before it. That is not a stale time, it is a false one, and the owner acts on it.
+  // (a) The event moved EARLIER. The alarm is still sitting in the future and, when it rings, will
+  //     announce a departure for a meeting that already started. That is not a stale time, it is a
+  //     false one, and the owner acts on it. This one cancels.
   //
-  // Or nothing moved and this recheck is simply running late — a restart, a backlog. Then the armed
-  // alarm IS the departure, ringing about now, and cancelling it is precisely the failure this
-  // feature must never produce. The alarm's own trigger time separates the two without guessing: an
-  // alarm still ahead of a departure that has already gone can only be wrong, so it goes; one at or
-  // behind now is the ring itself, and is left strictly alone.
+  // (b) The departure is simply IMMINENT. `computeLeaveByPlan` returns 'past' for anything inside
+  //     LEAVE_SOON_MS, not only for what has gone — and a plan armed close to its departure
+  //     schedules this recheck at now+60s, because leaveAt − RECHECK_LEAD_MS is already behind. So
+  //     an alarm the owner explicitly asked for arrives here a minute after arming, five minutes
+  //     from a departure that is entirely correct.
+  //
+  // (c) The recheck is running late after a restart or a backlog. The armed alarm IS the departure,
+  //     ringing about now.
+  //
+  // In (b) and (c) nothing is wrong: time passed. Cancelling there is the precise failure this
+  // feature must never produce — a real departure, silently unarmed, sixty seconds after the owner
+  // asked for it. So the gate is whether the EVENT MOVED, not whether the clock advanced. A grown
+  // travel estimate is deliberately not a reason either: ringing slightly late still gets them out
+  // of the door, and silence does not.
   if (plan.blocked === 'past') {
+    const movedEarlier = plan.startMillis !== null && payload.eventStartMillis - plan.startMillis >= MOVED_MS
+    if (!movedEarlier) {
+      log.info(
+        { jobId: job.id, eventId: payload.eventId },
+        'leave_by: departure is imminent but the event has not moved; leaving the alarm to ring',
+      )
+      return null
+    }
     for (const id of [alarmId, wakeId]) {
       if (id === null) continue
       const armed = getAlarm(id)
+      // An alarm at or behind `now` is the ring itself and is left strictly alone; only one still
+      // ahead of a departure that has already gone can be announcing something false.
       if (armed?.state === 'ARMED' && armed.triggerAtMillis > now) await cancelAlarm(device, id)
     }
-    log.info({ jobId: job.id, eventId: payload.eventId }, 'leave_by: departure already gone; cancelled anything still ahead')
+    log.info({ jobId: job.id, eventId: payload.eventId }, 'leave_by: event moved earlier; cancelled anything still ahead')
     return null
   }
 

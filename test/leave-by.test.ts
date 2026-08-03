@@ -596,6 +596,32 @@ describe('the recheck 45 minutes out', () => {
     expect(getAlarm(plan.alarmId!)!.triggerAtMillis).toBe(plan.leaveAtMillis)
   })
 
+  it('does not unarm a departure the owner asked for just because it is now imminent', async () => {
+    // The regression this pins: `blocked: 'past'` also covers a departure merely inside
+    // LEAVE_SOON_MS, and a plan armed close to its departure schedules the recheck at now+60s
+    // (leaveAt − RECHECK_LEAD_MS is already behind). So the recheck arrives a minute after arming
+    // with a perfectly good alarm five minutes out — and the cancel, gated only on "still ahead of
+    // now", took it away silently. A real departure, unarmed sixty seconds after being asked for.
+    const device = makeLondonDevice()
+    // 30 minutes' default travel puts the departure 5.5 minutes out: armable now, inside the
+    // soon-window by the time the recheck runs.
+    const soon = ev({
+      ...STANDUP,
+      startIso: '2026-08-04T08:35:30+01:00',
+      endIso: '2026-08-04T09:05:30+01:00',
+    })
+    const plan = await planLeaveBy({ device, event: soon, explicit: true })
+    expect(plan.alarmId).not.toBeNull()
+
+    const job = leaveByJobs()[0]!
+    vi.setSystemTime(job.runAtMillis)
+    calendarHolds([soon])
+    await runJob(job)
+
+    expect(getAlarm(plan.alarmId!)!.state).toBe('ARMED')
+    expect(listArmed(device.deviceId)).toHaveLength(1)
+  })
+
   it('refuses to resurrect the half of a plan the owner cancelled', async () => {
     const device = makeLondonDevice()
     const plan = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: true, explicit: true })
