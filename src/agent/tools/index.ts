@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { newAlarmId } from '../../lib/ids.js'
 import { isNagPolicy, type NagPolicy } from '../../lib/nagLadder.js'
+import { deferPastQuietHours } from '../../lib/quietHours.js'
 import { armAlarm, cancelAlarm, listArmed } from '../../services/alarms.js'
 import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
@@ -16,6 +17,7 @@ import {
   reopenReminder,
   snoozeReminder,
 } from '../../services/reminders.js'
+import { nagQuietHours } from '../../services/settings.js'
 import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/time.js'
 import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
@@ -79,17 +81,20 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         return { error: `invalid recurrence rule "${recurrence}" — use FREQ=DAILY|WEEKLY|MONTHLY with optional INTERVAL/BYDAY` }
       }
       const alarmId = newAlarmId()
+      const wakeCheck = a.wakeCheck === true
       const { sent } = await armAlarm(device, {
         alarmId,
         triggerAtMillis,
         label: String(a.label ?? 'Alarm'),
         allowWhileIdle: typeof a.allowWhileIdle === 'boolean' ? a.allowWhileIdle : undefined,
         recurrence,
+        wakeCheck,
       })
       return {
         alarmId,
         firesAtLocal: epochMillisToLocalHuman(triggerAtMillis, device.timezone),
         repeats: recurrence ?? undefined,
+        wakeCheck,
         delivered: sent,
       }
     }
@@ -165,9 +170,20 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       if (typeof a.minutes === 'number') until = Date.now() + a.minutes * 60_000
       else if (a.untilLocalISO !== undefined) until = localIsoToEpochMillis(String(a.untilLocalISO), device.timezone)
       else return { error: 'pass either minutes or untilLocalISO' }
-      const ok = snoozeReminder(reminderId, until)
+      // `snoozeReminder` writes nextNagAtMillis directly and is the ONE path in the system that
+      // bypasses `nextNagAt`, so quiet hours are applied HERE rather than inside the service —
+      // which leaves `snoozeReminder(id, until)` meaning exactly what it says and keeps its tests
+      // honest. Reporting the EFFECTIVE time (and that it moved) is what lets Otto say "that lands
+      // in your quiet hours — I'll chase you at 07:00" without being told to.
+      const effective = deferPastQuietHours(until, device.timezone, nagQuietHours(device, existing.escalateWithAlarm))
+      const ok = snoozeReminder(reminderId, effective)
       supersedePending(reminderId)
-      return { snoozed: ok, title: existing.title, nextNudgeLocal: epochMillisToLocalHuman(until, device.timezone) }
+      return {
+        snoozed: ok,
+        title: existing.title,
+        nextNudgeLocal: epochMillisToLocalHuman(effective, device.timezone),
+        movedForQuietHours: effective !== until,
+      }
     }
     case 'cancel_reminder': {
       const reminderId = String(a.reminderId)

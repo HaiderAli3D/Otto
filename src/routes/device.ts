@@ -8,6 +8,7 @@ import { verifyRequestSig } from '../services/deviceAuth.js'
 import { getDevice, latchAuth, setHeartbeat, setTimezone, setToken } from '../services/devices.js'
 import { onReminderAlarmEvent } from '../services/reminders.js'
 import { isValidZone } from '../services/time.js'
+import { scheduleWakeCheck } from '../services/wakeCheck.js'
 
 /**
  * The four endpoints the Android app calls (OttoApi.kt). Mounted at the origin root; the app's
@@ -105,7 +106,12 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       // the chat follow-up. (Reminder-owned alarms carry no recurrence, so advanceRecurrence
       // above hits its guard and no-ops for them.)
       const device = getDevice(body.deviceId)
-      if (device) onReminderAlarmEvent(alarmId, body.event, device.timezone)
+      if (device) onReminderAlarmEvent(alarmId, body.event, device)
+      // DISMISSED only. MISSED means they never touched it — a different problem, and the ringer
+      // has already given up. Note this hook returns immediately for an alarm with no owning
+      // reminder; the wake-check is keyed on the ALARM, so it works for standalone ones too.
+      // Fire-and-forget like the rest of this block: the route still answers 204.
+      if (device && body.event === 'DISMISSED') scheduleWakeCheck(alarmId, device, body.atMillis)
     }
     return reply.code(204).send()
   })

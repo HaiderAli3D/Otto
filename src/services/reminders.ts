@@ -8,6 +8,7 @@ import { armAlarm, cancelAlarm } from './alarms.js'
 import type { Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
 import { nextOccurrence } from './recurrence.js'
+import { nagQuietHours } from './settings.js'
 
 export type Reminder = typeof reminders.$inferSelect
 
@@ -84,7 +85,15 @@ export async function createReminder(
     })
   }
 
-  const firstNag = nextNagAt({ policy: nagPolicy, nagCount: 0, dueAtMillis, zone: device.timezone, nowMillis: now })
+  const escalateWithAlarm = params.escalateWithAlarm ?? false
+  const firstNag = nextNagAt({
+    policy: nagPolicy,
+    nagCount: 0,
+    dueAtMillis,
+    zone: device.timezone,
+    nowMillis: now,
+    quiet: nagQuietHours(device, escalateWithAlarm),
+  })
 
   const row: Reminder = {
     reminderId,
@@ -100,7 +109,7 @@ export async function createReminder(
     nagCount: 0,
     lastNaggedAtMillis: null,
     deferCount: 0,
-    escalateWithAlarm: params.escalateWithAlarm ?? false,
+    escalateWithAlarm,
     alarmId,
     completedAtMillis: null,
     completedCount: 0,
@@ -148,6 +157,7 @@ export async function completeReminder(
       dueAtMillis: next,
       zone: device.timezone,
       nowMillis: now,
+      quiet: nagQuietHours(device, r.escalateWithAlarm),
     })
     db.update(reminders)
       .set({
@@ -227,6 +237,7 @@ export function reopenReminder(device: Device, reminderId: string): boolean {
     dueAtMillis: r.dueAtMillis,
     zone: device.timezone,
     nowMillis: now,
+    quiet: nagQuietHours(device, r.escalateWithAlarm),
   })
   db.update(reminders)
     .set({ state: 'OPEN', completedAtMillis: null, nextNagAtMillis: nag, updatedAt: now })
@@ -239,8 +250,11 @@ export function reopenReminder(device: Device, reminderId: string): boolean {
 /**
  * A reminder's alarm rang and the owner dismissed it (or missed it). That is NOT completion — the
  * task still has to be done — so start the chat follow-up rather than touching state.
+ *
+ * Takes the whole `Device` rather than just its zone: the follow-up rung goes through `nextNagAt`
+ * like every other, and that needs the device's quiet hours as well as its timezone.
  */
-export function onReminderAlarmEvent(alarmId: string, event: string, zone: string): void {
+export function onReminderAlarmEvent(alarmId: string, event: string, device: Device): void {
   const r = db.select().from(reminders).where(eq(reminders.alarmId, alarmId)).get()
   if (!r || r.state !== 'OPEN') return
   const now = Date.now()
@@ -248,8 +262,9 @@ export function onReminderAlarmEvent(alarmId: string, event: string, zone: strin
     policy: r.nagPolicy as NagPolicy,
     nagCount: Math.max(r.nagCount, 1), // the ring itself counts as rung 0
     dueAtMillis: r.dueAtMillis,
-    zone,
+    zone: device.timezone,
     nowMillis: now,
+    quiet: nagQuietHours(device, r.escalateWithAlarm),
   })
   if (nag === null) return
   db.update(reminders)

@@ -7,6 +7,7 @@ vi.mock('../src/fcm/sender.js', () => ({
 import { DIGEST_SYSTEM } from '../src/agent/compose.js'
 import { NUDGE_SYSTEM, writeNudge } from '../src/agent/nudge.js'
 import { PERSONA, WRITING } from '../src/agent/persona.js'
+import { REVIEW_SYSTEM } from '../src/agent/review.js'
 import { systemPrompt } from '../src/agent/prompt.js'
 import { config } from '../src/config.js'
 import { ensureSchema } from '../src/db/client.js'
@@ -40,6 +41,16 @@ describe('one Otto on every surface', () => {
     expect(NUDGE_SYSTEM).toContain(WRITING)
   })
 
+  it('the weekly review carries the same persona, and overrides WRITING only for itself', () => {
+    // The review is the one surface allowed more than three sentences. It says so in its own
+    // "# This message" block rather than by editing WRITING — which would loosen every surface and
+    // invalidate every cached prefix.
+    expect(REVIEW_SYSTEM).toContain(PERSONA)
+    expect(REVIEW_SYSTEM).toContain(WRITING)
+    expect(REVIEW_SYSTEM).toContain('for THIS')
+    expect(WRITING).toContain('one to three sentences')
+  })
+
   it('keeps the record out of the cached prefix', () => {
     // The counters move almost every turn. In front of the breakpoint they would re-bill the whole
     // prefix each request — the same mistake that once cost ~$90/month.
@@ -50,6 +61,16 @@ describe('one Otto on every surface', () => {
     expect(cached).toBeLessThan(blocks.length - 1)
     expect(tail.cache_control).toBeUndefined()
     expect(tail.text).toContain('The record (last 14 days)')
+  })
+
+  it('reports quiet hours in the volatile tail, never in the cached block', () => {
+    // The window itself moves rarely, but "are we inside it right now" flips every few hours. In
+    // front of the breakpoint that one line would re-bill the whole prefix on every request.
+    const device = makeDevice('dev_pe8')
+    const blocks = systemPrompt(device)
+    const tail = blocks[blocks.length - 1]!
+    expect(tail.text).toContain('Quiet hours: 22:00–07:00 local.')
+    for (const block of blocks.slice(0, -1)) expect(block.text).not.toContain('Quiet hours: 22:00')
   })
 })
 

@@ -76,6 +76,35 @@ export const PROACTIVE = `# Proactive messages
   someone means when they say "done". You still need list_reminders when you want ids for
   anything other than the obvious single match.`
 
+/**
+ * Quiet hours and wake-checks in ONE const, deliberately.
+ *
+ * They are the same instruction from two sides — when you are allowed to speak first, and the one
+ * case where the answer is "always" — and the seam rule for this file is a new const plus a SINGLE
+ * entry in the compose array, so that a parallel branch adding its own section never lands in the
+ * same hunk. Two consts here would mean two adjacent lines in `prompt.ts` for no gain in meaning.
+ *
+ * Frozen, like every other section: the actual window and whether it is on right now are per-device
+ * and live in the uncached tail of `systemPrompt()`.
+ */
+export const ACCOUNTABILITY = `# Quiet hours
+- The owner's quiet hours are given below. Anything you schedule that would land inside that window
+  is moved to the end of it automatically — you never have to do that arithmetic, and you must not
+  claim you sent something you didn't.
+- Three things go through regardless: a real alarm, a reminder the owner marked as escalating, and
+  a wake-check. If they ask to be woken at 05:00, set it and say nothing about the window.
+- Replying to them is never held back. Quiet hours are about you speaking first.
+- If a snooze lands inside the window, say when you will actually come back ("that's in your quiet
+  hours, so I'll chase you at 07:00"). Never move it silently.
+
+# Wake-checks
+- create_alarm takes wakeCheck. Set it, without asking, for any alarm whose job is getting them out
+  of bed. Once they dismiss it you ask whether they are actually up, a few times, and ring the phone
+  again if they never answer.
+- Leave it off for everything else. A leave-the-house alarm or a hard cutoff does not need chasing,
+  and a reminder that rings already has the nag ladder behind it.
+- If they tell you to stop checking up on them, don't set it.`
+
 export const THE_RECORD = `# The record
 - Below the chase-list you are given the owner's recent record: how their alarms went, what they
   finished, what they dropped, and the counters on each open reminder ("chased 4×, moved 3×").

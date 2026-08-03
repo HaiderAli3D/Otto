@@ -14,6 +14,7 @@ import { maybeCollapseBacklog } from '../services/digest.js'
 import { flushOutbox } from '../services/outbox.js'
 import { listReminders } from '../services/reminders.js'
 import { appendAssistantTurns, maybeResetIdleSession } from '../services/sessions.js'
+import { cancelWakeChecks } from '../services/wakeCheck.js'
 import { normalizeWaNumber, parseInboundMessages, sendText, verifySignature } from '../services/whatsapp.js'
 
 /**
@@ -100,6 +101,9 @@ async function handleInbound(from: string, type: string, text: string | null): P
   // Stamp the 24h window FIRST, for every inbound including non-text: a voice note still reopens
   // the window even though Otto can't read it, and everything proactive depends on this clock.
   markInbound(device.deviceId)
+  // They are demonstrably awake, so stop asking. Here — right after markInbound and BEFORE the
+  // non-text return below — because a voice note answers "you up?" just as well as typing does.
+  cancelWakeChecks(device.deviceId)
 
   // Non-text (voice note, image, …): tell the owner instead of silently eating the command. Make
   // it reminder-aware — answering a nudge with a voice note would otherwise leave the reminder
