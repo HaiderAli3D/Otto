@@ -20,6 +20,7 @@ import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/t
 import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
 import { googleTools } from './google.js'
+import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
 import { reminderTools } from './reminders.js'
 
 /**
@@ -38,7 +39,7 @@ import { reminderTools } from './reminders.js'
  * test/tools-order.test.ts pins the names and the order as the regression net.
  */
 export function buildTools(): Anthropic.Tool[] {
-  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools]
+  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools]
 }
 
 function reminderView(r: { reminderId: string; title: string; dueAtMillis: number | null; state: string; recurrence: string | null; nagPolicy: string; nagCount: number }, zone: string) {
@@ -222,6 +223,12 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         dueIso: a.dueLocalISO ? String(a.dueLocalISO) : undefined,
       })
     }
+    case 'create_leave_by_alarm': {
+      // The whole body lives beside the definition in ./leaveBy.js: event resolution, the guardrail
+      // ladder and the arming decision are a page of logic, not the few lines every other case is.
+      return await createLeaveByAlarm(device, a)
+    }
+
     default:
       return { error: `unknown tool ${name}` }
   }

@@ -72,6 +72,23 @@ export function forgetFact(deviceId: string, key: string): boolean {
   return res.changes > 0
 }
 
+/**
+ * One fact's value by exact key, or null.
+ *
+ * `searchFacts` is a LIKE over key AND value, which is right for the model and wrong for code:
+ * looking up `home.address` that way would also match a fact whose *value* mentions home. Server
+ * logic that keys off a specific fact — the leave-by origin resolver, the travel-buffer fallback —
+ * needs an exact read, and `rememberFact` lowercases every key on write, so this does too.
+ */
+export function factValue(deviceId: string, key: string): string | null {
+  const row = db
+    .select({ value: facts.value })
+    .from(facts)
+    .where(and(eq(facts.deviceId, deviceId), eq(facts.key, key.trim().toLowerCase())))
+    .get()
+  return row?.value ?? null
+}
+
 /** Free-text search across key and value, for the long tail beyond the injected set. */
 export function searchFacts(deviceId: string, query: string | undefined): Fact[] {
   if (!query || !query.trim()) return listFacts(deviceId)
