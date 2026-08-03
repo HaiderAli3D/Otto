@@ -14,8 +14,14 @@ vi.mock('../src/services/stt.js', async (orig) => {
   return { ...actual, transcribe: transcribeMock }
 })
 
+import { VOICE_AND_PHOTOS } from '../src/agent/promptSections.js'
 import { config } from '../src/config.js'
-import { ingestFailureMessage, ingestInbound, type IngestFailure } from '../src/services/ingest.js'
+import {
+  VOICE_TRANSCRIPT_PREFIX,
+  ingestFailureMessage,
+  ingestInbound,
+  type IngestFailure,
+} from '../src/services/ingest.js'
 import type { InboundMessage } from '../src/services/whatsapp.js'
 
 const msg = (over: Partial<InboundMessage>): InboundMessage => ({
@@ -33,6 +39,10 @@ const voice = (over: Partial<InboundMessage> = {}): InboundMessage =>
   msg({ type: 'audio', media: { mediaId: 'm2', mimeType: 'audio/ogg; codecs=opus', voice: true }, ...over })
 
 beforeEach(() => {
+  // Restore FIRST, not just at the end of each test: a `config.stt` spy left standing by a test
+  // that failed mid-way silently switches voice ON for every test after it, and the resulting
+  // cascade hides which assertion actually broke.
+  vi.restoreAllMocks()
   fetchMediaMock.mockReset()
   transcribeMock.mockReset()
 })
@@ -58,8 +68,9 @@ describe('photos become [image, text] blocks', () => {
     expect(res.ok).toBe(true)
     if (!res.ok) throw new Error('unreachable')
     expect(res.source).toBe('image')
-    // Order is load-bearing: withConversationCacheBreakpoint spreads cache_control onto the LAST
-    // block, and that must land on a tiny text block, never on a quarter-megabyte of base64.
+    // Order is load-bearing for the MODEL, not for the cache: Anthropic's guidance is picture then
+    // instruction. (cache_control marks a prefix boundary, so the image is inside the cached prefix
+    // either way — an earlier comment here had that backwards.)
     expect(res.content).toEqual([
       {
         type: 'image',
@@ -118,8 +129,33 @@ describe('voice notes become a plain STRING', () => {
     if (!res.ok) throw new Error('unreachable')
     expect(res.source).toBe('voice')
     expect(typeof res.content).toBe('string')
-    expect(res.content).toBe('remind me to call mum at six')
+    expect(res.content).toBe(`${VOICE_TRANSCRIPT_PREFIX} remind me to call mum at six`)
     vi.restoreAllMocks()
+  })
+
+  it('MARKS the transcript, because a bare one is indistinguishable from a typed message', async () => {
+    // `source` cannot do this job: the route hands the agent `content` and nothing else. Without a
+    // marker in the content itself the model either never applies the confirm-a-mis-hearing rule or
+    // applies it to typed messages too, which collides with the rule against unrequested follow-ups.
+    vi.spyOn(config, 'stt', 'get').mockReturnValue({ apiKey: 'k', baseUrl: 'https://stt.invalid', model: 'whisper' })
+    fetchMediaMock.mockResolvedValue({ ok: true, bytes: Buffer.from('ogg'), mimeType: 'audio/ogg' })
+    transcribeMock.mockResolvedValue({ ok: true, text: 'move the dentist to Thursday' })
+
+    const spoken = await ingestInbound(voice())
+    const typed = await ingestInbound(msg({ type: 'text', text: 'move the dentist to Thursday' }))
+
+    if (!spoken.ok || !typed.ok) throw new Error('unreachable')
+    expect(spoken.content).not.toEqual(typed.content)
+    expect(String(spoken.content).startsWith(VOICE_TRANSCRIPT_PREFIX)).toBe(true)
+    // A typed message is exactly what they typed — the marker must never leak onto the fast path.
+    expect(typed.content).toBe('move the dentist to Thursday')
+    vi.restoreAllMocks()
+  })
+
+  it('emits the very marker the prompt tells the model to look for', async () => {
+    // Two files, one literal. If either side edits its copy the rule silently stops firing, and
+    // nothing else in the system would notice.
+    expect(VOICE_AND_PHOTOS).toContain(VOICE_TRANSCRIPT_PREFIX)
   })
 
   it('reports an empty transcript separately from a provider failure', async () => {

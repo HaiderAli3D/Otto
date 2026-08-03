@@ -87,6 +87,18 @@ export async function ingestInbound(msg: InboundMessage): Promise<IngestResult> 
 }
 
 /**
+ * Marks a transcript as a transcript. Consumed by the model, via the voice rule in
+ * `agent/promptSections.ts` — which is why the two must stay byte-identical (a test pins that).
+ *
+ * Without it that rule is unactionable: "confirm a mis-hearing that would change what you DO" needs
+ * the model to know which turns could contain a mis-hearing, and a bare transcript is
+ * indistinguishable from a typed message. `IngestResult.source` cannot carry it — the route hands
+ * the agent `content` and nothing else, and the marker has to survive into the saved transcript so
+ * the next turn still knows how that one arrived.
+ */
+export const VOICE_TRANSCRIPT_PREFIX = '[voice note, transcribed]'
+
+/**
  * Voice note -> a PLAIN STRING, deliberately.
  *
  * The transcript IS the owner's own words, so it belongs in the conversation as a normal user turn:
@@ -113,16 +125,17 @@ async function ingestAudio(msg: InboundMessage): Promise<IngestResult> {
     if (said.reason === 'unconfigured') return { ok: false, reason: 'stt_unconfigured', noun }
     return { ok: false, reason: 'transcribe_failed', noun }
   }
-  return { ok: true, source: 'voice', content: said.text }
+  return { ok: true, source: 'voice', content: `${VOICE_TRANSCRIPT_PREFIX} ${said.text}` }
 }
 
 /**
- * Photo -> `[image, text]`, in that order, and the order is load-bearing.
+ * Photo -> `[image, text]`, in that order, following Anthropic's own guidance: the model reads the
+ * picture and then the instruction about it, which is measurably better than the reverse.
  *
- * `withConversationCacheBreakpoint` in agent/runner.ts spreads `cache_control` onto the LAST block
- * of the last message. On a small text block that is free; on the image block it would ask the API
- * to cache a quarter-megabyte of base64 for a turn that is about to be answered once. Anthropic's
- * own guidance is image-then-text anyway, so this costs nothing to honour.
+ * It is NOT a cost decision. `withConversationCacheBreakpoint` in agent/runner.ts spreads
+ * `cache_control` onto the LAST block of the last message, but that marker names a prefix boundary
+ * — everything up to and including it is cached — so the image sits inside the cached prefix
+ * whichever block carries the marker. An earlier version of this comment claimed the opposite.
  *
  * No describe-the-image call is made: the model's own reply already describes the photo, for zero
  * extra cost, and `stripAttachments` replaces the bytes with that description when the session is

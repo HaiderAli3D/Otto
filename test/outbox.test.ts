@@ -27,12 +27,15 @@ import {
   windowOpen,
   type OutboxRow,
 } from '../src/services/outbox.js'
-import { loadSession, saveSession } from '../src/services/sessions.js'
+import { appendAssistantTurns, loadSession, saveSession } from '../src/services/sessions.js'
 import { updateSettings } from '../src/services/settings.js'
 import { makeDevice } from './helpers.js'
 
 beforeEach(() => {
   ensureSchema()
+  // Restore FIRST: a `config.meta` spy left standing by a test that failed before its trailing
+  // restoreAllMocks would hand every later test a registered template it never asked for.
+  vi.restoreAllMocks()
   sendMock.mockReset()
   sendMock.mockResolvedValue({ ok: true })
   templateMock.mockReset()
@@ -342,5 +345,87 @@ describe('sweepOutbox', () => {
 
     expect(sendMock).not.toHaveBeenCalled()
     expect(pendingFor('447700900199')).toHaveLength(1)
+  })
+
+  it('sends a queued message ONCE when the sweep and the webhook flush overlap', async () => {
+    // The scheduler tick and the Fastify webhook are independent promise chains, and `await
+    // sendText` yields between reading a PENDING row and retiring it. Without a claim both chains
+    // read the SAME row: the owner gets the nudge twice and the transcript gets two identical
+    // assistant turns. Turning the sweep on made this a standing five-minute exposure rather than
+    // a nudge-time coincidence, which is why the claim lives in flushOutbox itself.
+    const device = linked('dev_s8', '447700900107')
+    markInbound(device.deviceId)
+    saveSession('447700900107', device.deviceId, [{ role: 'user', content: 'morning' }])
+    enqueueOutbound({ waUserId: '447700900107', deviceId: device.deviceId, kind: 'nudge', body: 'ONE NUDGE' })
+
+    // Hold the first send open so the second chain starts while the first is still mid-flight —
+    // the exact interleaving the claim exists to lose.
+    let release = (): void => {}
+    const inFlight = new Promise<void>((resolve) => {
+      release = () => resolve()
+    })
+    sendMock.mockImplementation(async () => {
+      await inFlight
+      return { ok: true }
+    })
+
+    const sweep = sweepOutbox(Date.now())
+    const webhook = flushOutbox('447700900107', device.deviceId)
+    release()
+    const [, alsoDelivered] = await Promise.all([sweep, webhook])
+
+    expect(sendMock).toHaveBeenCalledTimes(1)
+    // Exactly one chain may claim the delivery. The loser reporting it too is what writes the
+    // duplicate assistant turn — this is verbatim what routes/whatsapp.ts does with the bodies its
+    // flush returns, and appendAssistantTurns has no dedupe of its own.
+    expect(alsoDelivered).toEqual([])
+    appendAssistantTurns('447700900107', device.deviceId, alsoDelivered)
+    expect(loadSession('447700900107').filter((m) => m.role === 'assistant')).toHaveLength(1)
+    expect(pendingFor('447700900107')).toHaveLength(0)
+  })
+
+  it('takes back a claim orphaned by a crash instead of losing the message forever', async () => {
+    // The flip side of claiming: a row parked in SENDING is invisible to `pendingFor`, so a process
+    // that died mid-send would strand it in a state no sweep, no flush and no gc pass ever looks at.
+    const device = linked('dev_s9', '447700900108')
+    markInbound(device.deviceId)
+    enqueueOutbound({ waUserId: '447700900108', deviceId: device.deviceId, kind: 'nudge', body: 'orphaned' })
+    // Exactly what a crash leaves behind: claimed, stamped, never resolved.
+    db.update(outbox)
+      .set({ state: 'SENDING', sentAtMillis: Date.now() - 10 * 60_000 })
+      .where(eq(outbox.waUserId, '447700900108'))
+      .run()
+    expect(pendingFor('447700900108')).toHaveLength(0)
+
+    expect(await flushOutbox('447700900108', device.deviceId)).toEqual(['orphaned'])
+  })
+
+  it('starts the knock cooldown on the ATTEMPT, not on the outcome', async () => {
+    // sendTemplate calls an abort/timeout and a 5xx transient, and a template Meta ACTUALLY
+    // DELIVERED but whose response we lost is indistinguishable from one that never landed. Stamped
+    // only on success, an hour of Meta trouble is twelve lock-screen pushes.
+    const device = linked('dev_s10', '447700900109')
+    enqueueOutbound({
+      waUserId: '447700900109',
+      deviceId: device.deviceId,
+      kind: 'missed_alarm',
+      body: 'you slept through it',
+    })
+    const meta = config.meta!
+    vi.spyOn(config, 'meta', 'get').mockReturnValue({ ...meta, template: { name: 'otto_catch_up', lang: 'en' } })
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    // graphFetch's "retries exhausted" — the shape sendTemplate returns for a timeout or a 5xx.
+    templateMock.mockResolvedValue({ ok: false, permanent: false, status: 0, outOfWindow: false, body: 'retries exhausted' })
+
+    const start = Date.now()
+    await sweepOutbox(start)
+    await sweepOutbox(start + 60_000)
+    await sweepOutbox(start + 120_000)
+
+    expect(templateMock).toHaveBeenCalledTimes(1)
+    expect(getDevice(device.deviceId)?.lastTemplateAt).toBe(start)
+    // …and the queue is still waiting, so the owner loses nothing by the suppression.
+    expect(pendingFor('447700900109')).toHaveLength(1)
+    vi.restoreAllMocks()
   })
 })
