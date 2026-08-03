@@ -4,7 +4,7 @@ import { isNagPolicy, type NagPolicy } from '../../lib/nagLadder.js'
 import { armAlarm, cancelAlarm, listArmed } from '../../services/alarms.js'
 import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
-import { createCalendarEvent, createTask, hasGoogle, listCalendarEvents } from '../../services/google.js'
+import { createCalendarEvent, createTask, hasGoogle, listCalendarEvents, type CalendarEvent } from '../../services/google.js'
 import { supersedePending } from '../../services/outbox.js'
 import { setPreferences } from '../../services/preferences.js'
 import { parseRecurrence } from '../../services/recurrence.js'
@@ -21,6 +21,7 @@ import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/t
 import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
 import { googleTools } from './google.js'
+import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
 import { reminderTools } from './reminders.js'
 import { settingsTools } from './settings.js'
 
@@ -40,7 +41,7 @@ import { settingsTools } from './settings.js'
  * test/tools-order.test.ts pins the names and the order as the regression net.
  */
 export function buildTools(): Anthropic.Tool[] {
-  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...settingsTools]
+  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools, ...settingsTools]
 }
 
 function reminderView(r: { reminderId: string; title: string; dueAtMillis: number | null; state: string; recurrence: string | null; nagPolicy: string; nagCount: number }, zone: string) {
@@ -53,6 +54,28 @@ function reminderView(r: { reminderId: string; title: string; dueAtMillis: numbe
     repeats: r.recurrence ?? undefined,
     nagPolicy: r.nagPolicy,
     timesNagged: r.nagCount,
+  }
+}
+
+/**
+ * The model's view of a calendar event — deliberately narrower than the row the planner reads.
+ *
+ * `listCalendarEvents` grew `id`, `location` and `status` for the leave-by planner, and handing all
+ * three straight to the model made this tool's result more than twice as wide for fields it cannot
+ * act on. Tool results are appended to the session history and re-sent on every later turn, so a
+ * twenty-event listing pays for that width for the rest of the conversation. `id` is the worst of
+ * them: forty opaque characters that no tool accepts as input (create_leave_by_alarm matches on the
+ * TITLE), so it is pure cost. `status` goes too, and cancelled events go with it — Google's own
+ * default excludes them, and a cancelled event listed without its status reads as a live one.
+ * `location` earns its place: it is what the model needs to answer "where is that?".
+ */
+function calendarEventView(e: CalendarEvent) {
+  return {
+    summary: e.summary,
+    startIso: e.startIso,
+    endIso: e.endIso,
+    location: e.location ?? undefined,
+    allDay: e.isAllDay ? true : undefined,
   }
 }
 
@@ -207,7 +230,8 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
 
     case 'list_calendar_events': {
       if (!hasGoogle(device.deviceId)) return { error: 'calendar not connected' }
-      return { events: await listCalendarEvents(device.deviceId, String(a.timeMinLocalISO), String(a.timeMaxLocalISO)) }
+      const events = await listCalendarEvents(device.deviceId, String(a.timeMinLocalISO), String(a.timeMaxLocalISO))
+      return { events: events.filter((e) => e.status !== 'cancelled').map(calendarEventView) }
     }
     case 'create_calendar_event': {
       if (!hasGoogle(device.deviceId)) return { error: 'calendar not connected' }
@@ -223,6 +247,11 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         title: String(a.title),
         dueIso: a.dueLocalISO ? String(a.dueLocalISO) : undefined,
       })
+    }
+    case 'create_leave_by_alarm': {
+      // The whole body lives beside the definition in ./leaveBy.js: event resolution, the guardrail
+      // ladder and the arming decision are a page of logic, not the few lines every other case is.
+      return await createLeaveByAlarm(device, a)
     }
     case 'set_preferences': {
       // Handed straight through unvalidated ON PURPOSE: `a` is a bag of unknowns from a model, and

@@ -7,6 +7,8 @@ import { googleAccounts } from '../db/schema.js'
 import { log } from '../lib/log.js'
 import { getDevice } from './devices.js'
 import { issueOAuthState } from './oauthState.js'
+import { enqueueOutbound } from './outbox.js'
+import { localDateKey } from './time.js'
 
 /** Parse a required local wall-clock ISO in the device zone, or throw so the tool surfaces it. */
 function requireLocalIso(iso: string, zone: string, field: string): string {
@@ -103,12 +105,30 @@ export async function exchangeCode(deviceId: string, code: string): Promise<void
     .run()
 }
 
+/**
+ * One primary-calendar event, with every field the leave-by planner needs.
+ *
+ * `id`, `location` and `status` were previously read off the API response and thrown away. All
+ * three already come back under the `calendar.events` scope this app has held since day one, so
+ * surfacing them is NOT a scope change and does NOT drag the owner back through the OAuth consent
+ * flow — which it would have, had this needed `calendar.readonly` or anything wider.
+ */
+export type CalendarEvent = {
+  id: string
+  summary: string
+  startIso: string
+  endIso: string
+  isAllDay: boolean
+  location: string | null
+  status: string | null
+}
+
 /** List the device's primary-calendar events in the given local time window. */
 export async function listCalendarEvents(
   deviceId: string,
   timeMinLocalISO: string,
   timeMaxLocalISO: string,
-): Promise<Array<{ summary: string; startIso: string; endIso: string }>> {
+): Promise<CalendarEvent[]> {
   const auth = authedClientFor(deviceId)
   const zone = zoneFor(deviceId)
   // Surface bad bounds as an error instead of silently sending an unbounded events.list (which
@@ -122,13 +142,72 @@ export async function listCalendarEvents(
     timeMax,
     singleEvents: true,
     orderBy: 'startTime',
+    // An explicit page size, and deliberately NO pageToken loop. Every caller asks about a one- or
+    // two-day window, which never holds 50 events; a pagination loop would add a second failure
+    // mode and a latency tail to a scheduler job in exchange for nothing. If a window ever does
+    // overflow, it truncates in start-time order — the near events, the ones a leave-by alarm could
+    // still be armed for, are the ones kept.
+    maxResults: 50,
   })
   const items = res.data.items ?? []
   return items.map((e) => ({
+    id: e.id ?? '',
     summary: e.summary ?? '(no title)',
     startIso: e.start?.dateTime ?? e.start?.date ?? '',
     endIso: e.end?.dateTime ?? e.end?.date ?? '',
+    // THE authoritative all-day test: Google populates `date` for all-day events and `dateTime` for
+    // timed ones, and never both. Never infer this from the shape of `startIso` — a bare date is
+    // what an all-day event happens to produce, not the definition, and getting it wrong either
+    // arms a 07:00 alarm for someone's birthday or silently suppresses a real one.
+    isAllDay: e.start?.dateTime == null && e.start?.date != null,
+    location: e.location ?? null,
+    status: e.status ?? null,
   }))
+}
+
+/** An OAuth refresh token that Google has revoked or that has expired past recovery. */
+function isInvalidGrant(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.message}` : String(err)
+  return /invalid_grant/i.test(text)
+}
+
+/**
+ * `listCalendarEvents` that returns null instead of throwing.
+ *
+ * Every non-interactive caller uses this one. A revoked grant, an expired token or a Google outage
+ * must not take down a scheduler job that also has an alarm to settle — and "the calendar is
+ * unreachable" is a decision the caller has to make deliberately (leave the alarm alone) rather
+ * than an exception thrown past it.
+ *
+ * A revoked grant is different from an outage: it never heals on its own, and a silently dead
+ * calendar makes this whole feature silently useless. That one case earns exactly one queued
+ * warning, deduped per device per local day — the outbox's unique index only covers PENDING rows,
+ * so without the day key a scheduler hitting this every hour would queue a fresh nag each time the
+ * last one had already been sent.
+ */
+export async function tryListCalendarEvents(
+  deviceId: string,
+  timeMinLocalISO: string,
+  timeMaxLocalISO: string,
+): Promise<CalendarEvent[] | null> {
+  try {
+    return await listCalendarEvents(deviceId, timeMinLocalISO, timeMaxLocalISO)
+  } catch (err) {
+    log.warn({ err, deviceId }, 'calendar: events.list failed; treating the calendar as unreachable')
+    if (isInvalidGrant(err)) {
+      const device = getDevice(deviceId)
+      if (device?.whatsappNumber) {
+        enqueueOutbound({
+          waUserId: device.whatsappNumber,
+          deviceId,
+          kind: 'system_warning',
+          body: "⚠️ My access to your Google Calendar has been revoked, so I can't see what's on or work out when you need to leave. Send me \"link google\" to reconnect it.",
+          dedupeKey: `google-relink:${deviceId}:${localDateKey(Date.now(), device.timezone)}`,
+        })
+      }
+    }
+    return null
+  }
 }
 
 /** Create a timed event on the device's primary calendar from local wall-clock ISO strings. */

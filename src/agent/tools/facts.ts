@@ -26,7 +26,7 @@ export const factTools: Anthropic.Tool[] = [
         key: {
           type: 'string',
           description:
-            'Stable dotted slug, lowercase, e.g. "work.commute", "health.gym_days", "people.sam". Check recall_facts first if you might be replacing an existing fact.',
+            'Stable dotted slug, lowercase, e.g. "work.commute", "health.gym_days", "people.sam". Three keys are read by name by Otto itself and must be spelled exactly: "home.address" and "work.address" (full street addresses — leave-by alarms cannot use live traffic without them) and "travel.default_buffer". Check recall_facts first if you might be replacing an existing fact.',
         },
         value: { type: 'string', description: 'ONE short sentence, written in the third person.' },
         category: {

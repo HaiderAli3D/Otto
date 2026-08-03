@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { ulid } from 'ulid'
 
 /** Server-generated stable alarm id. Idempotent arming on the app keys off this. */
@@ -7,3 +8,33 @@ export const newAlarmId = (): string => `alm_${ulid()}`
 export const newReminderId = (): string => `rem_${ulid()}`
 
 export const newFactId = (): string => `fct_${ulid()}`
+
+/** Joins the parts of a derived id. A control character, so it cannot occur in a summary. */
+const SEP = '\u0000'
+
+/**
+ * A DERIVED alarm id: the same inputs always give the same id.
+ *
+ * This is how duplicate leave-by alarms are structurally prevented rather than defended against.
+ * Three independent paths can decide the same event needs the same alarm — a proactive plan, an
+ * explicit tool call, and the leave-by recheck — and with a random `newAlarmId()` each would create
+ * its own row and the phone would ring three times. Deriving the id means all three converge on ONE
+ * row through `armAlarm`'s idempotent upsert, whichever order they run in.
+ *
+ * Keeps the `alm_` prefix so every id in the alarms table reads the same way, and is truncated to a
+ * ULID's 26 characters so nothing downstream meets an unfamiliar shape. Joined on a separator that
+ * cannot appear in the parts: with a plain concatenation, ("ab","c") and ("a","bc") would hash the
+ * same, and a summary is free text.
+ */
+function derivedAlarmId(kind: string, deviceId: string, eventKey: string, dayKey: string): string {
+  const digest = createHash('sha256').update([kind, deviceId, eventKey, dayKey].join(SEP)).digest('hex')
+  return `alm_${digest.slice(0, 26)}`
+}
+
+/** The "leave now" alarm for one event on one local day. */
+export const leaveByAlarmId = (deviceId: string, eventKey: string, dayKey: string): string =>
+  derivedAlarmId('leaveby', deviceId, eventKey, dayKey)
+
+/** The get-up alarm for the same event. A different kind, so the two can never collide. */
+export const wakeAlarmId = (deviceId: string, eventKey: string, dayKey: string): string =>
+  derivedAlarmId('wake', deviceId, eventKey, dayKey)
