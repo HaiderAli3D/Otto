@@ -37,7 +37,7 @@ const MORNING_HOUR = 9
  * would otherwise be in the PAST, and `runNudge`'s staleness gate would retire that rung without
  * ever sending it.
  */
-const MIN_RUNG_GAP_MS = 30 * MINUTE
+export const MIN_RUNG_GAP_MS = 30 * MINUTE
 
 /**
  * When to nudge next, or null when the ladder is exhausted (the reminder stays OPEN and still

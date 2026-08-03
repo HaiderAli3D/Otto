@@ -24,8 +24,9 @@ vi.mock('../src/services/google.js', async (orig) => {
 import { and, eq } from 'drizzle-orm'
 import { briefFallback } from '../src/agent/brief.js'
 import { config } from '../src/config.js'
+import { MIN_RUNG_GAP_MS } from '../src/lib/nagLadder.js'
 import { db, ensureSchema } from '../src/db/client.js'
-import { jobs, outbox } from '../src/db/schema.js'
+import { jobs, outbox, reminders } from '../src/db/schema.js'
 import { runJob } from '../src/scheduler/loop.js'
 import { armAlarm } from '../src/services/alarms.js'
 import { collectBrief, runBrief } from '../src/services/brief.js'
@@ -568,5 +569,82 @@ describe('interaction with the backlog digest', () => {
     expect(pending[0]!.body).toBe('the brief')
     // No digest went out, so the day's one digest is still available if a real backlog builds later.
     expect(getDevice(device.deviceId)!.lastDigestAt).toBeNull()
+  })
+})
+
+/**
+ * The window-edge collision, which only exists once quiet hours and the brief are both live.
+ *
+ * `deferPastQuietHours` returns the window's exclusive end with no spread, so EVERY rung chased
+ * overnight resolves to the same millisecond — and the default brief sits on that same boundary.
+ * Measured on the merged tree before this was fixed: the brief listing three overdue reminders,
+ * then three nudges chasing those same three, four messages inside one scheduler tick.
+ */
+describe('the brief does not repeat itself in the same second', () => {
+  const dueNudges = (deviceId: string) =>
+    db.select().from(jobs).where(and(eq(jobs.kind, 'nudge'), eq(jobs.deviceId, deviceId))).all()
+
+  it('pushes a nudge that is due right now for something it just named', async () => {
+    const device = owner('dev_edge', 'wa_edge')
+    markInbound(device.deviceId)
+    const r = await createReminder(device, {
+      title: 'call the dentist',
+      detail: null,
+      dueAtMillis: NOW - HOUR,
+      recurrence: null,
+      nagPolicy: 'persistent',
+      ring: false,
+      escalateWithAlarm: false,
+    })
+    // Land its rung exactly on the brief, the way an overnight defer does.
+    db.update(reminders).set({ nextNagAtMillis: NOW }).where(eq(reminders.reminderId, r.reminderId)).run()
+
+    await runBrief(device, NOW, NOW)
+
+    const rung = db.select().from(reminders).where(eq(reminders.reminderId, r.reminderId)).get()!
+    expect(rung.nextNagAtMillis).toBe(NOW + MIN_RUNG_GAP_MS)
+    // The chase is postponed, NOT spent: nagCount drives the "chased N×" evidence the persona cites.
+    expect(rung.nagCount).toBe(0)
+    expect(dueNudges(device.deviceId).every((j) => j.runAtMillis === NOW + MIN_RUNG_GAP_MS)).toBe(true)
+  })
+
+  it('leaves a nudge that is hours away completely alone', async () => {
+    const device = owner('dev_edge2', 'wa_edge2')
+    markInbound(device.deviceId)
+    const r = await createReminder(device, {
+      title: 'book the MOT',
+      detail: null,
+      dueAtMillis: NOW + 6 * HOUR,
+      recurrence: null,
+      nagPolicy: 'gentle',
+      ring: false,
+      escalateWithAlarm: false,
+    })
+    const before = db.select().from(reminders).where(eq(reminders.reminderId, r.reminderId)).get()!
+
+    await runBrief(device, NOW, NOW)
+
+    const after = db.select().from(reminders).where(eq(reminders.reminderId, r.reminderId)).get()!
+    expect(after.nextNagAtMillis).toBe(before.nextNagAtMillis)
+  })
+
+  it('does not silence nudges when the brief itself is held back', async () => {
+    // Window shut: the brief is a queued row with a fuse, and if it burns out nobody ever read it.
+    // Silencing the nudges it "covered" would leave the owner with nothing at all.
+    const device = owner('dev_edge3', 'wa_edge3')
+    const r = await createReminder(device, {
+      title: 'email Teal',
+      detail: null,
+      dueAtMillis: NOW - HOUR,
+      recurrence: null,
+      nagPolicy: 'persistent',
+      ring: false,
+      escalateWithAlarm: false,
+    })
+    db.update(reminders).set({ nextNagAtMillis: NOW }).where(eq(reminders.reminderId, r.reminderId)).run()
+
+    await runBrief(device, NOW, NOW)
+
+    expect(db.select().from(reminders).where(eq(reminders.reminderId, r.reminderId)).get()!.nextNagAtMillis).toBe(NOW)
   })
 })
