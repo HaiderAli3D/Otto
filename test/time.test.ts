@@ -55,6 +55,18 @@ describe('nextLocalTimeAt', () => {
     expect(local(nextLocalTimeAt(at('2026-10-24T18:00:00'), ZONE, 9))).toBe('2026-10-25 09:00')
     expect(local(nextLocalTimeAt(at('2026-03-28T18:00:00'), ZONE, 9))).toBe('2026-03-29 09:00')
   })
+
+  it('does not carry a spring-forward correction into the next day', () => {
+    // 01:30 does not exist in London on 28 March 2027 — the clocks jump 01:00 -> 02:00 — so luxon
+    // resolves it forward to 02:30 and that IS the only instant available that morning.
+    const gapDay = local(nextLocalTimeAt(at('2027-03-27T18:00:00'), ZONE, 1, 30))
+    expect(gapDay).toBe('2027-03-28 02:30')
+
+    // The day AFTER has no gap in it, so the correction must not follow. Adding a day to the already
+    // corrected 02:30 gave 02:30 again — an hour adrift, and for a once-a-day job that reads its own
+    // slot back off its scheduled instant, no longer on any boundary at all.
+    expect(local(nextLocalTimeAt(at(gapDay.replace(' ', 'T') + ':00'), ZONE, 1, 30))).toBe('2027-03-29 01:30')
+  })
 })
 
 describe('sameLocalDay', () => {

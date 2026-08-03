@@ -49,12 +49,23 @@ export function nextBriefRunAt(s: DeviceSettings, zone: string, nowMillis: numbe
  * and the handler still advances the chain to the new boundary afterwards.
  *
  * Morning is tested first, so two slots configured for the same minute resolve as morning — an
- * evening brief about tomorrow at 07:00 would be the wrong one of the two to keep.
+ * evening brief about tomorrow at 07:00 would be the wrong one of the two to keep. `set_preferences`
+ * refuses to create that clash in the first place; this is the tie-break for a row that predates it.
+ *
+ * The match is a ROUND TRIP through luxon, not a comparison of hour and minute, and that is the
+ * whole DST story. On a spring-forward morning the configured wall clock may not exist: a brief set
+ * for 01:00 on 28 March 2027 in London has no instant, so `nextLocalTimeAt` schedules the row at the
+ * 02:00 luxon corrects it to. Reading hour and minute back off that row gives 2 and 0, which matches
+ * neither boundary, and the brief is skipped for the day — once a year, silently, for any setting in
+ * the missing hour. Re-imposing the configured time on the row's own day goes through exactly the
+ * same correction, so the two sides agree by construction rather than by coincidence.
  */
 export function slotForRunAt(s: DeviceSettings, zone: string, runAtMillis: number): BriefSlot | null {
-  const at = DateTime.fromMillis(runAtMillis, { zone })
-  const minuteOfDay = at.hour * 60 + at.minute
-  if (s.briefEnabled && minuteOfDay === s.briefHour * 60 + s.briefMinute) return 'morning'
-  if (s.eveningBriefEnabled && minuteOfDay === s.eveningBriefHour * 60 + s.eveningBriefMinute) return 'evening'
+  // To the minute, because that is the resolution a boundary is configured at. Job rows are always
+  // scheduled on the minute by `nextBriefRunAt`, but a stray second must never cost a whole brief.
+  const at = DateTime.fromMillis(runAtMillis, { zone }).set({ second: 0, millisecond: 0 })
+  const isBoundary = (hour: number, minute: number): boolean => at.set({ hour, minute }).toMillis() === at.toMillis()
+  if (s.briefEnabled && isBoundary(s.briefHour, s.briefMinute)) return 'morning'
+  if (s.eveningBriefEnabled && isBoundary(s.eveningBriefHour, s.eveningBriefMinute)) return 'evening'
   return null
 }

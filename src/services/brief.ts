@@ -3,11 +3,11 @@ import { composeBrief, type BriefInput } from '../agent/brief.js'
 import { nextBriefRunAt, slotForRunAt, type BriefSlot } from '../lib/briefSchedule.js'
 import { log } from '../lib/log.js'
 import { listArmed } from './alarms.js'
-import type { Device } from './devices.js'
+import { getDevice, type Device } from './devices.js'
 import { BACKLOG_AGE_MS } from './digest.js'
 import { hasGoogle, listCalendarEvents } from './google.js'
 import { cancelJobsForDevice, ensureSingletonJob } from './jobs.js'
-import { enqueueAndTryFlush, markSuperseded, pendingFor } from './outbox.js'
+import { enqueueAndTryFlush, markSuperseded, pendingFor, windowOpen } from './outbox.js'
 import { listReminders, type Reminder } from './reminders.js'
 import { getSettings, markBriefSent } from './settings.js'
 import { reminderEvidence } from './signals.js'
@@ -129,6 +129,10 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
  * lands first). The brief lists these same reminders, so replaying six nudges the owner never saw
  * AND a brief about them is the double-up. Same age threshold as the digest, imported rather than
  * copied so the two can never disagree about what "stale" means.
+ *
+ * ONLY call this when the brief is genuinely about to go out — see the window check at the call
+ * site. Retiring the backlog for a brief that then expires unseen is not a double-up avoided, it is
+ * every message lost.
  */
 function supersedeStaleNudges(waUserId: string, nowMillis: number): void {
   const stale = pendingFor(waUserId).filter((r) => r.kind === 'nudge' && nowMillis - r.createdAt > BACKLOG_AGE_MS)
@@ -179,8 +183,22 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
     return false
   }
 
-  supersedeStaleNudges(waUserId, nowMillis)
   const body = await composeBrief(input)
+
+  // Retire the backlog ONLY when this brief is actually about to be read. A queued brief is not a
+  // delivered one: with the window shut it is a row with a 3–4h fuse, and if that fuse burns out
+  // `flushOutbox` drops it EXPIRED. Superseding first would spend three real nudges on a message
+  // nobody ever saw and leave the owner with nothing — the same silence as the expired-brief case in
+  // digest.ts, reached from the other side. Left queued instead, the nudges survive to next contact,
+  // where `maybeCollapseBacklog` decides between them and a still-live brief.
+  //
+  // Re-read the device rather than trusting the snapshot the handler passed in: `composeBrief` can
+  // sit on a socket for 15s, and an inbound message arriving in that window is exactly what opens
+  // the window. `enqueueAndTryFlush` re-reads for the same reason. No await between this read and
+  // the write it decides, so the flush below cannot deliver a nudge we meant to retire.
+  const current = getDevice(device.deviceId) ?? device
+  if (windowOpen(current, nowMillis)) supersedeStaleNudges(waUserId, nowMillis)
+
   await enqueueAndTryFlush({
     waUserId,
     deviceId: device.deviceId,

@@ -59,6 +59,15 @@ function isOff(value: string): boolean {
   return OFF_SPECS.has(value.trim().toLowerCase())
 }
 
+/**
+ * The fields the caller actually set. Same rule `updateSettings` applies before it writes, needed
+ * here too so the pre-flight check below judges the settings as they WILL be rather than treating an
+ * omitted field as an instruction to blank it.
+ */
+function stripUndefined(patch: Partial<DeviceSettings>): Partial<DeviceSettings> {
+  return Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<DeviceSettings>
+}
+
 function effective(device: Device, s: DeviceSettings): EffectivePreferences {
   // Both fall back the same way settings.ts does: a NULL column means "never configured" and takes
   // the server default, while an explicit "off" is honoured as off. Read through `quietHoursFor` so
@@ -139,6 +148,28 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
   if (errors.length > 0) return { error: errors.join('; ') }
 
   const before = getSettings(device.deviceId)
+
+  // Two enabled slots at the same minute is a brief the owner is promised and never gets.
+  // `slotForRunAt` resolves that clash to morning by design, so the evening one has no instant it can
+  // ever be read off — while `effective()` below would still hand back `eveningBriefEnabled: true`
+  // with a time, and the prompt tells Otto to confirm from exactly those values. Judged on the
+  // MERGED state, not on the patch: dropping the morning brief onto an evening slot configured weeks
+  // ago is the same collision from the other side. Rejecting is better than silently moving one of
+  // them, because the owner is right here and can be asked.
+  const settled: DeviceSettings = { ...before, ...stripUndefined(patch) }
+  if (
+    settled.briefEnabled &&
+    settled.eveningBriefEnabled &&
+    settled.briefHour === settled.eveningBriefHour &&
+    settled.briefMinute === settled.eveningBriefMinute
+  ) {
+    return {
+      error:
+        `the morning and evening briefs would both be at ${hhmm(settled.briefHour, settled.briefMinute)}, and only the ` +
+        'morning one would ever arrive — pick a different time for one of them, or turn one off',
+    }
+  }
+
   const after = updateSettings(device.deviceId, patch)
 
   // The pending job row already holds an instant computed from the OLD times, and ensureSingletonJob

@@ -29,7 +29,9 @@ export const settingsTools: Anthropic.Tool[] = [
         briefMinute: { type: 'number', description: 'Local minute 0-59 the morning brief lands at.' },
         eveningBriefEnabled: {
           type: 'boolean',
-          description: 'Send an evening brief about TOMORROW. Off by default.',
+          description:
+            'Send an evening brief about TOMORROW. Off by default. It must land at a different time ' +
+            'from the morning one, or the call is rejected — only the morning brief could ever fire.',
         },
         eveningBriefHour: { type: 'number', description: 'Local hour 0-23 the evening brief lands at.' },
         eveningBriefMinute: { type: 'number', description: 'Local minute 0-59 the evening brief lands at.' },

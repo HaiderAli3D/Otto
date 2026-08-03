@@ -359,8 +359,22 @@ describe('the scheduler seam', () => {
 })
 
 describe('interaction with the backlog digest', () => {
+  /** Every outbox row for a user by body, whatever state it ended in — SUPERSEDED rows included. */
+  const statesByBody = (waUserId: string): Map<string, string> =>
+    new Map(
+      db
+        .select()
+        .from(outbox)
+        .where(eq(outbox.waUserId, waUserId))
+        .all()
+        .map((r) => [r.body, r.state]),
+    )
+
   it('supersedes a stale nudge backlog it is about to cover anyway', async () => {
     const device = owner('dev_b16', '447700900016')
+    // The window is OPEN, so the brief this queues really does go out in the same breath — which is
+    // the only condition under which retiring the backlog is safe.
+    markInbound(device.deviceId)
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
 
     // Three hours old: past digest.ts's BACKLOG_AGE_MS, so these are a backlog rather than a queue.
@@ -374,9 +388,98 @@ describe('interaction with the backlog digest', () => {
 
     await runBrief(device, NOW)
 
-    const pending = pendingFor('447700900016')
-    expect(pending.map((r) => r.kind)).toEqual(['nudge', 'brief'])
-    expect(pending[0]!.body).toBe('fresh')
+    const states = statesByBody('447700900016')
+    expect([states.get('nudge 1'), states.get('nudge 2'), states.get('nudge 3')]).toEqual([
+      'SUPERSEDED',
+      'SUPERSEDED',
+      'SUPERSEDED',
+    ])
+    expect(states.get('fresh')).toBe('SENT')
+    expect(pendingFor('447700900016')).toHaveLength(0)
+    // Two sends, not five: the three retired nudges never reached the wire, the fresh one and the
+    // brief did.
+    expect(sendMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves the backlog alone when the brief cannot go out yet, and heals on next contact', async () => {
+    // The window is SHUT, so this brief is a row with a 4h fuse and nothing more. Retiring the
+    // nudges now bets the whole backlog on a message that may never be delivered — and when the
+    // fuse burns out, flushOutbox drops the brief too and the owner hears nothing at all.
+    const device = owner('dev_b22', '447700900022')
+    await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+
+    vi.setSystemTime(NOW - 3 * HOUR)
+    for (const n of [1, 2, 3]) {
+      enqueueOutbound({ waUserId: '447700900022', deviceId: device.deviceId, kind: 'nudge', body: `nudge ${n}`, dedupeKey: `s:${n}` })
+    }
+    vi.setSystemTime(NOW)
+
+    await runBrief(device, NOW)
+
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(pendingFor('447700900022').map((r) => r.kind)).toEqual(['nudge', 'nudge', 'nudge', 'brief'])
+
+    // 12:00: the brief expired at 11:00 unseen, and the owner finally messages. Because the nudges
+    // are still there, the backlog collapses into a catch-up digest instead of vanishing.
+    vi.setSystemTime(NOW + 5 * HOUR)
+    expect(await maybeCollapseBacklog(device, '447700900022')).toBe(true)
+    expect(pendingFor('447700900022').map((r) => r.kind)).toEqual(['brief', 'digest'])
+  })
+
+  it('lets an EXPIRED brief fall through to the digest instead of eating the backlog', async () => {
+    // pendingFor filters on state alone and expiry is applied lazily inside flushOutbox, which runs
+    // AFTER this — so a dead brief still reads PENDING here. Believing it retired three real nudges
+    // for a message that was about to be dropped unsent: zero sends, total silence.
+    const device = owner('dev_b23', '447700900023')
+    await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+
+    // 07:00, window shut: the brief is queued with its 4h morning TTL and dies at 11:00.
+    enqueueOutbound({
+      waUserId: '447700900023',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'the brief',
+      dedupeKey: 'brief:dead',
+      ttlMs: 4 * HOUR,
+    })
+    // 07:30: three nudges queue behind it.
+    vi.setSystemTime(NOW + HOUR / 2)
+    for (const n of [1, 2, 3]) {
+      enqueueOutbound({ waUserId: '447700900023', deviceId: device.deviceId, kind: 'nudge', body: `nudge ${n}`, dedupeKey: `x:${n}` })
+    }
+
+    // 11:30: first contact of the day.
+    vi.setSystemTime(NOW + 4.5 * HOUR)
+    expect(await maybeCollapseBacklog(device, '447700900023')).toBe(true)
+
+    const states = statesByBody('447700900023')
+    expect(states.get('nudge 1')).toBe('SUPERSEDED')
+    expect(pendingFor('447700900023').map((r) => r.kind)).toEqual(['brief', 'digest'])
+    expect(getDevice(device.deviceId)!.lastDigestAt).toBe(NOW + 4.5 * HOUR)
+  })
+
+  it('still lets a LIVE queued brief cancel the digest', async () => {
+    // The narrowing must not go too far the other way: a brief with time left on it is exactly the
+    // case the handshake exists for, and it must still silence the digest.
+    const device = owner('dev_b24', '447700900024')
+    await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+
+    vi.setSystemTime(NOW - 3 * HOUR)
+    for (const n of [1, 2, 3]) {
+      enqueueOutbound({ waUserId: '447700900024', deviceId: device.deviceId, kind: 'nudge', body: `nudge ${n}`, dedupeKey: `y:${n}` })
+    }
+    vi.setSystemTime(NOW)
+    enqueueOutbound({
+      waUserId: '447700900024',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'the brief',
+      dedupeKey: 'brief:live',
+      ttlMs: 4 * HOUR,
+    })
+
+    expect(await maybeCollapseBacklog(device, '447700900024')).toBe(false)
+    expect(pendingFor('447700900024').map((r) => r.kind)).toEqual(['brief'])
   })
 
   it('lets a queued brief cancel the digest without spending the day\'s digest', async () => {

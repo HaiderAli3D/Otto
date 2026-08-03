@@ -40,10 +40,17 @@ export async function maybeCollapseBacklog(device: Device, waUserId: string): Pr
   // supersede pass exists to prevent, seen from the other side (the brief was written first, this
   // contact is what flushes it). Retire the nudges and let the brief speak.
   //
+  // STILL LIVE, not merely PENDING. `pendingFor` filters on state alone, and a row's TTL is applied
+  // lazily by `flushOutbox` — which runs AFTER this, on the very next line of the inbound path. So a
+  // morning brief whose 4h fuse burned out while the window was shut still reads PENDING here, and
+  // trusting it would retire a real backlog on behalf of a message that is about to be dropped
+  // unsent: three nudges SUPERSEDED, one brief EXPIRED, nothing on the wire. Silence, in the one
+  // place the feature exists to prevent a double-up.
+  //
   // Deliberately NO markDigestSent: no digest went out, so the day's one digest is still available
   // if a genuine backlog builds up later. Returning false is what tells the caller to flush the
   // queue normally, which is how the brief itself gets delivered.
-  if (pending.some((r) => r.kind === 'brief')) {
+  if (pending.some((r) => r.kind === 'brief' && (r.expiresAtMillis === null || r.expiresAtMillis > now))) {
     markSuperseded(stale.map((r) => r.id))
     log.info({ waUserId, collapsed: stale.length }, 'brief already queued; retiring the nudge backlog without a digest')
     return false

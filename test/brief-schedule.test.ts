@@ -145,4 +145,38 @@ describe('slotForRunAt', () => {
       now = next
     }
   })
+
+  it('recognises a brief scheduled INTO the spring-forward gap', () => {
+    // London jumps 01:00 → 02:00 on 28 March 2027, so a brief set for 01:00 has no instant that day.
+    // luxon resolves the nonexistent local time forward and the row is scheduled at 02:00, which is
+    // the only instant it could be. Comparing the raw wall clock against 01:00 read hour 2, matched
+    // neither boundary, and skipped the brief for the day — one lost brief a year, silently.
+    const one = settings({ briefHour: 1, briefMinute: 0 })
+    const next = nextBriefRunAt(one, LONDON, at('2027-03-27T05:00:00'))
+
+    expect(localDate(next)).toBe('2027-03-28')
+    expect(localTime(next)).toBe('02:00')
+    expect(slotForRunAt(one, LONDON, next)).toBe('morning')
+  })
+
+  it('agrees with nextBriefRunAt across the DST gap too, for every minute in it', () => {
+    // The general form of the claim the loop above only tested at 07:00. Every minute of the missing
+    // hour is a settings value the owner can pick, and each one has to survive the round trip.
+    for (const minute of [0, 15, 30, 45]) {
+      const s = settings({ briefHour: 1, briefMinute: minute })
+      let now = at('2027-03-26T05:00:00')
+      for (let i = 0; i < 4; i++) {
+        const next = nextBriefRunAt(s, LONDON, now)
+        expect(slotForRunAt(s, LONDON, next)).toBe('morning')
+        now = next
+      }
+    }
+  })
+
+  it('is no stricter about the minute than it was', () => {
+    // The DST fix must not quietly tighten the check into "to the millisecond": a stray second on a
+    // row would then cost a whole day's brief, which is a worse bug than the one being fixed.
+    expect(slotForRunAt(both, LONDON, at('2026-08-03T07:00:30'))).toBe('morning')
+    expect(slotForRunAt(both, LONDON, at('2026-08-03T06:59:00'))).toBeNull()
+  })
 })

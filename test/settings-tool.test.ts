@@ -148,6 +148,44 @@ describe('validation', () => {
     expect(getSettings(device.deviceId).briefHour).toBe(7)
   })
 
+  it('refuses to put both briefs at the same minute, rather than confirming one that cannot fire', async () => {
+    // slotForRunAt resolves a clash to morning by design, so an evening brief sharing the morning's
+    // minute has no instant it can ever be read off. Accepting it would hand back
+    // `eveningBriefEnabled: true` with a time — and the prompt tells Otto to confirm from exactly
+    // those values, so he would promise a brief that can never arrive.
+    const device = makeDevice('dev_t14')
+
+    const res = await setPrefs(device, { eveningBriefEnabled: true, eveningBriefHour: 7, eveningBriefMinute: 0 })
+
+    expect(res.error).toContain('07:00')
+    expect(getSettings(device.deviceId).eveningBriefEnabled).toBe(false)
+  })
+
+  it('catches the clash from the other direction too, against the settings already on disk', async () => {
+    // The check is on the MERGED state, not on the patch: moving the morning brief onto an evening
+    // slot that was configured weeks ago is the same collision seen from the other side.
+    const device = makeDevice('dev_t15')
+    await setPrefs(device, { eveningBriefEnabled: true, eveningBriefHour: 21, eveningBriefMinute: 0 })
+
+    const res = await setPrefs(device, { briefHour: 21, briefMinute: 0 })
+
+    expect(res.error).toBeDefined()
+    expect(getSettings(device.deviceId).briefHour).toBe(7)
+  })
+
+  it('allows the same minute when only one of the two slots is on', async () => {
+    // Not a clash: with the morning off there is exactly one boundary at 21:00 and slotForRunAt
+    // reads it as the evening one. Rejecting this would block a legitimate "just the evening one".
+    const device = makeDevice('dev_t16')
+    await setPrefs(device, { eveningBriefEnabled: true, eveningBriefHour: 21, eveningBriefMinute: 0 })
+
+    const res = await setPrefs(device, { briefEnabled: false, briefHour: 21, briefMinute: 0 })
+
+    expect(res.error).toBeUndefined()
+    expect(res.eveningBriefAt).toBe('21:00')
+    expect(res.briefEnabled).toBe(false)
+  })
+
   it('reports every problem at once rather than one per round-trip', async () => {
     const device = makeDevice('dev_t10')
 
