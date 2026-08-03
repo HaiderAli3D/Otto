@@ -8,6 +8,7 @@ import { BRIEF_SYSTEM } from '../src/agent/brief.js'
 import { DIGEST_SYSTEM } from '../src/agent/compose.js'
 import { NUDGE_SYSTEM, writeNudge } from '../src/agent/nudge.js'
 import { PERSONA, WRITING } from '../src/agent/persona.js'
+import { REVIEW_SYSTEM } from '../src/agent/review.js'
 import { systemPrompt } from '../src/agent/prompt.js'
 import { config } from '../src/config.js'
 import { ensureSchema } from '../src/db/client.js'
@@ -54,6 +55,16 @@ describe('one Otto on every surface', () => {
     expect(BRIEF_SYSTEM).toContain('HERE ONLY')
   })
 
+  it('the weekly review carries the same persona, and overrides WRITING only for itself', () => {
+    // The review is the one surface allowed more than three sentences. It says so in its own
+    // "# This message" block rather than by editing WRITING — which would loosen every surface and
+    // invalidate every cached prefix.
+    expect(REVIEW_SYSTEM).toContain(PERSONA)
+    expect(REVIEW_SYSTEM).toContain(WRITING)
+    expect(REVIEW_SYSTEM).toContain('for THIS')
+    expect(WRITING).toContain('one to three sentences')
+  })
+
   it('keeps the record out of the cached prefix', () => {
     // The counters move almost every turn. In front of the breakpoint they would re-bill the whole
     // prefix each request — the same mistake that once cost ~$90/month.
@@ -64,6 +75,43 @@ describe('one Otto on every surface', () => {
     expect(cached).toBeLessThan(blocks.length - 1)
     expect(tail.cache_control).toBeUndefined()
     expect(tail.text).toContain('The record (last 14 days)')
+  })
+
+  it('reports quiet hours in the volatile tail, never in the cached block', () => {
+    // The window itself moves rarely, but "are we inside it right now" flips every few hours. In
+    // front of the breakpoint that one line would re-bill the whole prefix on every request.
+    const device = makeDevice('dev_pe8')
+    const blocks = systemPrompt(device)
+    const tail = blocks[blocks.length - 1]!
+    expect(tail.text).toContain('Quiet hours: 22:00–07:00 local.')
+    for (const block of blocks.slice(0, -1)) expect(block.text).not.toContain('Quiet hours: 22:00')
+  })
+})
+
+describe('the quiet-hours section describes what the code actually does', () => {
+  // Both of these are pinned as prompt TEXT because the prompt is the only artefact — the model
+  // reads these lines and answers the owner from them, so a line that is untrue is a bug the same
+  // way a wrong branch is.
+  const core = (deviceId: string): string => systemPrompt(makeDevice(deviceId))[0]!.text
+
+  it('names the owner-chosen due time as an exception to auto-deferral', () => {
+    // nagLadder returns rung 0 at a still-future due time untouched. The section used to promise
+    // "anything you schedule that would land inside that window is moved" and list three
+    // exceptions, so "remind me to take my pills at 2am" got a 02:00 nudge while Otto told the
+    // owner he would chase at 07:00 — a lie, in the one section that forbids exactly that.
+    const text = core('dev_pe9')
+    expect(text).toContain('Four things go through regardless')
+    expect(text).toContain('a due time the owner picked themselves')
+    expect(text).toContain('Never tell them a reminder due inside their quiet hours will wait until morning')
+  })
+
+  it('reconciles wake-checks with the alarm section that says you never follow one up', () => {
+    // ALARMS_VS_REMINDERS says of create_alarm "It rings once. You never follow up on it", and is
+    // read BEFORE this section. Naming the contradiction here is the seam-respecting fix: editing
+    // the earlier section is a cross-branch conflict, and should be.
+    const text = core('dev_pe10')
+    expect(text).toContain('You never follow up on it')
+    expect(text).toContain('This is the one exception to "it rings once, you never follow up on it"')
   })
 })
 

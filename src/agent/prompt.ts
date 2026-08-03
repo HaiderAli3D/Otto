@@ -1,11 +1,14 @@
 import type Anthropic from '@anthropic-ai/sdk'
+import { formatQuietHours } from '../lib/quietHours.js'
 import type { Device } from '../services/devices.js'
 import { renderFacts } from '../services/facts.js'
 import { listReminders } from '../services/reminders.js'
+import { quietHoursFor, quietNow } from '../services/settings.js'
 import { nowIsoInZone } from '../services/time.js'
 import { reminderEvidence, renderRecord } from '../services/signals.js'
 import { PERSONA, WRITING } from './persona.js'
 import {
+  ACCOUNTABILITY,
   ALARMS_VS_REMINDERS,
   CAPABILITIES,
   IDENTITY,
@@ -43,6 +46,7 @@ const CORE = [
   MEMORY,
   PROACTIVE,
   PREFERENCES,
+  ACCOUNTABILITY,
   THE_RECORD,
   TIME,
   VOICE_AND_PHOTOS,
@@ -75,11 +79,26 @@ export function systemPrompt(device: Device): Anthropic.TextBlockParam[] {
       type: 'text',
       text: [
         `Current local time: ${nowIsoInZone(device.timezone)} (timezone ${device.timezone}).`,
+        renderQuietHours(device),
         renderOpenReminders(device),
         renderRecord(device.deviceId),
       ].join('\n\n'),
     },
   ]
+}
+
+/**
+ * One line about the do-not-disturb window, in the VOLATILE tail rather than the cached block.
+ *
+ * The window itself changes rarely, but "are we in it right now" changes every few hours, and the
+ * model needs the second half to answer "will you nudge me tonight?" honestly. Anything that moves
+ * per turn in front of the cache breakpoint re-bills the whole prefix.
+ */
+function renderQuietHours(device: Device): string {
+  const quiet = quietHoursFor(device)
+  if (quiet === null) return 'Quiet hours: off. Nothing you schedule is being held back.'
+  const now = quietNow(device) ? ' You are inside them right now.' : ''
+  return `Quiet hours: ${formatQuietHours(quiet)} local.${now}`
 }
 
 /** The live chase-list. Small, always accurate, and worth a tool round-trip on most turns. */

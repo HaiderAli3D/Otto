@@ -16,6 +16,7 @@ import { flushOutbox } from '../services/outbox.js'
 import { listReminders } from '../services/reminders.js'
 import { appendAssistantTurns, maybeResetIdleSession } from '../services/sessions.js'
 import type { Device } from '../services/devices.js'
+import { cancelWakeChecks } from '../services/wakeCheck.js'
 import {
   normalizeWaNumber,
   parseInboundMessages,
@@ -123,6 +124,9 @@ async function handleInbound(msg: InboundMessage): Promise<void> {
   // Stamp the 24h window FIRST, for every inbound including ones we end up unable to read: an
   // unreadable message still reopens the window, and everything proactive depends on this clock.
   markInbound(device.deviceId)
+  // They are demonstrably awake, so stop asking. Here — right after markInbound and BEFORE the
+  // non-text return below — because a voice note answers "you up?" just as well as typing does.
+  cancelWakeChecks(device.deviceId)
 
   // Download, transcribe, narrow — all of it in services/ingest.ts, so what reaches the agent is
   // either content or a reason. A photo becomes content blocks and a voice note becomes a plain

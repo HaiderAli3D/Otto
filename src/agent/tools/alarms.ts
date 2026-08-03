@@ -25,6 +25,11 @@ export const alarmTools: Anthropic.Tool[] = [
         },
         label: { type: 'string', description: 'Short label shown on the alarm screen' },
         allowWhileIdle: { type: 'boolean', description: 'Defaults true' },
+        wakeCheck: {
+          type: 'boolean',
+          description:
+            'Follow up over WhatsApp after they dismiss this alarm ("you up?", up to three times, then ring the phone again). Set it for any alarm whose job is getting them OUT OF BED, without asking first. Leave it off for a leave-the-house alarm, a hard cutoff, or anything they said not to check up on. Default false.',
+        },
         recurrence: {
           type: 'string',
           description:

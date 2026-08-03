@@ -11,8 +11,11 @@ vi.mock('../src/fcm/sender.js', () => ({
 }))
 
 import { computeSig } from '../src/fcm/signer.js'
+import { db } from '../src/db/client.js'
+import { jobs } from '../src/db/schema.js'
 import { armAlarm } from '../src/services/alarms.js'
 import { getDevice } from '../src/services/devices.js'
+import { dueJobs } from '../src/services/jobs.js'
 
 /** Let fire-and-forget sends settle before asserting on the capture array. */
 const flush = () => new Promise((resolve) => setImmediate(resolve))
@@ -110,6 +113,52 @@ describe('SYNC on re-registration', () => {
     })
     await flush()
     expect(sent).toHaveLength(0)
+  })
+})
+
+describe('the wake-check hook on POST /alarms/:id/events', () => {
+  const FAR_FUTURE = Date.now() + 365 * 24 * 3_600_000
+  const wakeJobs = () => dueJobs(FAR_FUTURE).filter((j) => j.kind === 'wake_check')
+
+  /** Report one event for an alarm and hand back the response. */
+  async function report(app: Awaited<ReturnType<typeof makeApp>>, deviceId: string, alarmId: string, event: string) {
+    return app.inject({
+      method: 'POST',
+      url: `/alarms/${alarmId}/events`,
+      payload: { deviceId, event, atMillis: Date.now(), appVersion: '1.0.0' },
+    })
+  }
+
+  it('starts the ladder on DISMISSED for an opted-in alarm', async () => {
+    const app = await makeApp()
+    db.delete(jobs).run()
+    const device = makeDevice('dev_wk1')
+    await armAlarm(device, { alarmId: 'alm_wk1', triggerAtMillis: Date.now() + 60_000, label: 'Get up', wakeCheck: true })
+
+    const res = await report(app, device.deviceId, 'alm_wk1', 'DISMISSED')
+
+    expect(res.statusCode).toBe(204)
+    expect(wakeJobs().map((j) => j.alarmId)).toEqual(['alm_wk1'])
+  })
+
+  it('does nothing on MISSED — they never touched it, which is a different problem', async () => {
+    const app = await makeApp()
+    db.delete(jobs).run()
+    const device = makeDevice('dev_wk2')
+    await armAlarm(device, { alarmId: 'alm_wk2', triggerAtMillis: Date.now() + 60_000, label: 'Get up', wakeCheck: true })
+
+    expect((await report(app, device.deviceId, 'alm_wk2', 'MISSED')).statusCode).toBe(204)
+    expect(wakeJobs()).toHaveLength(0)
+  })
+
+  it('does nothing for an alarm that never opted in', async () => {
+    const app = await makeApp()
+    db.delete(jobs).run()
+    const device = makeDevice('dev_wk3')
+    await armAlarm(device, { alarmId: 'alm_wk3', triggerAtMillis: Date.now() + 60_000, label: 'Leave now' })
+
+    expect((await report(app, device.deviceId, 'alm_wk3', 'DISMISSED')).statusCode).toBe(204)
+    expect(wakeJobs()).toHaveLength(0)
   })
 })
 

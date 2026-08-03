@@ -158,6 +158,34 @@ describe('renderRecord', () => {
     reminder(d, { reminderId: 'rem_s9', title: 'today thing', createdAt: NOW - 3600_000 })
     expect(renderRecord(d, NOW)).not.toContain('Oldest open item')
   })
+
+  it('counts failed wake-checks and says so on the Alarms line', () => {
+    const d = 'dev_s10'
+    event(d, 'alm_a', 'RANG', NOW - DAY)
+    event(d, 'alm_a', 'WAKE_CHECK_FAILED', NOW - DAY + 1)
+    event(d, 'alm_b', 'WAKE_CHECK_FAILED', NOW - 2 * DAY)
+
+    expect(ownerRecord(d, NOW).sleptThroughAfterDismiss).toBe(2)
+    expect(renderRecord(d, NOW)).toContain('dismissed and went back to sleep 2×')
+  })
+
+  it('does not read as "nothing on file" when a failed wake-check is the only signal', () => {
+    // Without this the device whose one signal is a wake-check Otto watched fail an hour ago would
+    // render "nothing on file yet", which explicitly forbids him from mentioning it.
+    const d = 'dev_s11'
+    event(d, 'alm_only', 'WAKE_CHECK_FAILED', NOW - 3600_000)
+
+    const text = renderRecord(d, NOW)
+    expect(text).not.toContain('nothing on file')
+    expect(text).toContain('dismissed and went back to sleep 1×')
+  })
+
+  it('forgets a wake-check failure older than the 14-day window', () => {
+    const d = 'dev_s12'
+    event(d, 'alm_ancient', 'WAKE_CHECK_FAILED', NOW - 15 * DAY)
+    expect(ownerRecord(d, NOW).sleptThroughAfterDismiss).toBe(0)
+    expect(renderRecord(d, NOW)).toContain('nothing on file')
+  })
 })
 
 describe('reminderEvidence', () => {

@@ -128,7 +128,9 @@ describe('reminder lifecycle', () => {
       ring: true,
       nagPolicy: 'persistent',
     })
-    onReminderAlarmEvent(r.alarmId!, 'DISMISSED', ZONE)
+    // Takes the whole device now, not just its zone: the follow-up rung goes through nextNagAt,
+    // which needs the device's quiet hours as well as its timezone.
+    onReminderAlarmEvent(r.alarmId!, 'DISMISSED', device)
 
     const after = getReminder(r.reminderId)!
     // Swiping the ring away is NOT doing the task.

@@ -50,11 +50,20 @@ export async function pushArm(
 /** Create/replace an alarm (idempotent on alarmId) and push ARM, arming the ack watchdog. */
 export async function armAlarm(
   device: Device,
-  params: { alarmId: string; triggerAtMillis: number; label: string; allowWhileIdle?: boolean; recurrence?: string | null },
+  params: {
+    alarmId: string
+    triggerAtMillis: number
+    label: string
+    allowWhileIdle?: boolean
+    recurrence?: string | null
+    /** Follow this alarm up over WhatsApp once it is dismissed — see services/wakeCheck.ts. */
+    wakeCheck?: boolean
+  },
 ): Promise<{ alarmId: string; sent: boolean }> {
   const now = Date.now()
   const existing = getAlarm(params.alarmId)
   const allowWhileIdle = params.allowWhileIdle ?? true
+  const wakeCheck = params.wakeCheck ?? false
   db.insert(alarms)
     .values({
       alarmId: params.alarmId,
@@ -64,17 +73,21 @@ export async function armAlarm(
       state: 'ARMED',
       allowWhileIdle,
       recurrence: params.recurrence ?? null,
+      wakeCheck,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     })
     .onConflictDoUpdate({
       target: alarms.alarmId,
+      // `wakeCheck` belongs in BOTH halves: this is an upsert, and re-arming the same alarmId (the
+      // SYNC/recovery path) would otherwise silently keep whatever the row had before.
       set: {
         triggerAtMillis: params.triggerAtMillis,
         label: params.label,
         state: 'ARMED',
         allowWhileIdle,
         recurrence: params.recurrence ?? null,
+        wakeCheck,
         updatedAt: now,
       },
     })
@@ -129,6 +142,9 @@ export async function advanceRecurrence(alarmId: string): Promise<{ advanced: bo
     label: alarm.label,
     allowWhileIdle: alarm.allowWhileIdle,
     recurrence: rule,
+    // Carried forward, or a recurring 06:30 wake-up loses its check on day two — which is the one
+    // alarm the whole feature exists for.
+    wakeCheck: alarm.wakeCheck,
   })
   log.info({ from: alarmId, to: nextAlarmId, nextAt }, 'recurrence: advanced series')
   return { advanced: true, nextAlarmId }
@@ -154,6 +170,30 @@ export async function cancelAlarm(device: Device, alarmId: string): Promise<bool
 }
 
 const STATE_EVENTS = ['ARMED', 'RANG', 'DISMISSED', 'CANCELLED', 'MISSED']
+
+/**
+ * Append an audit row for something the SERVER observed about an alarm, e.g. WAKE_CHECK_FAILED.
+ *
+ * Deliberately not `recordEvent`: that one exists to apply a PHONE report, so it carries the
+ * out-of-order/replay ordering logic and writes `alarms.state`. A server-side observation is
+ * neither — it must never move the alarm's state, and it has no report ordering to reconcile.
+ * `alarm_events.event` is free-form TEXT (and the route's zod is `z.string()`), so a new kind of
+ * row needs no table and no migration. The dedupe index on (alarm, event, at) still applies, which
+ * makes this idempotent for free.
+ *
+ * Returns whether the row was actually new. That makes the dedupe index usable as a durable,
+ * single-statement LATCH — `scheduleWakeCheck` claims (alarm, WAKE_CHECK_STARTED, dismissedAt)
+ * through it — rather than only as silent replay protection. Guarded INSERT, same shape as the
+ * guarded UPDATEs elsewhere: better-sqlite3 is synchronous, so one statement decides the winner.
+ */
+export function recordServerEvent(deviceId: string, alarmId: string, event: string, atMillis: number): boolean {
+  const inserted = db
+    .insert(alarmEvents)
+    .values({ alarmId, deviceId, event, atMillis, appVersion: null, receivedAt: Date.now() })
+    .onConflictDoNothing()
+    .run()
+  return inserted.changes > 0
+}
 
 /**
  * Record an event reported by the app and advance alarm state. Because the app's outbox retries

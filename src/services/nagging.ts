@@ -5,11 +5,13 @@ import { newAlarmId } from '../lib/ids.js'
 import { writeNudge } from '../agent/nudge.js'
 import { nextNagAt, type NagPolicy } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
+import { deferPastQuietHours } from '../lib/quietHours.js'
 import { armAlarm } from './alarms.js'
 import { getDevice } from './devices.js'
 import { enqueueJob } from './jobs.js'
 import { enqueueAndTryFlush } from './outbox.js'
 import { getReminder } from './reminders.js'
+import { nagQuietHours } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
 
 /**
@@ -50,12 +52,56 @@ export async function runNudge(reminderId: string): Promise<void> {
     return
   }
 
+  // A rung that has been moved into the future since this job was queued is not ours to fire. It
+  // has a job of its own (every mover — snooze, the alarm follow-up, the quiet-hours deferral below
+  // — enqueues one), so firing it here would double-send and burn a rung early.
+  if (scheduledAt > now) {
+    log.debug({ reminderId, scheduledAt }, 'nudge rung has moved into the future; leaving it to its own job')
+    return
+  }
+
+  // Quiet-hours backstop, deliberately BEFORE the atomic claim below.
+  //
+  // nextNagAt is the primary choke point, so almost nothing is ever SCHEDULED into the window; this
+  // catches what it cannot — a rung queued before the owner set their quiet hours, a machine that
+  // was down over the boundary, an owner who changed the window an hour ago. Deferring ahead of the
+  // claim is what makes it cost NO rung: burning one at 3am would inflate the "chased N×" counter
+  // that the entire persona cites as evidence, over a message nobody was sent.
+  //
+  // NEVER SUPPRESSED, here or anywhere else:
+  // - real alarms — FCM ARM never routes through this module;
+  // - rung 0 at the due time the owner chose themselves (exempted below, and in nextNagAt);
+  // - escalateWithAlarm reminders — opt-in per item, documented as "this WILL wake them", so
+  //   nagQuietHours returns null for them and the whole reminder is exempt, ringing included;
+  // - direct replies — sendText touches neither the outbox nor the ladder;
+  // - the wake-check — its own job kind, which never reaches nextNagAt or runNudge.
+  const ownersOwnDueTime = before.nagCount === 0 && before.dueAtMillis !== null && scheduledAt === before.dueAtMillis
+  const quiet = nagQuietHours(device, before.escalateWithAlarm)
+  const deferredTo = ownersOwnDueTime ? now : deferPastQuietHours(now, device.timezone, quiet)
+  if (deferredTo !== now) {
+    // Same guarded-UPDATE shape as the staleness gate above: `changes === 0` means another path
+    // already claimed this rung, so it is not ours to move and there is nothing to re-queue.
+    const moved = db
+      .update(reminders)
+      .set({ nextNagAtMillis: deferredTo, updatedAt: now })
+      .where(and(eq(reminders.reminderId, reminderId), eq(reminders.nextNagAtMillis, scheduledAt)))
+      .run()
+    if (moved.changes === 0) {
+      log.debug({ reminderId }, 'quiet-hours deferral lost the claim; another path handled it')
+      return
+    }
+    enqueueJob('nudge', deferredTo, { reminderId, deviceId: device.deviceId })
+    log.info({ reminderId, deferredTo }, 'nudge fell inside quiet hours; moved to the window end without burning a rung')
+    return
+  }
+
   const nextRung = nextNagAt({
     policy: before.nagPolicy as NagPolicy,
     nagCount: before.nagCount + 1,
     dueAtMillis: before.dueAtMillis,
     zone: device.timezone,
     nowMillis: now,
+    quiet,
   })
 
   const claimed = db
