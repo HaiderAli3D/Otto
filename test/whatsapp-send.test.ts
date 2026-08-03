@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { META_ERROR_REENGAGEMENT, sendText, type SendResult } from '../src/services/whatsapp.js'
+import { config } from '../src/config.js'
+import { META_ERROR_REENGAGEMENT, sendTemplate, sendText, type SendResult } from '../src/services/whatsapp.js'
 
 type FakeResponse = { ok: boolean; status: number; text: () => Promise<string> }
 const response = (status: number, body?: string): FakeResponse => ({
@@ -13,7 +14,7 @@ const reengagementBody = JSON.stringify({
   error: { message: 'Re-engagement message', type: 'OAuthException', code: META_ERROR_REENGAGEMENT },
 })
 
-const fetchMock = vi.fn<() => Promise<FakeResponse>>()
+const fetchMock = vi.fn<(url: string, init: RequestInit) => Promise<FakeResponse>>()
 
 beforeEach(() => {
   fetchMock.mockReset()
@@ -24,7 +25,22 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
+
+/**
+ * The owner HAS registered `otto_catch_up`, but test/setup-env.ts deliberately leaves
+ * META_TEMPLATE_NAME unset so every other test sees the "no template" world. Patch it locally
+ * rather than globally — a template configured for the whole suite would quietly change what the
+ * outbox sweep does in every unrelated file.
+ */
+function withTemplate(): void {
+  const meta = config.meta!
+  vi.spyOn(config, 'meta', 'get').mockReturnValue({ ...meta, template: { name: 'otto_catch_up', lang: 'en' } })
+}
+
+const bodyOf = (call: unknown[] | undefined): Record<string, unknown> =>
+  JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)) as Record<string, unknown>
 
 /**
  * Drive the fake clock until sendText settles. runAllTimersAsync alone can resolve before the
@@ -111,5 +127,79 @@ describe('sendText out-of-window detection', () => {
     if (res.ok) throw new Error('unreachable')
     expect(res.metaCode).toBeUndefined()
     expect(res.outOfWindow).toBe(false)
+  })
+})
+
+/**
+ * ORDER MATTERS in this describe. The self-disabling latch is module-level state that survives for
+ * the life of the process (which is the whole point of it), so the two latch tests are last and the
+ * second one depends on the first having tripped it.
+ */
+describe('sendTemplate — knocking on a shut window', () => {
+  it('refuses when no template is registered, without spending a Graph call', async () => {
+    const res = await run(sendTemplate('447700900000', ['2 things']))
+    expect(res).toMatchObject({ ok: false, permanent: true })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends the documented template body', async () => {
+    withTemplate()
+    fetchMock.mockResolvedValue(response(200))
+
+    const res = await run(sendTemplate('447700900000', ['2 things']))
+
+    expect(res.ok).toBe(true)
+    const body = bodyOf(fetchMock.mock.calls[0])
+    expect(body).toEqual({
+      messaging_product: 'whatsapp',
+      to: '447700900000',
+      type: 'template',
+      template: {
+        name: 'otto_catch_up',
+        language: { code: 'en' },
+        components: [{ type: 'body', parameters: [{ type: 'text', text: '2 things' }] }],
+      },
+    })
+  })
+
+  it('omits components entirely for a template with no variables', async () => {
+    withTemplate()
+    fetchMock.mockResolvedValue(response(200))
+    await run(sendTemplate('447700900000', []))
+    expect((bodyOf(fetchMock.mock.calls[0]).template as { components: unknown[] }).components).toEqual([])
+  })
+
+  it('retries a 500 like every other Graph call', async () => {
+    withTemplate()
+    fetchMock.mockResolvedValueOnce(response(500)).mockResolvedValueOnce(response(200))
+
+    const res = await run(sendTemplate('447700900000', ['something']))
+
+    expect(res.ok).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT retry a 132001 (template does not exist) — and latches off', async () => {
+    withTemplate()
+    fetchMock.mockResolvedValue(
+      response(400, JSON.stringify({ error: { code: 132001, message: 'Template name does not exist' } })),
+    )
+
+    const res = await run(sendTemplate('447700900000', ['something']))
+
+    expect(res).toMatchObject({ ok: false, permanent: true, metaCode: 132001 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('short-circuits every later call once latched — a mis-registered template is forever', async () => {
+    // Depends on the test above having tripped the latch. Without it, a sweep every five minutes
+    // would spend a Graph call to be told the same permanent thing, unwatched, forever.
+    withTemplate()
+    fetchMock.mockResolvedValue(response(200))
+
+    const res = await run(sendTemplate('447700900000', ['something']))
+
+    expect(res).toMatchObject({ ok: false, permanent: true })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

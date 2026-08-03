@@ -86,11 +86,24 @@ describe('runJob', () => {
   it('runs each Phase 0 handler stub and deletes the job afterwards', async () => {
     // The stubs all return null, which `settle` reads as "the chain is over" — so a deleted row here
     // is the CORRECT outcome for a stub, and becomes a rescheduled one as each feature lands.
-    for (const kind of ['outbox_flush', 'brief', 'leave_by', 'weekly_review', 'wake_check'] as JobKind[]) {
+    // 'outbox_flush' has landed and now keeps its own chain alive; see the test below.
+    for (const kind of ['brief', 'leave_by', 'weekly_review', 'wake_check'] as JobKind[]) {
       const job = enqueueAndFetch(kind, { deviceId: 'dev_sched' })
       await runJob(job)
       expect(pending(kind)).toHaveLength(0)
     }
+  })
+
+  it('keeps the outbox_flush chain alive by moving its own row forward', async () => {
+    // The sweep has no terminating condition: ending the chain would silently switch off every
+    // proactive delivery until the next restart. One row before, the SAME one row after, in future.
+    const job = enqueueAndFetch('outbox_flush')
+    await runJob(job)
+
+    const after = pending('outbox_flush')
+    expect(after).toHaveLength(1)
+    expect(after[0]!.id).toBe(job.id)
+    expect(after[0]!.runAtMillis).toBeGreaterThan(Date.now())
   })
 })
 

@@ -153,13 +153,22 @@ async function runLoop(device: Device, history: Msg[]): Promise<string> {
  * untouched), and a genuine shape error has to recur before we trim, and recur again before we
  * clear.
  */
-export async function runAgentTurn(params: { waUserId: string; device: Device; text: string }): Promise<string> {
+export async function runAgentTurn(params: {
+  waUserId: string
+  device: Device
+  /**
+   * The user turn: a plain string for text and for a transcribed voice note, or content blocks for
+   * a photo. Blocks rather than a second parameter so `services/ingest.ts` decides the shape once
+   * and every path below — history, trimming, the cache breakpoint — stays identical.
+   */
+  content: string | Anthropic.ContentBlockParam[]
+}): Promise<string> {
   if (!anthropic || !config.anthropic) {
     return "Otto's AI isn't configured yet (no Anthropic API key set). Alarms sent to your phone still work."
   }
-  const { waUserId, device, text } = params
+  const { waUserId, device, content } = params
   const history: Msg[] = loadSession(waUserId)
-  history.push({ role: 'user', content: text })
+  history.push({ role: 'user', content })
 
   try {
     const reply = await runLoop(device, history)

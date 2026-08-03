@@ -15,6 +15,7 @@ import {
   REPLYING,
   THE_RECORD,
   TIME,
+  VOICE_AND_PHOTOS,
 } from './promptSections.js'
 
 /**
@@ -40,6 +41,7 @@ const CORE = [
   PROACTIVE,
   THE_RECORD,
   TIME,
+  VOICE_AND_PHOTOS,
   REPLYING,
   WRITING,
 ].join('\n\n')

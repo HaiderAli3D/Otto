@@ -11,10 +11,18 @@ import {
   markInbound,
 } from '../services/devices.js'
 import { maybeCollapseBacklog } from '../services/digest.js'
+import { ingestFailureMessage, ingestInbound } from '../services/ingest.js'
 import { flushOutbox } from '../services/outbox.js'
 import { listReminders } from '../services/reminders.js'
 import { appendAssistantTurns, maybeResetIdleSession } from '../services/sessions.js'
-import { normalizeWaNumber, parseInboundMessages, sendText, verifySignature } from '../services/whatsapp.js'
+import type { Device } from '../services/devices.js'
+import {
+  normalizeWaNumber,
+  parseInboundMessages,
+  sendText,
+  verifySignature,
+  type InboundMessage,
+} from '../services/whatsapp.js'
 
 /**
  * WhatsApp Cloud API webhook. Meta verifies the subscription with a GET challenge, then delivers
@@ -48,7 +56,7 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
       // Idempotency: Meta redelivers at-least-once; skip a wamid we've already handled.
       if (!claimWhatsappMessage(msg.id)) continue
       // Serialize per sender so two quick messages can't race the session read-modify-write.
-      enqueueForUser(msg.from, () => handleInbound(msg.from, msg.type, msg.text))
+      enqueueForUser(msg.from, () => handleInbound(msg))
     }
 
     return reply
@@ -87,7 +95,22 @@ function isAuthorizedSender(from: string): boolean {
   return true
 }
 
-async function handleInbound(from: string, type: string, text: string | null): Promise<void> {
+/**
+ * The "and if that was about a reminder, here's how to resolve it" tail.
+ *
+ * Appended to EVERY degraded reply, and that is the entire intent of this code: answering a nudge
+ * with something Otto cannot read must never leave the reminder open and Otto nagging forever. A
+ * dead end mid-chase is the worst failure mode the inbound path has.
+ */
+function reminderHint(device: Device): string {
+  const open = listReminders(device.deviceId, { state: 'open' })
+  if (open.length === 1 && open[0]) return ` If that was about "${open[0].title}", just send "done".`
+  if (open.length > 1) return ' If that was about a reminder, send "done" and tell me which one.'
+  return ''
+}
+
+async function handleInbound(msg: InboundMessage): Promise<void> {
+  const from = msg.from
   if (!isAuthorizedSender(from)) {
     log.warn({ from }, 'Dropping WhatsApp message from a non-owner sender')
     return
@@ -97,25 +120,20 @@ async function handleInbound(from: string, type: string, text: string | null): P
     await sendText(from, 'Open the Otto app on your phone first so it can pair.')
     return
   }
-  // Stamp the 24h window FIRST, for every inbound including non-text: a voice note still reopens
-  // the window even though Otto can't read it, and everything proactive depends on this clock.
+  // Stamp the 24h window FIRST, for every inbound including ones we end up unable to read: an
+  // unreadable message still reopens the window, and everything proactive depends on this clock.
   markInbound(device.deviceId)
 
-  // Non-text (voice note, image, …): tell the owner instead of silently eating the command. Make
-  // it reminder-aware — answering a nudge with a voice note would otherwise leave the reminder
-  // unresolved and Otto nagging forever, which is the worst failure mode of the whole feature.
-  if (text === null) {
-    log.info({ from, type }, 'Ignoring non-text WhatsApp message')
-    const open = listReminders(device.deviceId, { state: 'open' })
-    const hint =
-      open.length === 1 && open[0]
-        ? ` If that was about "${open[0].title}", just send "done".`
-        : open.length > 1
-          ? ' If that was about a reminder, send "done" and tell me which one.'
-          : ''
-    await sendText(from, `I can only read text messages right now — please type your request.${hint}`)
+  // Download, transcribe, narrow — all of it in services/ingest.ts, so what reaches the agent is
+  // either content or a reason. A photo becomes content blocks and a voice note becomes a plain
+  // string; from here on both are just "the user turn" and follow the identical path.
+  const ingested = await ingestInbound(msg)
+  if (!ingested.ok) {
+    log.info({ from, type: msg.type, reason: ingested.reason }, 'inbound message could not be ingested')
+    await sendText(from, ingestFailureMessage(ingested.reason, ingested.noun) + reminderHint(device))
     return
   }
+
   // Link only when the device has no number yet; never overwrite an existing owner binding.
   if (!device.whatsappNumber) linkWhatsapp(device.deviceId, from)
 
@@ -134,6 +152,6 @@ async function handleInbound(from: string, type: string, text: string | null): P
   const delivered = await flushOutbox(from, device.deviceId)
   if (delivered.length > 0) appendAssistantTurns(from, device.deviceId, delivered)
 
-  const reply = await runAgentTurn({ waUserId: from, device: fresh, text })
+  const reply = await runAgentTurn({ waUserId: from, device: fresh, content: ingested.content })
   await sendText(from, reply)
 }

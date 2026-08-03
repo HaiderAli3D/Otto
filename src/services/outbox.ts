@@ -1,9 +1,13 @@
 import { and, asc, eq, inArray } from 'drizzle-orm'
+import { config } from '../config.js'
 import { db } from '../db/client.js'
 import { outbox } from '../db/schema.js'
 import { log } from '../lib/log.js'
-import { clearInboundWindow, getDevice, type Device } from './devices.js'
-import { sendText } from './whatsapp.js'
+import { inQuietHours, type QuietHours } from '../lib/quietHours.js'
+import { clearInboundWindow, getDevice, listDevices, markTemplateSent, type Device } from './devices.js'
+import { appendAssistantTurns } from './sessions.js'
+import { quietHoursFor } from './settings.js'
+import { sendTemplate, sendText } from './whatsapp.js'
 
 export type OutboxRow = typeof outbox.$inferSelect
 
@@ -129,6 +133,12 @@ export function markSuperseded(ids: number[]): void {
   db.update(outbox).set({ state: 'SUPERSEDED' }).where(inArray(outbox.id, ids)).run()
 }
 
+/** Retire rows nobody will ever read. EXPIRED, never deleted — the audit trail is the point. */
+export function markExpired(ids: number[]): void {
+  if (ids.length === 0) return
+  db.update(outbox).set({ state: 'EXPIRED' }).where(inArray(outbox.id, ids)).run()
+}
+
 /**
  * Send everything queued for this user, oldest first. Returns the bodies actually delivered so the
  * caller can append them to the conversation — without that the model has no idea what Otto just
@@ -203,4 +213,104 @@ export async function enqueueAndTryFlush(params: {
   if (!device || !windowOpen(device)) return false
   const delivered = await flushOutbox(params.waUserId, params.deviceId)
   return delivered.length > 0
+}
+
+/**
+ * The only kinds worth spending a paid template on.
+ *
+ * `nudge` is excluded by definition — a nudge is gentle chasing, and knocking on a shut window with
+ * a push notification is the opposite of gentle; a reminder that genuinely must break through has
+ * `escalateWithAlarm` and rings the phone instead. `digest` is excluded because it is a convenience
+ * summary of things the owner already didn't see. What is left is the two kinds that say something
+ * went WRONG and only Otto knows: an alarm that never reached the phone, and an alarm that was
+ * missed.
+ */
+export const KNOCK_KINDS: readonly OutboxKind[] = ['system_warning', 'missed_alarm']
+
+/** At most four knocks a day, and only if there is still something waiting at each one. */
+export const TEMPLATE_COOLDOWN_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Should we knock on a shut window with a template? Every rule must hold.
+ *
+ * Pure with respect to config and to the sender: the template is passed IN rather than read from
+ * `config.meta`, so the whole policy is unit-testable without an environment. `quietHours` is
+ * optional for the same reason — production callers let it default to the device's setting, a test
+ * hands it the window it wants to assert about.
+ */
+export function shouldKnock(params: {
+  rows: OutboxRow[]
+  device: Device
+  template: { name: string; lang: string } | null | undefined
+  now: number
+  quietHours?: QuietHours
+}): boolean {
+  const { rows, device, template, now } = params
+  if (!template) return false
+  // A knock is for a window that is SHUT. While it is open the real queue goes out as itself.
+  if (windowOpen(device, now)) return false
+
+  const worthKnocking = rows.some(
+    (r) =>
+      r.state === 'PENDING' &&
+      KNOCK_KINDS.includes(r.kind as OutboxKind) &&
+      (r.expiresAtMillis === null || r.expiresAtMillis >= now),
+  )
+  if (!worthKnocking) return false
+
+  if (device.lastTemplateAt !== null && now - device.lastTemplateAt < TEMPLATE_COOLDOWN_MS) return false
+
+  // A template is a push notification on the owner's lock screen. Quiet hours mean quiet, and the
+  // queue will still be there at 07:00 — nothing in KNOCK_KINDS gets better for being read at 3am.
+  const quiet = params.quietHours === undefined ? quietHoursFor(device) : params.quietHours
+  return !inQuietHours(now, device.timezone, quiet)
+}
+
+/** The single {{1}} body variable of `otto_catch_up`. Short, no newlines — Meta rejects both. */
+function knockSummary(rows: OutboxRow[]): string {
+  const n = rows.filter((r) => KNOCK_KINDS.includes(r.kind as OutboxKind)).length
+  return n === 1 ? 'something' : `${n} things`
+}
+
+/**
+ * One pass over every device with a WhatsApp number. Called from the outbox_flush chain.
+ *
+ * Three jobs, in order of how little they cost:
+ *
+ * 1. Retire TTL-expired PENDING rows EVEN WHEN THE WINDOW IS SHUT. Until now that only happened
+ *    inside `flushOutbox`, i.e. only when the owner made contact — so a queue built up while they
+ *    were away kept stale rows alive precisely in the case they were most stale.
+ * 2. If the window is open, flush, AND THEN record what was delivered as Otto's own turns. That
+ *    second half is NOT optional: the inbound path does exactly this (routes/whatsapp.ts), and
+ *    without it the model has no idea what it said between turns, so the owner's "done" answers a
+ *    message the transcript never contains.
+ * 3. Otherwise knock, once, subject to every rule in `shouldKnock`.
+ */
+export async function sweepOutbox(now: number = Date.now()): Promise<void> {
+  const template = config.meta?.template ?? null
+  for (const device of listDevices()) {
+    const waUserId = device.whatsappNumber
+    if (waUserId === null) continue
+
+    const rows = pendingFor(waUserId)
+    const expired = rows.filter((r) => r.expiresAtMillis !== null && r.expiresAtMillis < now)
+    markExpired(expired.map((r) => r.id))
+    const live = rows.filter((r) => !expired.includes(r))
+    if (live.length === 0) continue
+
+    if (windowOpen(device, now)) {
+      const delivered = await flushOutbox(waUserId, device.deviceId)
+      if (delivered.length > 0) appendAssistantTurns(waUserId, device.deviceId, delivered)
+      continue
+    }
+
+    if (!shouldKnock({ rows: live, device, template, now })) continue
+    // A template does NOT reopen the window — it knocks. The owner's reply reopens it and the
+    // normal inbound path then flushes the real queue as free-form text.
+    const res = await sendTemplate(waUserId, [knockSummary(live)])
+    if (res.ok) {
+      markTemplateSent(device.deviceId, now)
+      log.info({ deviceId: device.deviceId, queued: live.length }, 'knocked on a shut window with a template')
+    }
+  }
 }

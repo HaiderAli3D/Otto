@@ -74,6 +74,15 @@ export function clearInboundWindow(deviceId: string): void {
   db.update(devices).set({ lastInboundAt: null }).where(eq(devices.deviceId, deviceId)).run()
 }
 
+/**
+ * Stamp a template knock. Purely a transport fact — it is what the 6h cooldown in
+ * `outbox.shouldKnock` reads, so a shut window is knocked on at most four times a day rather than
+ * every five-minute sweep.
+ */
+export function markTemplateSent(deviceId: string, atMillis: number = Date.now()): void {
+  db.update(devices).set({ lastTemplateAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
+}
+
 export function markDigestSent(deviceId: string, atMillis: number = Date.now()): void {
   db.update(devices).set({ lastDigestAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
 }
