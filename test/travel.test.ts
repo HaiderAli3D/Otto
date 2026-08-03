@@ -149,6 +149,31 @@ describe('estimateTravelMinutes degrades without ever failing', () => {
     expect(await estimateTravelMinutes(device, 'home', 'work', DEPART)).toEqual({ minutes: 40, source: 'fact' })
   })
 
+  it('reads an hours fact as hours, not as minutes', async () => {
+    const device = makeDevice('dev_tr8')
+    // "1" is the first integer in this sentence. Reading it as one minute is not merely inaccurate:
+    // it arms "Leave now" sixty seconds before the meeting and reports travelMinutes: 1 to the
+    // model, which then says so out loud. An hour is what a commute fact usually says.
+    rememberFact({ deviceId: device.deviceId, key: 'travel.default_buffer', value: 'About 1 hour door to door' })
+
+    expect(await estimateTravelMinutes(device, 'home', 'work', DEPART)).toEqual({ minutes: 60, source: 'fact' })
+  })
+
+  it('understands a fractional hour', async () => {
+    const device = makeDevice('dev_tr9')
+    rememberFact({ deviceId: device.deviceId, key: 'travel.default_buffer', value: 'takes 1.5 hrs in traffic' })
+
+    expect(await estimateTravelMinutes(device, 'home', 'work', DEPART)).toEqual({ minutes: 90, source: 'fact' })
+  })
+
+  it('takes the near end of a stated range', async () => {
+    const device = makeDevice('dev_tr10')
+    // Pinned as a decision rather than a surprise: the first number wins, and no unit means minutes.
+    rememberFact({ deviceId: device.deviceId, key: 'travel.default_buffer', value: 'anywhere from 20-30 minutes' })
+
+    expect(await estimateTravelMinutes(device, 'home', 'work', DEPART)).toEqual({ minutes: 20, source: 'fact' })
+  })
+
   it('falls back to the device default when the fact holds no number', async () => {
     const device = makeDevice('dev_tr3')
     rememberFact({ deviceId: device.deviceId, key: 'travel.default_buffer', value: 'depends on the traffic' })

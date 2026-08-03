@@ -2,7 +2,7 @@ import { DateTime } from 'luxon'
 import { leaveByAlarmId, wakeAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
 import { inQuietHours } from '../lib/quietHours.js'
-import { armAlarm } from './alarms.js'
+import { armAlarm, cancelAlarm, getAlarm } from './alarms.js'
 import type { Device } from './devices.js'
 import { factValue } from './facts.js'
 import type { CalendarEvent } from './google.js'
@@ -124,6 +124,16 @@ export type LeaveByPlan = {
   /** Deterministic, so every path that plans this event converges on the same row. */
   alarmId: string | null
   wakeId: string | null
+  /**
+   * The derived ids for this event and day that this plan does NOT use, and must therefore cancel.
+   *
+   * Both ids exist as soon as the event and the day do; which of them a plan arms depends on the
+   * get-ready gap and on `alsoWakeMe`, and BOTH of those can change between one plan and the next.
+   * Without this the counterpart from the previous plan stays armed alongside the new one — the
+   * owner asks for a shorter get-ready time, the two alarms merge, and the old "leave now" alarm is
+   * left ringing with no way to reach it, because the tool only ever returns the id it just armed.
+   */
+  staleIds: string[]
   /** One plain sentence the model can hand to the owner without inventing anything. */
   note: string
 }
@@ -286,6 +296,7 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
     armed: false,
     alarmId: null,
     wakeId: null,
+    staleIds: [],
     note: '',
   }
 
@@ -321,9 +332,27 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
   const guessDepartAt = Math.max(now, startMillis - settings.defaultTravelMinutes * 60_000)
   const travel = await estimateTravelMinutes(device, origin?.address ?? null, destination, guessDepartAt)
   const leaveAtMillis = startMillis - travel.minutes * 60_000
-  const wakeAtMillis = leaveAtMillis - getReadyMinutes * 60_000
-  const mergedWithWake = wantWake && leaveAtMillis - wakeAtMillis <= MERGE_WINDOW_MS
   const dayKey = localDateKey(startMillis, zone)
+
+  // The get-up alarm is bounds-checked against `now` in its own right, not left to ride on the
+  // departure's check. "Wake me in time for the 9am dentist", asked at 08:00 with a 30-minute
+  // journey, puts the departure at 08:30 — comfortably armable — and the wake alarm at 07:45,
+  // three quarters of an hour in the PAST. Arming that is worse than not: the app marks a trigger
+  // more than a minute stale MISSED, so nothing rings and no ARMED report ever comes back, the
+  // arm-ack watchdog resends three times and then warns the owner an alarm may not have reached
+  // their phone, and the model has meanwhile been handed a wake time that has already gone and will
+  // promise it. Drop the wake half, keep the departure, and say so in `note`.
+  const wakeAtMillis = leaveAtMillis - getReadyMinutes * 60_000
+  const wakeArmable = wantWake && wakeAtMillis > now + LEAVE_SOON_MS
+  const mergedWithWake = wakeArmable && leaveAtMillis - wakeAtMillis <= MERGE_WINDOW_MS
+  const wakeNote = wantWake && !wakeArmable ? ' There is no time for a separate get-up alarm, so only the departure is armed.' : ''
+
+  // Both ids for this event and day, then the two decisions about which of them this plan uses.
+  // The unused one goes to `staleIds` rather than being forgotten — see the field's doc comment.
+  const leaveId = leaveByAlarmId(device.deviceId, eventKey, dayKey)
+  const wakeIdOfDay = wakeAlarmId(device.deviceId, eventKey, dayKey)
+  const alarmId = mergedWithWake ? null : leaveId
+  const wakeId = wakeArmable ? wakeIdOfDay : null
 
   const priced: LeaveByPlan = {
     ...base,
@@ -334,13 +363,16 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
     estimated: travel.source !== 'routes',
     leaveAtMillis,
     leaveAtLocal: localIsoOf(leaveAtMillis, zone),
-    wakeAtMillis: wantWake ? wakeAtMillis : null,
-    wakeAtLocal: wantWake ? localIsoOf(wakeAtMillis, zone) : null,
+    wakeAtMillis: wakeArmable ? wakeAtMillis : null,
+    wakeAtLocal: wakeArmable ? localIsoOf(wakeAtMillis, zone) : null,
     mergedWithWake,
     label: leaveByLabel(event.summary, startMillis, zone),
-    wakeLabelText: wantWake ? wakeLabel(event.summary, leaveAtMillis, zone) : null,
-    alarmId: mergedWithWake ? null : leaveByAlarmId(device.deviceId, eventKey, dayKey),
-    wakeId: wantWake ? wakeAlarmId(device.deviceId, eventKey, dayKey) : null,
+    wakeLabelText: wakeArmable ? wakeLabel(event.summary, leaveAtMillis, zone) : null,
+    alarmId,
+    wakeId,
+    staleIds: [alarmId === null ? leaveId : null, wakeId === null ? wakeIdOfDay : null].filter(
+      (id): id is string => id !== null,
+    ),
   }
 
   if (leaveAtMillis <= now + LEAVE_SOON_MS) {
@@ -364,23 +396,27 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
     return start !== null && end !== null && start < startMillis && end > leaveAtMillis
   })
   if (overrun) {
-    return { ...priced, blocked: 'double-booked', note: `Something else runs past the ${hhmm(leaveAtMillis, zone)} departure for "${event.summary}".` }
+    return {
+      ...priced,
+      blocked: 'double-booked',
+      note: `Something else runs past the ${hhmm(leaveAtMillis, zone)} departure for "${event.summary}".${wakeNote}`,
+    }
   }
 
-  // Judge quiet hours on the EARLIEST thing that would ring. A departure at 07:30 is fine; the
-  // 06:45 wake-up that goes with it is the one that lands inside the window.
-  const ringAt = wantWake ? Math.min(wakeAtMillis, leaveAtMillis) : leaveAtMillis
+  // Judge quiet hours on the EARLIEST thing that would ring — and only on something that WOULD
+  // ring: a wake time already in the past is not armed, so it must not veto the departure either.
+  const ringAt = wakeArmable ? Math.min(wakeAtMillis, leaveAtMillis) : leaveAtMillis
   if (inQuietHours(ringAt, zone, quietHoursFor(device))) {
-    return { ...priced, blocked: 'quiet-hours', note: `That would ring at ${hhmm(ringAt, zone)}, inside their quiet hours.` }
+    return { ...priced, blocked: 'quiet-hours', note: `That would ring at ${hhmm(ringAt, zone)}, inside their quiet hours.${wakeNote}` }
   }
   if (priced.estimated) {
     return {
       ...priced,
       blocked: 'estimated',
-      note: `${travel.minutes} minutes is an estimate, not live traffic — offer it rather than assuming it.`,
+      note: `${travel.minutes} minutes is an estimate, not live traffic — offer it rather than assuming it.${wakeNote}`,
     }
   }
-  return { ...priced, note: `${travel.minutes} minutes of live traffic puts the departure at ${hhmm(leaveAtMillis, zone)}.` }
+  return { ...priced, note: `${travel.minutes} minutes of live traffic puts the departure at ${hhmm(leaveAtMillis, zone)}.${wakeNote}` }
 }
 
 /**
@@ -416,6 +452,15 @@ export async function armLeaveByPlan(
   }
   if (plan.wakeId !== null && plan.wakeAtMillis !== null && plan.wakeLabelText !== null) {
     await armAlarm(device, { alarmId: plan.wakeId, triggerAtMillis: plan.wakeAtMillis, label: plan.wakeLabelText })
+  }
+
+  // Retire the counterpart this plan does not use. Arm FIRST and cancel after: a crash in between
+  // leaves a duplicate, which the next plan for this event collapses, rather than no alarm at all.
+  // Only a row that exists and is still ARMED is touched — otherwise every plan would push a
+  // pointless CANCEL to the phone for an id that has never been armed. `cancelAlarm` also drops the
+  // recheck job anchored on that id, which is what stops a re-plan leaving two of them behind.
+  for (const staleId of plan.staleIds) {
+    if (getAlarm(staleId)?.state === 'ARMED') await cancelAlarm(device, staleId)
   }
 
   if (opts.scheduleRecheck) {

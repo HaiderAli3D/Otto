@@ -5,7 +5,7 @@
 // No seeder: this is a per-EVENT chain, enqueued when a leave-by alarm is armed, not a standing
 // per-device one. It has no first job to seed at boot.
 import { log } from '../../lib/log.js'
-import { cancelAlarm } from '../alarms.js'
+import { cancelAlarm, getAlarm } from '../alarms.js'
 import { getDevice } from '../devices.js'
 import { tryListCalendarEvents } from '../google.js'
 import type { Job } from '../jobs.js'
@@ -23,6 +23,21 @@ import type { JobOutcome } from './types.js'
 
 /** An event that moved by less than this is the same event; anything more re-arms. */
 const MOVED_MS = 60_000
+
+/**
+ * The id if the owner has not cancelled it, null if they have.
+ *
+ * `planView` hands the model the derived id and `cancel_alarm` takes it, so "cancel that" between
+ * arming and this recheck is an ordinary thing to happen. Cancelling an alarm drops the recheck job
+ * anchored on it — but a plan can arm two alarms and only one of them is the anchor, so a
+ * half-cancel still arrives here. Re-arming a CANCELLED id would take the row back to ARMED and
+ * ring the phone for a journey they explicitly called off. A cancelled alarm is a decision, not a
+ * stale row.
+ */
+function liveId(id: string | null): string | null {
+  if (id === null) return null
+  return getAlarm(id)?.state === 'CANCELLED' ? null : id
+}
 
 /**
  * The single recheck, 45 minutes before departure: is this journey still the journey we armed?
@@ -52,6 +67,15 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
   const zone = device.timezone
   const now = Date.now()
 
+  // Ask what this job may still touch BEFORE spending a calendar read and a billed Routes call on
+  // it: an owner who cancelled both alarms has already answered every question this job asks.
+  const alarmId = liveId(payload.alarmId)
+  const wakeId = liveId(payload.wakeId)
+  if (alarmId === null && wakeId === null) {
+    log.info({ jobId: job.id, eventId: payload.eventId }, 'leave_by: alarms already cancelled; nothing to recheck')
+    return null
+  }
+
   // Search from now to well past the original start: the whole reason this job exists is that the
   // event may have MOVED, and a window pinned to where it used to be would report it deleted.
   const events = await tryListCalendarEvents(
@@ -66,8 +90,8 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
 
   const event = events.find((e) => eventKeyOf(e) === payload.eventId)
   if (!event || event.status === 'cancelled') {
-    if (payload.alarmId) await cancelAlarm(device, payload.alarmId)
-    if (payload.wakeId) await cancelAlarm(device, payload.wakeId)
+    if (alarmId) await cancelAlarm(device, alarmId)
+    if (wakeId) await cancelAlarm(device, wakeId)
     log.info({ jobId: job.id, eventId: payload.eventId }, 'leave_by: event gone or cancelled; alarms cancelled')
     return null
   }
@@ -86,14 +110,32 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
   // video call. An alarm that says "leave now" for something you no longer leave for is wrong in a
   // way a stale time is not, so this one does cancel.
   if (plan.leaveAtMillis === null || plan.travelMinutes === null) {
-    if (payload.alarmId) await cancelAlarm(device, payload.alarmId)
-    if (payload.wakeId) await cancelAlarm(device, payload.wakeId)
+    if (alarmId) await cancelAlarm(device, alarmId)
+    if (wakeId) await cancelAlarm(device, wakeId)
     log.info({ jobId: job.id, blocked: plan.blocked }, 'leave_by: no journey any more; alarms cancelled')
     return null
   }
-  // Already past the departure by the time we looked. Re-arming into the past achieves nothing and
-  // the armed alarm is either ringing or spent; leave it.
-  if (plan.blocked === 'past') return null
+
+  // The departure is already behind us, and that reaches here as two very different situations.
+  //
+  // The event moved EARLIER: this recheck runs 45 minutes BEFORE the alarm, so the alarm is still
+  // sitting in the future, and when it rings it will announce a departure for a meeting that
+  // started before it. That is not a stale time, it is a false one, and the owner acts on it.
+  //
+  // Or nothing moved and this recheck is simply running late — a restart, a backlog. Then the armed
+  // alarm IS the departure, ringing about now, and cancelling it is precisely the failure this
+  // feature must never produce. The alarm's own trigger time separates the two without guessing: an
+  // alarm still ahead of a departure that has already gone can only be wrong, so it goes; one at or
+  // behind now is the ring itself, and is left strictly alone.
+  if (plan.blocked === 'past') {
+    for (const id of [alarmId, wakeId]) {
+      if (id === null) continue
+      const armed = getAlarm(id)
+      if (armed?.state === 'ARMED' && armed.triggerAtMillis > now) await cancelAlarm(device, id)
+    }
+    log.info({ jobId: job.id, eventId: payload.eventId }, 'leave_by: departure already gone; cancelled anything still ahead')
+    return null
+  }
 
   const moved = Math.abs(plan.startMillis! - payload.eventStartMillis)
   const drift = Math.abs(plan.travelMinutes - payload.travelMinutes)
@@ -102,11 +144,12 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
   // The ids come from the PAYLOAD, not from the fresh plan: an event that moved across midnight
   // derives a different day key, and re-arming under a new id would leave the old alarm armed
   // alongside it. Same id, one row, one alarm.
-  await armLeaveByPlan(
-    device,
-    { ...plan, alarmId: payload.alarmId, wakeId: payload.wakeId },
-    { scheduleRecheck: false, now },
-  )
+  //
+  // `staleIds` is emptied for exactly that reason. The fresh plan's stale list is derived from the
+  // fresh day key, so it names ids that either never existed or — worse, on the same day — name the
+  // very id being re-armed here, and armLeaveByPlan would arm it and then cancel it. The pinned
+  // pair IS the set of alarms this chain owns; there is no third one to retire.
+  await armLeaveByPlan(device, { ...plan, alarmId, wakeId, staleIds: [] }, { scheduleRecheck: false, now })
   log.info({ jobId: job.id, moved, drift }, 'leave_by: re-armed after a change')
   return null
 }

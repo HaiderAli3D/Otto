@@ -142,6 +142,11 @@ export async function cancelAlarm(device: Device, alarmId: string): Promise<bool
     .run()
   cancelJobs('arm_ack', alarmId)
   cancelJobs('recurring', alarmId)
+  // Every pending chain anchored on this alarm dies with it, not just the watchdog. The leave-by
+  // recheck re-arms the SAME derived id when the meeting moves, so a chain that outlived its alarm
+  // would take a CANCELLED row back to ARMED and ring the phone for a journey the owner explicitly
+  // called off — three quarters of an hour after they cancelled it, with no way to see it coming.
+  cancelJobs('leave_by', alarmId)
   if (!device.fcmToken) return false
   const res = await sendData(device.fcmToken, cancelData(alarmId, device.hmacSecret))
   if (!res.ok && res.unregistered) clearToken(device.deviceId)

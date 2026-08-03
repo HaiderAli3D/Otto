@@ -20,6 +20,7 @@ vi.mock('googleapis', () => ({
   },
 }))
 
+import { runTool } from '../src/agent/tools/index.js'
 import { config } from '../src/config.js'
 import { db, ensureSchema } from '../src/db/client.js'
 import { googleAccounts, outbox } from '../src/db/schema.js'
@@ -161,6 +162,66 @@ describe('tryListCalendarEvents never throws at a scheduler job', () => {
     expect(queued).toHaveLength(1)
     expect(queued[0]!.kind).toBe('system_warning')
     expect(queued[0]!.body).toContain('revoked')
+  })
+})
+
+describe('list_calendar_events hands the model a view, not the row', () => {
+  const window = { timeMinLocalISO: '2026-08-04T00:00:00', timeMaxLocalISO: '2026-08-05T00:00:00' }
+
+  it('drops the opaque id and the status and keeps what the model can act on', async () => {
+    const device = makeDevice('dev_ce9')
+    linkGoogle(device.deviceId)
+    listEvents.mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: 'a1b2c3d4e5f6g7h8i9j0k1l2m3_20260804T110000Z',
+            summary: 'Standup',
+            location: 'The Ship, Wandsworth',
+            status: 'confirmed',
+            start: { dateTime: '2026-08-04T12:00:00+01:00' },
+            end: { dateTime: '2026-08-04T13:00:00+01:00' },
+          },
+        ],
+      },
+    })
+
+    const res = (await runTool(device, 'list_calendar_events', window)) as { events: unknown[] }
+
+    // A tool result is appended to the session history and re-sent on every later turn, so width
+    // here is a bill for the rest of the conversation. The id is forty opaque characters that no
+    // tool accepts as input — create_leave_by_alarm matches on the title.
+    expect(res.events).toEqual([
+      {
+        summary: 'Standup',
+        startIso: '2026-08-04T12:00:00+01:00',
+        endIso: '2026-08-04T13:00:00+01:00',
+        location: 'The Ship, Wandsworth',
+      },
+    ])
+  })
+
+  it('does not list a cancelled event as though it were on', async () => {
+    const device = makeDevice('dev_ce10')
+    linkGoogle(device.deviceId)
+    listEvents.mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: 'evt_dropped',
+            summary: 'Client call',
+            status: 'cancelled',
+            start: { dateTime: '2026-08-04T15:00:00+01:00' },
+            end: { dateTime: '2026-08-04T15:30:00+01:00' },
+          },
+        ],
+      },
+    })
+
+    const res = (await runTool(device, 'list_calendar_events', window)) as { events: unknown[] }
+
+    // Now that `status` is no longer in the view, a cancelled row shown at all reads as a live one.
+    expect(res.events).toEqual([])
   })
 })
 

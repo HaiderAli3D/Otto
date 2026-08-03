@@ -164,14 +164,20 @@ export async function estimateTravelMinutes(
  * Minutes out of a fact value.
  *
  * Facts are documented to the model as ONE short sentence, so this is prose ("about 40 minutes to
- * most places") far more often than it is a number. Take the first plausible integer and ignore
+ * most places") far more often than it is a number. Take the first plausible number and ignore
  * anything absurd; an unparseable fact falls through to the settings default rather than throwing.
+ *
+ * HOURS are read before minutes, and that ordering is the whole point rather than a nicety. A bare
+ * first-integer scan reads "about 1 hour door to door" as ONE minute, and one minute of travel is
+ * not a wrong estimate but an actively dangerous one: it arms "Leave now" sixty seconds before the
+ * meeting and tells the owner, in as many words, that the journey takes a minute. Anything the
+ * owner is at all likely to write for a commute — "1 hour", "1.5 hrs", "2h" — has to land in the
+ * right unit or this fallback is worse than having no fact at all.
  */
 function parseBufferMinutes(value: string | null): number | null {
   if (!value) return null
-  const m = /(\d{1,3})/.exec(value)
-  if (!m) return null
-  const minutes = Number(m[1])
+  const hours = /(\d{1,2}(?:\.\d+)?)\s*(?:h\b|hr|hour)/i.exec(value)
+  const minutes = hours ? Math.round(Number(hours[1]) * 60) : Number(/(\d{1,3})/.exec(value)?.[1] ?? Number.NaN)
   if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 600) return null
   return minutes
 }

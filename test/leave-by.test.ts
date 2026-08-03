@@ -18,7 +18,8 @@ vi.mock('googleapis', () => ({
   },
 }))
 
-import { runTool } from '../src/agent/tools/index.js'
+import { systemPrompt } from '../src/agent/prompt.js'
+import { buildTools, runTool } from '../src/agent/tools/index.js'
 import { config } from '../src/config.js'
 import { db, ensureSchema } from '../src/db/client.js'
 import { alarms, googleAccounts, jobs } from '../src/db/schema.js'
@@ -260,6 +261,111 @@ describe('waking up as well', () => {
   })
 })
 
+describe('a get-up alarm is never armed into the past', () => {
+  const DENTIST = ev({
+    id: 'evt_dentist',
+    summary: 'Dentist',
+    startIso: '2026-08-04T09:00:00+01:00',
+    endIso: '2026-08-04T09:30:00+01:00',
+  })
+
+  it('drops the wake half and keeps the departure', async () => {
+    const device = makeLondonDevice()
+
+    // "Wake me in time for the 9am dentist", asked at 08:00. The 30-minute journey puts the
+    // departure at 08:30, which is fine; 45 minutes of getting ready puts the wake alarm at 07:45,
+    // three quarters of an hour ago.
+    const plan = await planLeaveBy({ device, event: DENTIST, alsoWakeMe: true, explicit: true })
+
+    expect(plan.leaveAtMillis).toBe(Date.parse('2026-08-04T08:30:00+01:00'))
+    expect(plan.wakeAtMillis).toBeNull()
+    expect(plan.wakeId).toBeNull()
+    // The model is told, so it cannot promise a wake-up that has already been and gone.
+    expect(plan.note).toContain('no time for a separate get-up alarm')
+
+    // One row, not two: an alarm armed for a stale trigger is marked MISSED by the app, never
+    // reports ARMED, and drives the arm-ack watchdog into three resends and a spurious "I couldn't
+    // confirm your alarm reached your phone".
+    expect(db.select().from(alarms).where(eq(alarms.deviceId, device.deviceId)).all()).toHaveLength(1)
+    expect(listArmed(device.deviceId)[0]!.alarmId).toBe(plan.alarmId)
+  })
+
+  it('still arms both when there is genuinely time to get up', async () => {
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: DENTIST, alsoWakeMe: true, getReadyMinutes: 20, explicit: true })
+
+    // 08:10 is ten minutes away: near, but real. The floor is "already gone", not "soon".
+    expect(plan.wakeAtMillis).toBe(Date.parse('2026-08-04T08:10:00+01:00'))
+    expect(listArmed(device.deviceId)).toHaveLength(1)
+    expect(plan.mergedWithWake).toBe(true)
+  })
+})
+
+describe('re-planning the same event never leaves an orphan armed', () => {
+  it('collapsing into the wake alarm cancels the departure alarm it replaces', async () => {
+    const device = makeLondonDevice()
+    const first = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: true, explicit: true })
+    expect(listArmed(device.deviceId)).toHaveLength(2)
+
+    // "Actually I only need fifteen minutes" — the two alarms now land inside the merge window, so
+    // this plan arms only the wake alarm. The 11:30 departure alarm from the first plan is not part
+    // of this plan at all, and the tool only ever hands back the id it just armed, so if it is left
+    // behind the owner has no way to reach it.
+    const second = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: true, getReadyMinutes: 15, explicit: true })
+
+    expect(second.mergedWithWake).toBe(true)
+    expect(getAlarm(first.alarmId!)!.state).toBe('CANCELLED')
+    expect(listArmed(device.deviceId).map((a) => a.alarmId)).toEqual([second.wakeId])
+    // One recheck, not two: cancelling the orphan took its chain with it.
+    expect(leaveByJobs()).toHaveLength(1)
+    expect(leaveByJobs()[0]!.alarmId).toBe(second.wakeId)
+  })
+
+  it('turning the wake alarm off actually turns it off', async () => {
+    const device = makeLondonDevice()
+    const first = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: true, explicit: true })
+
+    const second = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: false, explicit: true })
+
+    expect(second.wakeId).toBeNull()
+    expect(getAlarm(first.wakeId!)!.state).toBe('CANCELLED')
+    expect(listArmed(device.deviceId).map((a) => a.alarmId)).toEqual([second.alarmId])
+    expect(leaveByJobs()).toHaveLength(1)
+  })
+
+  it('cancelling the alarm takes its recheck with it', async () => {
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: STANDUP, explicit: true })
+    expect(leaveByJobs()).toHaveLength(1)
+
+    await runTool(device, 'cancel_alarm', { alarmId: plan.alarmId })
+
+    // A chain that outlives its alarm is a chain that can re-arm it 45 minutes later.
+    expect(getAlarm(plan.alarmId!)!.state).toBe('CANCELLED')
+    expect(leaveByJobs()).toHaveLength(0)
+  })
+})
+
+describe('the model is told what makes live traffic possible', () => {
+  it('names the exact fact keys the planner reads by name', () => {
+    const device = makeLondonDevice()
+    const core = systemPrompt(device)[0]!.text
+
+    // resolveOrigin reads these two keys and estimateTravelMinutes reads the third. Nothing told
+    // the model they existed, and with no origin there is no Routes call at all: every plan comes
+    // back source:'default', estimated:true, thirty flat minutes, and the whole live-traffic ladder
+    // is dead code in production.
+    expect(core).toContain('home.address')
+    expect(core).toContain('work.address')
+    expect(core).toContain('travel.default_buffer')
+  })
+
+  it('names them on remember_fact too, which is where the key is chosen', () => {
+    const remember = buildTools().find((t) => t.name === 'remember_fact')!
+    expect(JSON.stringify(remember.input_schema)).toContain('home.address')
+  })
+})
+
 describe('labels fit a lock screen', () => {
   const long = 'Quarterly all-hands review and roadmap alignment session with the wider platform team'
 
@@ -457,6 +563,73 @@ describe('the recheck 45 minutes out', () => {
 
     // "Leave now" for something you no longer leave for is wrong in a way a stale time is not.
     expect(getAlarm(plan.alarmId!)!.state).toBe('CANCELLED')
+  })
+
+  it('cancels a stale alarm when the meeting moves in front of its own departure', async () => {
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: STANDUP, explicit: true })
+    const job = leaveByJobs()[0]!
+
+    // The 12:00 standup is pulled forward to 08:30, so the departure is now. The alarm we armed is
+    // still sitting at 11:30 and would ring three hours after the meeting started, announcing a
+    // departure for "Standup, 12:00" that no longer exists.
+    calendarHolds([ev({ ...STANDUP, startIso: '2026-08-04T08:30:00+01:00', endIso: '2026-08-04T09:00:00+01:00' })])
+    await runJob(job)
+
+    expect(getAlarm(plan.alarmId!)!.state).toBe('CANCELLED')
+    expect(listArmed(device.deviceId)).toHaveLength(0)
+  })
+
+  it('leaves the alarm strictly alone when the recheck is merely running late', async () => {
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: STANDUP, explicit: true })
+    const job = leaveByJobs()[0]!
+
+    // Nothing moved; this recheck is running at the departure itself, after a restart or a backlog.
+    // The armed alarm IS the ring, and cancelling it is the one failure this feature must never
+    // produce — which is why the cancel above is gated on the alarm still being ahead of us.
+    vi.setSystemTime(plan.leaveAtMillis!)
+    calendarHolds([STANDUP])
+    await runJob(job)
+
+    expect(getAlarm(plan.alarmId!)!.state).toBe('ARMED')
+    expect(getAlarm(plan.alarmId!)!.triggerAtMillis).toBe(plan.leaveAtMillis)
+  })
+
+  it('refuses to resurrect the half of a plan the owner cancelled', async () => {
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: STANDUP, alsoWakeMe: true, explicit: true })
+    const job = leaveByJobs()[0]!
+
+    // Cancel the WAKE alarm only. The recheck is anchored on the departure alarm, so the job
+    // survives that cancel and still names the wake id in its payload.
+    await runTool(device, 'cancel_alarm', { alarmId: plan.wakeId })
+
+    calendarHolds([ev({ ...STANDUP, startIso: '2026-08-04T13:00:00+01:00', endIso: '2026-08-04T14:00:00+01:00' })])
+    await runJob(job)
+
+    expect(getAlarm(plan.wakeId!)!.state).toBe('CANCELLED')
+    expect(listArmed(device.deviceId).map((a) => a.alarmId)).toEqual([plan.alarmId])
+  })
+
+  it('cannot re-arm a cancelled alarm even if its recheck outlives it', async () => {
+    const device = makeLondonDevice()
+    const plan = await planLeaveBy({ device, event: STANDUP, explicit: true })
+    const job = leaveByJobs()[0]!
+
+    await runTool(device, 'cancel_alarm', { alarmId: plan.alarmId })
+    // Cancelling took the chain with it — that is the first line of defence.
+    expect(leaveByJobs()).toHaveLength(0)
+
+    // Replay the job anyway, which is what a crash between the two writes would leave behind.
+    listEvents.mockClear()
+    calendarHolds([ev({ ...STANDUP, startIso: '2026-08-04T13:00:00+01:00', endIso: '2026-08-04T14:00:00+01:00' })])
+    await runJob(job)
+
+    expect(getAlarm(plan.alarmId!)!.state).toBe('CANCELLED')
+    expect(listArmed(device.deviceId)).toHaveLength(0)
+    // ...and it worked that out before spending a calendar read and a billed Routes call on it.
+    expect(listEvents).not.toHaveBeenCalled()
   })
 })
 

@@ -51,7 +51,13 @@ export const LEAVE_BY = `# Leaving on time
   has nothing to leave for, and if they already needed to leave, say that instead of arming
   something pointless.
 - Ask for alsoWakeMe only when they mention getting up. If both alarms would land within twenty
-  minutes of each other you get one alarm carrying both times; that is deliberate, not a failure.`
+  minutes of each other you get one alarm carrying both times; that is deliberate, not a failure.
+- Live traffic needs to know where they are SETTING OFF from, and three remembered facts are read
+  by name to work that out: "home.address" and "work.address" (a full street address each), and
+  "travel.default_buffer" (how long they say a journey usually takes) as the fallback when there is
+  no route to price. Without those every leave-by time is a flat thirty-minute guess, so when they
+  mention where they live or work, or how long their commute runs, save it with remember_fact under
+  exactly those keys — not a near-miss like "home.location". Passing originAddress overrides them.`
 
 export const REMINDER_LOOP = `# Reminders: how to run the loop
 - Creating: pick a sensible nagPolicy without asking. Default to gentle. Use persistent only when
