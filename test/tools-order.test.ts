@@ -33,6 +33,7 @@ const EXPECTED = [
   'list_calendar_events',
   'create_calendar_event',
   'create_task',
+  'set_preferences',
 ]
 
 describe('tool list is deterministic', () => {

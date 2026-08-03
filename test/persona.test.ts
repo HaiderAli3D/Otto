@@ -4,6 +4,7 @@ vi.mock('../src/fcm/sender.js', () => ({
   sendData: vi.fn(async () => ({ ok: true as const })),
 }))
 
+import { BRIEF_SYSTEM } from '../src/agent/brief.js'
 import { DIGEST_SYSTEM } from '../src/agent/compose.js'
 import { NUDGE_SYSTEM, writeNudge } from '../src/agent/nudge.js'
 import { PERSONA, WRITING } from '../src/agent/persona.js'
@@ -38,6 +39,19 @@ describe('one Otto on every surface', () => {
   it('the nudge writer carries the same persona', () => {
     expect(NUDGE_SYSTEM).toContain(PERSONA)
     expect(NUDGE_SYSTEM).toContain(WRITING)
+  })
+
+  it('the brief composer carries the same persona', () => {
+    expect(BRIEF_SYSTEM).toContain(PERSONA)
+    expect(BRIEF_SYSTEM).toContain(WRITING)
+  })
+
+  it('makes the brief overriding WRITING explicit rather than leaving it to be inferred', () => {
+    // The brief is the one surface allowed a line per item, which contradicts WRITING's one-to-three
+    // sentences. Both blocks are in the same system prompt, so the override has to be stated — an
+    // unstated conflict is resolved by whichever the model weighs more that day.
+    expect(BRIEF_SYSTEM).toContain('# Writing')
+    expect(BRIEF_SYSTEM).toContain('HERE ONLY')
   })
 
   it('keeps the record out of the cached prefix', () => {
