@@ -260,9 +260,47 @@ describe('deliverWeeklyReview', () => {
     expect(outboxFor(device.deviceId)).toHaveLength(1)
     expect(outboxFor(device.deviceId)[0]!.kind).toBe('weekly')
 
-    // Same local week ⇒ silence, whatever the job queue does.
+    // Already sent ⇒ silence, whatever the job queue does.
     expect(await deliverWeeklyReview(device, now + 60_000, now + 60_000)).toBe(false)
     expect(outboxFor(device.deviceId)).toHaveLength(1)
+  })
+
+  it('stays quiet for a Monday-morning replay of Sunday evening\'s review', async () => {
+    // The six-hour hole. The slot is SUN:18:00, but an ISO week rolls at Monday 00:00 and the late
+    // grace is twelve hours, so a job that died between markWeeklyReviewSent and the scheduler's
+    // reschedule — SIGKILL, machine back at 01:00 — used to clear BOTH gates and deliver a second
+    // identical review. Fixed instants, because at the wrong minute of the wrong day this is the
+    // difference between a green suite and a red one.
+    const device = reachableDevice('dev_wr15')
+    const zone = device.timezone
+    const sunday = DateTime.fromISO('2026-08-02T18:00:00', { zone }).toMillis()
+    const monday = DateTime.fromISO('2026-08-03T01:00:00', { zone }).toMillis()
+    // The precondition: these two instants really are in different ISO weeks.
+    expect(DateTime.fromMillis(sunday, { zone }).weekNumber).not.toBe(DateTime.fromMillis(monday, { zone }).weekNumber)
+
+    event(device.deviceId, 'alm_a', 'RANG', sunday - DAY)
+    expect(await deliverWeeklyReview(device, sunday, sunday)).toBe(true)
+    expect(outboxFor(device.deviceId)).toHaveLength(1)
+
+    // The SAME job row, re-run seven hours later — comfortably inside LATE_GRACE_MS, so the
+    // already-sent guard is the only thing standing between the owner and a duplicate.
+    expect(await deliverWeeklyReview(device, sunday, monday)).toBe(false)
+    expect(outboxFor(device.deviceId)).toHaveLength(1)
+  })
+
+  it('sends again a week later', async () => {
+    // The other side of the cooldown: it must not be so wide that next Sunday is swallowed too.
+    const device = reachableDevice('dev_wr16')
+    const zone = device.timezone
+    const sunday = DateTime.fromISO('2026-08-02T18:00:00', { zone }).toMillis()
+    const nextSunday = DateTime.fromISO('2026-08-09T18:00:00', { zone }).toMillis()
+
+    event(device.deviceId, 'alm_a', 'RANG', sunday - DAY)
+    expect(await deliverWeeklyReview(device, sunday, sunday)).toBe(true)
+
+    event(device.deviceId, 'alm_b', 'RANG', nextSunday - DAY)
+    expect(await deliverWeeklyReview(device, nextSunday, nextSunday)).toBe(true)
+    expect(outboxFor(device.deviceId)).toHaveLength(2)
   })
 
   it('refuses to arrive on Tuesday with Sunday\'s review', async () => {

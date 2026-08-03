@@ -19,6 +19,27 @@ const HOUR = 60 * MINUTE
 const MORNING_HOUR = 9
 
 /**
+ * The floor under every rung from 1 upward: no chase may land sooner than this after the one that
+ * just went out. Half an hour is the tightest gap the ladder itself ever asks for (`persistent`'s
+ * due → +30m), so it constrains nothing the ladder would have done on its own.
+ *
+ * Rungs 1–3 are offsets from the DUE time rather than from each other, and that is what makes a
+ * floor necessary. A quiet window swallows several of them whole: a 23:00 reminder's +30m/+2h/+6h
+ * rungs are 23:30, 01:00 and 05:00, all inside 22:00–07:00, and deferring each one independently
+ * lands all three on the same 07:00. `runNudge` queues the next rung the instant it sends the
+ * current one and every rung carries its own dedupe key, so nothing downstream suppresses the
+ * pile-up — the owner gets three escalating chases inside two scheduler ticks, with rungs 2 and 3
+ * burned against someone who has not yet had a chance to reply.
+ *
+ * Measuring from `nowMillis` is what makes this work: whenever the ladder is called from
+ * `runNudge`, `nowMillis` IS the instant the previous rung fired. It also makes the ladder
+ * monotonic for a reminder that was already hours overdue when it was created — `dueAtMillis + 30m`
+ * would otherwise be in the PAST, and `runNudge`'s staleness gate would retire that rung without
+ * ever sending it.
+ */
+const MIN_RUNG_GAP_MS = 30 * MINUTE
+
+/**
  * When to nudge next, or null when the ladder is exhausted (the reminder stays OPEN and still
  * shows in lists and digests — it just stops pestering).
  *
@@ -63,18 +84,28 @@ export function nextNagAt(params: {
 
   const base = Math.max(dueAtMillis, nowMillis)
 
+  /**
+   * Every rung past the first, settled: hold it off the heels of the one that just fired, THEN push
+   * it out of the quiet window.
+   *
+   * That order is load-bearing. Flooring after the deferral could push a rung that had legitimately
+   * cleared the window (say 21:55, with the window opening at 22:00) straight back into it.
+   */
+  const rung = (at: number): number =>
+    deferPastQuietHours(Math.max(at, nowMillis + MIN_RUNG_GAP_MS), zone, quiet)
+
   if (policy === 'gentle') {
     // due → +2h → next morning → stop
-    if (nagCount === 1) return deferPastQuietHours(dueAtMillis + 2 * HOUR, zone, quiet)
-    if (nagCount === 2) return deferPastQuietHours(nextLocalTimeAt(base, zone, MORNING_HOUR), zone, quiet)
+    if (nagCount === 1) return rung(dueAtMillis + 2 * HOUR)
+    if (nagCount === 2) return rung(nextLocalTimeAt(base, zone, MORNING_HOUR))
     return null
   }
 
   // persistent: due → +30m → +2h → +6h → then daily at 09:00
-  if (nagCount === 1) return deferPastQuietHours(dueAtMillis + 30 * MINUTE, zone, quiet)
-  if (nagCount === 2) return deferPastQuietHours(dueAtMillis + 2 * HOUR, zone, quiet)
-  if (nagCount === 3) return deferPastQuietHours(dueAtMillis + 6 * HOUR, zone, quiet)
-  return deferPastQuietHours(nextLocalTimeAt(base, zone, MORNING_HOUR), zone, quiet)
+  if (nagCount === 1) return rung(dueAtMillis + 30 * MINUTE)
+  if (nagCount === 2) return rung(dueAtMillis + 2 * HOUR)
+  if (nagCount === 3) return rung(dueAtMillis + 6 * HOUR)
+  return rung(nextLocalTimeAt(base, zone, MORNING_HOUR))
 }
 
 /**

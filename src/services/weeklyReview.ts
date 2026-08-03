@@ -61,21 +61,39 @@ export function nextWeeklyReviewAt(device: Device, nowMillis: number): number | 
 }
 
 /**
- * `2026-W31` in the device zone.
+ * How recently a review must have gone out before another one counts as a duplicate.
  *
- * weekYear as well as weekNumber, because ISO week 1 of a year routinely starts in December: on
- * 2026-12-28 the calendar year is 2026 and the week year is 2027, and keying on the calendar year
- * would collide that week with the one twelve months earlier.
+ * Deliberately a COOLDOWN and not the ISO week number, which is what this used to be. The slot
+ * defaults to SUN:18:00 but an ISO week rolls at Monday 00:00 — six hours later — while
+ * `LATE_GRACE_MS` is twelve. That left a six-hour hole in which a re-run passed both gates: the
+ * review goes out Sunday 18:00, the process is SIGKILLed between `markWeeklyReviewSent` and the
+ * scheduler's `rescheduleJob`, the machine comes back at Monday 01:00, and the still-due job
+ * delivers a second identical review because "different week". Keying on the ISO week put the
+ * dedupe boundary somewhere the slot has no relationship to.
+ *
+ * Six days rather than seven because the legitimate gap between consecutive reviews is not exactly
+ * a week: a wall-clock Sunday-to-Sunday hop is seven days minus an hour across a spring-forward,
+ * and either end may have been delivered up to `LATE_GRACE_MS` late, so the worst honest gap is
+ * about 6d 11h. Six days clears that and still catches a same-evening replay ten times over. It
+ * also matches what the review actually IS: `weeklyRecord` looks back exactly seven days, so two
+ * reviews closer together than that report overlapping evidence.
+ *
+ * A consequence worth naming: an owner who moves their slot from Sunday to Wednesday gets their
+ * first Wednesday review the FOLLOWING Wednesday, not two days later. That is the right trade —
+ * one week's evidence, reported once.
  */
-function weekKey(ms: number, zone: string): string {
-  const dt = DateTime.fromMillis(ms, { zone })
-  return `${dt.weekYear}-W${dt.weekNumber}`
-}
+const REVIEW_COOLDOWN_MS = 6 * 24 * 60 * 60 * 1000
 
-function sameLocalWeek(a: number | null, b: number, zone: string): boolean {
-  // null reads as "never sent", which must not count as the same week or the first review never runs.
-  if (a === null) return false
-  return weekKey(a, zone) === weekKey(b, zone)
+/**
+ * Has a review already gone out for this stretch of evidence?
+ *
+ * `null` reads as "never sent" and must not suppress, or the first review never runs. A `lastAt`
+ * in the FUTURE (clock skew, a restored backup) reads as recent and suppresses — for an unprompted
+ * weekly message, staying quiet is the safe side of that judgement.
+ */
+function sentRecently(lastAt: number | null, nowMillis: number): boolean {
+  if (lastAt === null) return false
+  return nowMillis - lastAt < REVIEW_COOLDOWN_MS
 }
 
 /**
@@ -96,8 +114,8 @@ export async function deliverWeeklyReview(
     return false
   }
 
-  if (sameLocalWeek(getSettings(device.deviceId).lastWeeklyReviewAt, nowMillis, device.timezone)) {
-    log.debug({ deviceId: device.deviceId }, 'weekly review: already sent this week')
+  if (sentRecently(getSettings(device.deviceId).lastWeeklyReviewAt, nowMillis)) {
+    log.debug({ deviceId: device.deviceId }, 'weekly review: one already went out recently')
     return false
   }
 
@@ -118,7 +136,10 @@ export async function deliverWeeklyReview(
     deviceId: device.deviceId,
     kind: 'weekly',
     body,
-    dedupeKey: `weekly:${device.deviceId}:${weekKey(nowMillis, device.timezone)}`,
+    // The SLOT this delivery is for, not the week it happens to land in — a replay of the same job
+    // row carries the same `runAtMillis`, so the outbox's unique index backs up the cooldown above
+    // instead of rolling over at Monday 00:00 exactly when the replay is most likely.
+    dedupeKey: `weekly:${device.deviceId}:${scheduledAtMillis}`,
     ttlMs: REVIEW_TTL_MS,
   })
   markWeeklyReviewSent(device.deviceId, nowMillis)

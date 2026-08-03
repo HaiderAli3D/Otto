@@ -74,6 +74,33 @@ describe('one Otto on every surface', () => {
   })
 })
 
+describe('the quiet-hours section describes what the code actually does', () => {
+  // Both of these are pinned as prompt TEXT because the prompt is the only artefact — the model
+  // reads these lines and answers the owner from them, so a line that is untrue is a bug the same
+  // way a wrong branch is.
+  const core = (deviceId: string): string => systemPrompt(makeDevice(deviceId))[0]!.text
+
+  it('names the owner-chosen due time as an exception to auto-deferral', () => {
+    // nagLadder returns rung 0 at a still-future due time untouched. The section used to promise
+    // "anything you schedule that would land inside that window is moved" and list three
+    // exceptions, so "remind me to take my pills at 2am" got a 02:00 nudge while Otto told the
+    // owner he would chase at 07:00 — a lie, in the one section that forbids exactly that.
+    const text = core('dev_pe9')
+    expect(text).toContain('Four things go through regardless')
+    expect(text).toContain('a due time the owner picked themselves')
+    expect(text).toContain('Never tell them a reminder due inside their quiet hours will wait until morning')
+  })
+
+  it('reconciles wake-checks with the alarm section that says you never follow one up', () => {
+    // ALARMS_VS_REMINDERS says of create_alarm "It rings once. You never follow up on it", and is
+    // read BEFORE this section. Naming the contradiction here is the seam-respecting fix: editing
+    // the earlier section is a cross-branch conflict, and should be.
+    const text = core('dev_pe10')
+    expect(text).toContain('You never follow up on it')
+    expect(text).toContain('This is the one exception to "it rings once, you never follow up on it"')
+  })
+})
+
 describe('nudge writer falls back', () => {
   it('has no API key configured in tests — the precondition for everything below', () => {
     expect(config.anthropic).toBeNull()

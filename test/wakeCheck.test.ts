@@ -107,6 +107,71 @@ describe('scheduling the ladder', () => {
     expect(wakeJobs()).toHaveLength(1)
   })
 
+  it('a re-delivered DISMISSED does not restart a ladder that is halfway through', async () => {
+    // The app's outbox retries at-least-once, and this hook sits OUTSIDE the guard `recordEvent`
+    // keeps for exactly that. Phone reports DISMISSED, the 204 is lost, the ladder runs rounds 0
+    // and 1 — then the identical report lands again. Re-anchoring round 0 at an instant already
+    // twenty minutes past makes the very next tick ask "You up?" all over again.
+    const device = reachableDevice('dev_wc12')
+    const alarmId = await wakeAlarm(device, 'alm_wc12', true)
+    const dismissedAt = Date.now() - 60 * 60_000
+
+    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(true)
+    const originalJobId = wakeJobs()[0]!.id
+    await runWakeCheck(wakeJobs()[0]!)
+    await runWakeCheck(wakeJobs()[0]!)
+    expect(sends).toHaveLength(2)
+
+    // The duplicate report. Same alarm, same instant.
+    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(false)
+    expect(wakeJobs()).toHaveLength(1)
+    expect(wakeJobs()[0]!.id).toBe(originalJobId)
+
+    // The ladder carries on from where it was rather than starting over.
+    await runWakeCheck(wakeJobs()[0]!)
+    expect(sends.map((s) => s.body)).toEqual([
+      'You up?',
+      'Still nothing. Are you up?',
+      "Get up was half an hour ago and you've gone quiet. Last ask before I ring the phone again.",
+    ])
+  })
+
+  it('a DISMISSED re-delivered after the ladder has already finished does not start a second one', async () => {
+    // Why the latch is a durable alarm_events row and not "is there a live wake_check job": by the
+    // time the chain has escalated its job is gone, so a late replay would find nothing, re-walk
+    // every round and arm a SECOND backup alarm.
+    const device = reachableDevice('dev_wc15')
+    const alarmId = await wakeAlarm(device, 'alm_wc15', true)
+    const dismissedAt = Date.now() - 60 * 60_000
+
+    scheduleWakeCheck(alarmId, device, dismissedAt)
+    for (let round = 0; round <= MAX_WAKE_ROUNDS; round++) {
+      const job = wakeJobs()[0]
+      if (!job) break
+      await runWakeCheck(job)
+    }
+    db.delete(jobsTable).run() // the scheduler settles a null outcome by deleting the row
+    expect(armed).toHaveLength(1)
+
+    expect(scheduleWakeCheck(alarmId, device, dismissedAt)).toBe(false)
+    expect(wakeJobs()).toHaveLength(0)
+    expect(armed).toHaveLength(1)
+  })
+
+  it('a genuinely new dismissal of the same alarm still replaces the chain', async () => {
+    // The latch is keyed on the dismissal instant, not the alarm, so a re-armed alarm dismissed
+    // again tomorrow is not mistaken for yesterday's replay.
+    const device = reachableDevice('dev_wc16')
+    const alarmId = await wakeAlarm(device, 'alm_wc16', true)
+    const first = Date.now() - 60 * 60_000
+
+    expect(scheduleWakeCheck(alarmId, device, first)).toBe(true)
+    expect(scheduleWakeCheck(alarmId, device, first + 1)).toBe(true)
+    const queued = wakeJobs()
+    expect(queued).toHaveLength(1)
+    expect(queued[0]!.runAtMillis).toBe(wakeCheckAt(0, first + 1))
+  })
+
   it('carries wakeCheck across a recurring re-arm — day two still gets checked', async () => {
     // armAlarm is an upsert, so the flag has to be in the conflict SET as well as the values.
     const device = reachableDevice('dev_wc4')
@@ -210,6 +275,38 @@ describe('running the ladder', () => {
     expect(outboxRows(device.deviceId)).toHaveLength(0)
     expect(armed).toHaveLength(1)
     expect(armed[0]!.data.label).toBe('Still asleep? — Get up')
+  })
+
+  it('does NOT put a failure on the record when it never managed to ask', async () => {
+    // WAKE_CHECK_FAILED is quoted back at the owner — "dismissed and went back to sleep N×" in the
+    // conversational record, "N dismissed then back to sleep" in Sunday's review. Escalating on a
+    // shut window sends nothing at all, so recording a failure there accuses someone who got up
+    // perfectly normally of sleeping through a question nobody asked. The ring stays; the row goes.
+    const device = reachableDevice('dev_wc13')
+    const alarmId = await wakeAlarm(device, 'alm_wc13', true)
+    scheduleWakeCheck(alarmId, device, Date.now())
+    clearInboundWindow(device.deviceId)
+
+    expect(await runWakeCheck(wakeJobs()[0]!)).toBeNull()
+
+    expect(sends).toHaveLength(0)
+    expect(armed).toHaveLength(1) // still rung — a shut window is no reason to leave them asleep
+    expect(ownerRecord(device.deviceId).sleptThroughAfterDismiss).toBe(0)
+  })
+
+  it('DOES record a failure once at least one round has actually gone out', async () => {
+    // The line is "was anything ever asked", not "did we run out of rounds" — one delivered round
+    // and then a window that shut is a real unanswered check, and belongs on the record.
+    const device = reachableDevice('dev_wc14')
+    const alarmId = await wakeAlarm(device, 'alm_wc14', true)
+    scheduleWakeCheck(alarmId, device, Date.now() - 60 * 60_000)
+
+    await runWakeCheck(wakeJobs()[0]!)
+    expect(sends).toHaveLength(1)
+    clearInboundWindow(device.deviceId)
+    expect(await runWakeCheck(wakeJobs()[0]!)).toBeNull()
+
+    expect(ownerRecord(device.deviceId).sleptThroughAfterDismiss).toBe(1)
   })
 })
 

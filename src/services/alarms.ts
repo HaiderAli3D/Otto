@@ -175,12 +175,19 @@ const STATE_EVENTS = ['ARMED', 'RANG', 'DISMISSED', 'CANCELLED', 'MISSED']
  * `alarm_events.event` is free-form TEXT (and the route's zod is `z.string()`), so a new kind of
  * row needs no table and no migration. The dedupe index on (alarm, event, at) still applies, which
  * makes this idempotent for free.
+ *
+ * Returns whether the row was actually new. That makes the dedupe index usable as a durable,
+ * single-statement LATCH — `scheduleWakeCheck` claims (alarm, WAKE_CHECK_STARTED, dismissedAt)
+ * through it — rather than only as silent replay protection. Guarded INSERT, same shape as the
+ * guarded UPDATEs elsewhere: better-sqlite3 is synchronous, so one statement decides the winner.
  */
-export function recordServerEvent(deviceId: string, alarmId: string, event: string, atMillis: number): void {
-  db.insert(alarmEvents)
+export function recordServerEvent(deviceId: string, alarmId: string, event: string, atMillis: number): boolean {
+  const inserted = db
+    .insert(alarmEvents)
     .values({ alarmId, deviceId, event, atMillis, appVersion: null, receivedAt: Date.now() })
     .onConflictDoNothing()
     .run()
+  return inserted.changes > 0
 }
 
 /**

@@ -137,6 +137,44 @@ describe('nextNagAt with quiet hours', () => {
     expect(local(r2!)).toBe('2026-08-04 07:00')
   })
 
+  it('does NOT collapse the rungs it defers onto one instant', () => {
+    // Rungs 1–3 are offsets from the DUE time, so a window that contains several of them defers
+    // them all to the same window end. runNudge recomputes the next rung at the moment the current
+    // one fires, so the collapse shows up as three chases inside two scheduler ticks — which is
+    // what the floor measured from `nowMillis` exists to stop.
+    const lateDue = at('2026-08-03T23:00:00')
+    const windowEnd = at('2026-08-04T07:00:00')
+
+    // Rung 1 fires at the window end; rung 2 is computed right then, and rung 3 when rung 2 fires.
+    const r2 = nextNagAt({ policy: 'persistent', nagCount: 2, dueAtMillis: lateDue, zone: ZONE, nowMillis: windowEnd, quiet: NIGHT })
+    const r3 = nextNagAt({ policy: 'persistent', nagCount: 3, dueAtMillis: lateDue, zone: ZONE, nowMillis: r2!, quiet: NIGHT })
+
+    expect(local(r2!)).toBe('2026-08-04 07:30')
+    expect(local(r3!)).toBe('2026-08-04 08:00')
+  })
+
+  it('never floors a rung back INTO the window it just cleared', () => {
+    // The floor is applied before the deferral, not after. A rung landing at 21:55 with the window
+    // opening at 22:00 is outside it — nudging it half an hour forward for spacing would put it at
+    // 22:25, inside. Order of operations, pinned.
+    const due = at('2026-08-03T19:55:00')
+    const now = at('2026-08-03T21:50:00')
+    const next = nextNagAt({ policy: 'persistent', nagCount: 2, dueAtMillis: due, zone: ZONE, nowMillis: now, quiet: NIGHT })
+    expect(local(next!)).toBe('2026-08-04 07:00')
+  })
+
+  it('never returns a rung in the past for a reminder that was already badly overdue', () => {
+    // Same anchoring, no quiet hours needed: a reminder created eleven hours after its due time has
+    // `due + 30m` behind it. runNudge would enqueue that, then retire it unsent on the staleness
+    // gate — the ladder would go silent after a single nudge.
+    const staleDue = at('2026-08-03T09:00:00')
+    const now = at('2026-08-03T20:00:00')
+    for (const nagCount of [1, 2, 3]) {
+      const next = nextNagAt({ policy: 'persistent', nagCount, dueAtMillis: staleDue, zone: ZONE, nowMillis: now })
+      expect(next).toBeGreaterThan(now)
+    }
+  })
+
   it('leaves a rung that already falls outside the window untouched', () => {
     // Deferral is the identity outside the window, so the ordinary daytime ladder is unaffected.
     for (const nagCount of [1, 2, 3, 4]) {

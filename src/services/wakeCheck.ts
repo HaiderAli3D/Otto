@@ -44,6 +44,28 @@ export type WakePayload = { round: number; startedAt: number }
 export function scheduleWakeCheck(alarmId: string, device: Device, dismissedAtMillis: number): boolean {
   const alarm = getAlarm(alarmId)
   if (!alarm || !alarm.wakeCheck) return false
+
+  // At-least-once guard, keyed on the DISMISSAL rather than on the alarm.
+  //
+  // `recordEvent` refuses to re-apply side effects for a report it has already seen, but this hook
+  // hangs off the device route OUTSIDE that guard. So when the app's outbox retries a DISMISSED it
+  // never got a 204 for — same alarmId, same atMillis — we used to land here again mid-ladder,
+  // delete the live chain and re-anchor round 0 at an instant already minutes in the past, which
+  // the next tick fires immediately: "You up?" a second time, all three rounds re-walked, and a
+  // second backup alarm armed.
+  //
+  // Latching on (alarm, WAKE_CHECK_STARTED, dismissedAt) is one guarded INSERT against the
+  // alarm_events dedupe index, and it OUTLIVES the ladder — a replay arriving after the chain has
+  // already escalated and deleted its job is a no-op too, which a "is there a live job?" check
+  // could not see. A genuinely new dismissal of the same alarm carries a different instant, so it
+  // still claims the latch and still replaces the chain below.
+  //
+  // `signals` counts alarm_events by exact event string, so this row is invisible to the record.
+  if (!recordServerEvent(device.deviceId, alarmId, 'WAKE_CHECK_STARTED', dismissedAtMillis)) {
+    log.debug({ alarmId, dismissedAtMillis }, 'wake-check already started for this dismissal; ignoring the re-delivery')
+    return false
+  }
+
   // Replace any ladder already running for this alarm rather than forking a second one — a
   // re-delivered DISMISSED must not double the messages.
   cancelJobs('wake_check', alarmId)
@@ -92,7 +114,10 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
   // Going straight there when the window is shut is deliberate — three undeliverable messages
   // followed by a ring half an hour later is strictly worse than the ring at twelve minutes.
   if (round >= MAX_WAKE_ROUNDS || !waUserId || !windowOpen(device)) {
-    await escalate(device, job.alarmId, label)
+    // `round` doubles as "how many rounds actually went out": it is advanced immediately before
+    // each send, and only after the window check below. escalate needs that to tell an unanswered
+    // check apart from one that was never asked.
+    await escalate(device, job.alarmId, label, round)
     return null
   }
 
@@ -119,8 +144,19 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
  *
  * The backup alarm carries `wakeCheck: false`, and that is LOAD-BEARING: it will be dismissed too,
  * and a wake-check on it would start a second ladder, which would arm a third alarm, forever.
+ *
+ * `roundsDelivered` decides WHICH row goes on the record, and the distinction is not cosmetic.
+ * `WAKE_CHECK_FAILED` is read back to the owner as evidence — `signals.renderRecord` renders it as
+ * "dismissed and went back to sleep N×" in the conversational prompt, and the weekly review says
+ * "N dismissed then back to sleep". Round 0 escalates straight to the ringer when the 24h window is
+ * shut or no number is linked, and in that case not one message was ever sent: the owner who got up
+ * perfectly normally would be accused, on the permanent record, of sleeping through a question
+ * nobody asked them. The persona forbids exactly that ("the numbers below are the whole of your
+ * evidence"). The RING is still right — a shut window is not a reason to leave someone asleep — so
+ * only the row changes. A distinct kind keeps the audit trail while staying invisible to both
+ * surfaces, which count by exact event string.
  */
-async function escalate(device: Device, alarmId: string, label: string): Promise<void> {
+async function escalate(device: Device, alarmId: string, label: string, roundsDelivered: number): Promise<void> {
   const now = Date.now()
   const backupAlarmId = newAlarmId()
   await armAlarm(device, {
@@ -130,6 +166,10 @@ async function escalate(device: Device, alarmId: string, label: string): Promise
     recurrence: null,
     wakeCheck: false,
   })
-  recordServerEvent(device.deviceId, alarmId, 'WAKE_CHECK_FAILED', now)
-  log.warn({ alarmId, backupAlarmId }, 'wake-check went unanswered; ringing a backup alarm')
+  const asked = roundsDelivered > 0
+  recordServerEvent(device.deviceId, alarmId, asked ? 'WAKE_CHECK_FAILED' : 'WAKE_CHECK_UNREACHABLE', now)
+  log.warn(
+    { alarmId, backupAlarmId, roundsDelivered },
+    asked ? 'wake-check went unanswered; ringing a backup alarm' : 'wake-check could not be sent at all; ringing a backup alarm',
+  )
 }

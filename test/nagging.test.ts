@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../src/fcm/sender.js', () => ({
   sendData: vi.fn(async () => ({ ok: true as const })),
@@ -162,6 +162,50 @@ describe('runNudge inside quiet hours', () => {
 
     expect(sends).toHaveLength(1)
     expect(getReminder(r.reminderId)!.nagCount).toBe(1)
+  })
+})
+
+describe('runNudge across a quiet window that swallows several rungs', () => {
+  // Only Date is faked: the ladder is a sequence of INSTANTS, and every await in this path resolves
+  // on a microtask (sendText is mocked), so faking timers as well would buy nothing and could stall
+  // the outbox flush.
+  beforeEach(() => vi.useFakeTimers({ toFake: ['Date'] }))
+  afterEach(() => vi.useRealTimers())
+
+  const utc = (iso: string): number => DateTime.fromISO(iso, { zone: 'UTC' }).toMillis()
+
+  it('chases once at the window end, not three times in thirty seconds', async () => {
+    // THE failure this whole fix is about. A persistent reminder due 23:00 has rungs at 23:30,
+    // 01:00 and 05:00 — all three inside 22:00–07:00, all three deferred to the same 07:00. Every
+    // rung has its own dedupe key, so nothing downstream catches it: the owner is chased three
+    // times in the time it takes the scheduler to tick twice, having had no chance to reply to the
+    // first, and rungs 2 and 3 are burned for nothing.
+    vi.setSystemTime(utc('2026-08-03T22:55:00'))
+    const device = reachableDevice('dev_ng7')
+    updateSettings(device.deviceId, { quietHours: '22:00-07:00' })
+    const due = utc('2026-08-03T23:00:00')
+    const r = await createReminder(device, { title: 'take the pills', dueAtMillis: due, nagPolicy: 'persistent' })
+    // Rung 0 is the owner's own due time, so it fires inside the window by design.
+    expect(getReminder(r.reminderId)!.nextNagAtMillis).toBe(due)
+
+    vi.setSystemTime(due)
+    await runNudge(r.reminderId)
+    expect(sends).toHaveLength(1)
+    const windowEnd = getReminder(r.reminderId)!.nextNagAtMillis!
+    expect(windowEnd).toBe(utc('2026-08-04T07:00:00'))
+    sends.length = 0
+
+    // Now run the scheduler as it actually runs: every 15s, fire whatever is due.
+    for (const tick of [0, 15_000, 30_000, 45_000, 60_000].map((d) => windowEnd + d)) {
+      vi.setSystemTime(tick)
+      const rung = getReminder(r.reminderId)!.nextNagAtMillis
+      if (rung !== null && rung <= tick) await runNudge(r.reminderId)
+    }
+
+    expect(sends).toHaveLength(1)
+    expect(getReminder(r.reminderId)!.nagCount).toBe(2)
+    // And the rung after it is a real gap away, not on the same instant.
+    expect(getReminder(r.reminderId)!.nextNagAtMillis).toBe(utc('2026-08-04T07:30:00'))
   })
 })
 
