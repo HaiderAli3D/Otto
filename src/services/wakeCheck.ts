@@ -141,10 +141,16 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
   const device = getDevice(job.deviceId)
   if (!device) return null
 
-  // Re-checked here as well as at the cancel hook: an inbound that lands mid-tick would otherwise
+  // Re-checked here as well as at the cancel hook: activity that lands mid-tick would otherwise
   // race the delete and get one more "you up?" after they already answered.
-  if (device.lastInboundAt !== null && device.lastInboundAt >= startedAt) {
-    log.info({ alarmId: job.alarmId, round }, 'wake-check answered by an inbound; standing down')
+  //
+  // Keyed on lastActivityAt rather than lastInboundAt, because the question this ladder asks is
+  // "are you awake?" and a "Done" tapped on a notification answers it exactly as well as a reply.
+  // (`markInbound` stamps both, so a genuine reply still stands it down.) Using the inbound column
+  // would mean the owner clearing a nudge from the lockscreen and then being asked, twice, whether
+  // they were up.
+  if (device.lastActivityAt !== null && device.lastActivityAt >= startedAt) {
+    log.info({ alarmId: job.alarmId, round }, 'wake-check answered by owner activity; standing down')
     return null
   }
 

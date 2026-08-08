@@ -31,7 +31,7 @@ export function wakeCheckAt(round: number, fromMillis: number): number {
  * What to send on each round.
  *
  * Deterministic rather than LLM-written, for exactly the reasons `nudgeText` is: one sentence with
- * one variable, seen dozens of times, and it has to work at 06:30 on a machine with no Anthropic
+ * one variable, seen dozens of times, and it has to work at 06:30 on a machine with no model
  * key. Latency matters more here than anywhere else — a 15s round trip is a big fraction of the
  * whole window in which the answer is still meaningful.
  */

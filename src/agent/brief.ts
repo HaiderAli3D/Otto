@@ -66,9 +66,9 @@ export type BriefInput = {
 /**
  * The brief with no model at all: at most three lines, mechanical, no adjectives, no judgement.
  *
- * Exported because it is the contract, not an implementation detail. There is no ANTHROPIC_API_KEY
+ * Exported because it is the contract, not an implementation detail. There is no OPENAI_API_KEY
  * in the test environment, so this is what the whole feature actually delivers under test — and on
- * any morning the Anthropic API is unreachable. A brief that reads like a timetable is worth having;
+ * any morning the model API is unreachable. A brief that reads like a timetable is worth having;
  * a 07:00 brief that fails to arrive is not.
  */
 export function briefFallback(input: BriefInput): string {

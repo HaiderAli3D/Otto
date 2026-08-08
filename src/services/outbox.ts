@@ -6,6 +6,7 @@ import { log } from '../lib/log.js'
 import { inQuietHours, type QuietHours } from '../lib/quietHours.js'
 import { budgetAllows } from './budget.js'
 import { clearInboundWindow, getDevice, listDevices, markTemplateSent, type Device } from './devices.js'
+import { pushOutboxRow } from './push.js'
 import { appendAssistantTurns } from './sessions.js'
 import { quietHoursFor } from './settings.js'
 import { sendTemplate, sendText, type SendResult } from './whatsapp.js'
@@ -326,14 +327,37 @@ export async function flushOutbox(
     }
 
     if (res.ok) {
-      db.update(outbox).set({ state: 'SENT', sentAtMillis: Date.now() }).where(eq(outbox.id, row.id)).run()
+      db.update(outbox)
+        .set({ state: 'SENT', sentAtMillis: Date.now(), deliveredVia: 'whatsapp' })
+        .where(eq(outbox.id, row.id))
+        .run()
       delivered.push(row.body)
       continue
     }
     if (res.outOfWindow) {
       if (deviceId) clearInboundWindow(deviceId)
+
+      // A shut window is no longer a wall. Meta permits free-form text only inside 24 hours of the
+      // owner's last inbound, and with no approved template configured `shouldKnock` can never fire
+      // either — so before the phone could take notifications, everything here simply queued until
+      // it expired. A push has no window, costs nothing, and carries the real text.
+      //
+      // Attempted on the CLAIMED row, so the two transports can never both deliver it: whichever
+      // succeeds marks it SENT, and if push fails too the row goes back exactly where it was.
+      const device = deviceId ? getDevice(deviceId) : null
+      if (device && (await pushOutboxRow(device, row, Date.now()))) {
+        db.update(outbox)
+          .set({ state: 'SENT', sentAtMillis: Date.now(), deliveredVia: 'push' })
+          .where(eq(outbox.id, row.id))
+          .run()
+        delivered.push(row.body)
+        // Deliberately NOT `break`. The window being shut said nothing about the phone, and the
+        // whole point is that the rest of the queue can still get through.
+        continue
+      }
+
       db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
-      log.warn({ waUserId, id: row.id }, 'outbox flush hit a shut window; leaving queued')
+      log.warn({ waUserId, id: row.id }, 'outbox flush hit a shut window and the phone is unreachable; leaving queued')
       break // no point trying the rest
     }
     if (res.permanent) {

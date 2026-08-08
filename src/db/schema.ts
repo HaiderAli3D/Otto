@@ -15,6 +15,11 @@ export const devices = sqliteTable('devices', {
   // WhatsApp's 24h customer-service window clock. Stamped on EVERY inbound (including voice
   // notes). Proactive free-form sends are only legal while this is recent — see services/outbox.
   lastInboundAt: integer('last_inbound_at'),
+  // The owner did SOMETHING — replied, or pressed a button on a notification. Deliberately not the
+  // same column as lastInboundAt: that one is a Meta transport fact (the 24h free-form window,
+  // which only an inbound message reopens), while this one answers "are they awake and engaging?".
+  // A "Done" tapped on the lockscreen answers the second and not the first.
+  lastActivityAt: integer('last_activity_at'),
   // Day-boundary marker (device timezone) for the once-a-day backlog digest.
   lastDigestAt: integer('last_digest_at'),
   // Last time a paid template message was sent to prise the 24h window back open. A transport fact
@@ -111,11 +116,11 @@ export const alarmEvents = sqliteTable(
   }),
 )
 
-/** Per-WhatsApp-user conversation state for the Claude agent. */
+/** Per-WhatsApp-user conversation state for the agent. */
 export const sessions = sqliteTable('sessions', {
   waUserId: text('wa_user_id').primaryKey(),
   deviceId: text('device_id'),
-  messages: text('messages').notNull().default('[]'), // JSON array of Anthropic message params
+  messages: text('messages').notNull().default('[]'), // JSON array of OpenAI Responses API input items
   // Consecutive non-transient agent failures. Drives graduated session repair (trim, then clear)
   // instead of nuking a whole conversation on one bad turn.
   failCount: integer('fail_count').notNull().default(0),
@@ -265,6 +270,11 @@ export const outbox = sqliteTable(
     lastError: text('last_error'),
     createdAt: integer('created_at').notNull(),
     sentAtMillis: integer('sent_at_millis'),
+    // Which transport actually carried it: 'whatsapp' | 'push' | null (never delivered). The outbox
+    // is the ledger for both, so without this it could say what Otto said and when but not where it
+    // landed — and "did that reach their phone or their chat?" is exactly the question a two-channel
+    // system has to be able to answer.
+    deliveredVia: text('delivered_via'),
   },
   (t) => ({ pending: index('outbox_pending').on(t.waUserId, t.state, t.createdAt) }),
 )

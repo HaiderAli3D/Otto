@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Otto server — turns WhatsApp messages into device alarm pushes via a Claude agent + FCM.",
+  "description": "Otto server — turns WhatsApp messages into device alarm pushes via an OpenAI agent + FCM.",
   "engines": {
     "node": ">=20"
   },
@@ -15,7 +15,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
     "better-sqlite3": "^11.8.0",
     "drizzle-orm": "^0.38.3",
     "fastify": "^5.2.1",

@@ -17,6 +17,7 @@ import {
 import { armAlarm, cancelAlarm } from './alarms.js'
 import type { Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
+import { withdrawNudge } from './push.js'
 import { nextOccurrence } from './recurrence.js'
 import { nagQuietHours, schedulingRoutine } from './settings.js'
 
@@ -206,6 +207,10 @@ export async function completeReminder(
 
   await releaseAlarm(device, r)
   cancelNudges(reminderId)
+  // Clear it from the phone too. A notification still asking about something they have just told
+  // Otto they did is exactly what teaches an owner to ignore the channel. Fire-and-forget: a
+  // completion must not wait on FCM, and the app expires an un-withdrawn nudge on its own.
+  void withdrawNudge(device, reminderId)
 
   const next =
     r.recurrence && r.dueAtMillis !== null
@@ -266,6 +271,7 @@ export async function cancelReminder(device: Device, reminderId: string): Promis
   if (!r || r.state === 'CANCELLED') return false
   await releaseAlarm(device, r)
   cancelNudges(reminderId)
+  void withdrawNudge(device, reminderId)
   db.update(reminders)
     .set({ state: 'CANCELLED', nextNagAtMillis: null, recurrence: null, alarmId: null, updatedAt: Date.now() })
     .where(eq(reminders.reminderId, reminderId))

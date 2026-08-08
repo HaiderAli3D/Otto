@@ -1,7 +1,7 @@
 # Otto server
 
 The **server half of Otto**, a personal WhatsApp-based AI scheduling agent. This service
-receives WhatsApp messages, runs a Claude agent to understand them, and pushes **FCM data
+receives WhatsApp messages, runs an OpenAI agent to understand them, and pushes **FCM data
 messages** to the Otto Android app, which arms a **real device alarm** that rings even when
 the phone is backgrounded, in Doze, or locked.
 
@@ -11,7 +11,7 @@ the phone is backgrounded, in Doze, or locked.
 ## Architecture (one line)
 
 ```
-WhatsApp  →  this server (Claude agent)  →  FCM  →  phone rings a real alarm
+WhatsApp  →  this server (OpenAI agent)  →  FCM  →  phone rings a real alarm
 ```
 
 Single-user by design (one owner, their phone), but everything is keyed by `deviceId` so more
@@ -44,7 +44,7 @@ Requires **Node 20+**.
 npm install
 cp .env.example .env         # then edit .env
 # Minimum to prove the pipe: fill FIREBASE_SERVICE_ACCOUNT (required).
-# Add ANTHROPIC_API_KEY to enable the Claude agent.
+# Add OPENAI_API_KEY to enable the agent.
 npm run dev                  # tsx watch — reloads on change
 ```
 
@@ -59,6 +59,6 @@ npm test        # vitest run
 ## Deploy & connect your phone
 
 See **[SETUP.md](./SETUP.md)** — a numbered, turnkey walkthrough that takes a solo owner from
-zero to "message Otto on WhatsApp and my phone rings". It covers Firebase, Anthropic, getting a
+zero to "message Otto on WhatsApp and my phone rings". It covers Firebase, OpenAI, getting a
 public HTTPS origin (Fly.io / VPS+Caddy / Cloudflare tunnel), pairing the phone, and the Meta
 WhatsApp + Google Calendar setup.

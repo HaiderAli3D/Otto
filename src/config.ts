@@ -84,11 +84,6 @@ const raw = z
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().default('gpt-5.6-luna'),
 
-    // Superseded by OPENAI_* above; read only so a stale .env cannot fail the boot. Removed once
-    // the migration lands.
-    ANTHROPIC_API_KEY: z.string().optional(),
-    ANTHROPIC_MODEL: z.string().default('claude-sonnet-5'),
-
     // WhatsApp Cloud API (optional — enables the inbound webhook + replies).
     META_APP_SECRET: z.string().optional(),
     META_VERIFY_TOKEN: z.string().optional(),
@@ -179,9 +174,6 @@ export const config = {
   adminToken: raw.ADMIN_TOKEN ?? null,
   firebase: { serviceAccount, projectId: serviceAccount.project_id },
   openai: raw.OPENAI_API_KEY ? { apiKey: raw.OPENAI_API_KEY, model: raw.OPENAI_MODEL } : null,
-  anthropic: raw.ANTHROPIC_API_KEY
-    ? { apiKey: raw.ANTHROPIC_API_KEY, model: raw.ANTHROPIC_MODEL }
-    : null,
   meta: metaComplete
     ? {
         appSecret: raw.META_APP_SECRET!,

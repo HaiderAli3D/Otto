@@ -32,7 +32,7 @@ export const REVIEW_SYSTEM = [
 /**
  * The review as a plain string of facts.
  *
- * This is what actually ships whenever there is no Anthropic key, the request times out, or the
+ * This is what actually ships whenever there is no API key, the request times out, or the
  * completion comes back empty — and it is what every test exercises, since `config.openai` is
  * null under vitest. It has to read as a real message on its own, not as a degraded one.
  */

@@ -19,6 +19,12 @@ export const log = pino({
       '*.hmacSecret',
       'sig',
       '*.sig',
+      // Latent today — nothing logs the config object. Listed anyway because a provider migration
+      // is exactly the moment somebody adds `log.info({ config }, 'boot')` to debug a bad key.
+      'apiKey',
+      '*.apiKey',
+      'api_key',
+      '*.api_key',
       'req.headers.authorization',
       'req.headers["x-hub-signature-256"]',
       'req.headers["x-otto-sig"]',

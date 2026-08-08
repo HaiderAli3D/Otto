@@ -159,6 +159,7 @@ export function ensureSchema(): void {
   // never alters an existing table). Idempotent: guarded by PRAGMA table_info.
   ensureColumn('devices', 'auth_latched', 'auth_latched INTEGER NOT NULL DEFAULT 0')
   ensureColumn('devices', 'last_inbound_at', 'last_inbound_at INTEGER')
+  ensureColumn('devices', 'last_activity_at', 'last_activity_at INTEGER')
   ensureColumn('devices', 'last_digest_at', 'last_digest_at INTEGER')
   ensureColumn('devices', 'last_template_at', 'last_template_at INTEGER')
   ensureColumn('sessions', 'fail_count', 'fail_count INTEGER NOT NULL DEFAULT 0')
@@ -190,6 +191,7 @@ export function ensureSchema(): void {
   ensureColumn('device_settings', 'auto_leave_by_alarm', 'auto_leave_by_alarm INTEGER NOT NULL DEFAULT 0')
   ensureColumn('device_settings', 'default_travel_minutes', 'default_travel_minutes INTEGER NOT NULL DEFAULT 30')
   ensureColumn('device_settings', 'get_ready_minutes', 'get_ready_minutes INTEGER NOT NULL DEFAULT 45')
+  ensureColumn('outbox', 'delivered_via', 'delivered_via TEXT')
   ensureColumn('device_settings', 'bed_window', 'bed_window TEXT')
   ensureColumn('device_settings', 'wake_window', 'wake_window TEXT')
   ensureColumn('device_settings', 'daily_message_budget', 'daily_message_budget INTEGER NOT NULL DEFAULT 60')

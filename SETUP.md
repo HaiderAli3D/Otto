@@ -60,18 +60,26 @@ Docs: [Add the Firebase Admin SDK to your server](https://firebase.google.com/do
 
 ---
 
-## 3. Anthropic (Claude agent) — optional but needed for the "AI" part
+## 3. OpenAI (the agent) — optional but needed for the "AI" part
 
 Only required once you want to talk to Otto in natural language (§8). The REST endpoints and FCM
 pushes work without it.
 
-1. Go to the [Anthropic Console](https://console.anthropic.com/) → **API Keys** → create a key.
+1. Go to the [OpenAI platform](https://platform.openai.com/api-keys) → **API keys** → create a key.
 2. In `.env`:
 
    ```dotenv
-   ANTHROPIC_API_KEY=sk-ant-...
-   # ANTHROPIC_MODEL defaults to claude-opus-4-8 — leave unless you want another model.
+   OPENAI_API_KEY=sk-...
+   # OPENAI_MODEL defaults to gpt-5.6-luna — leave unless you want another model.
    ```
+
+> **Not the same key as `STT_API_KEY`.** That one (§ voice notes) points at an OpenAI-*compatible*
+> Groq endpoint and takes a Groq key. Swapping the two fails as a quiet 401 on a path that degrades
+> to templates without an alert.
+
+`gpt-5.6-luna` is the cost tier — roughly $0.20 per million input tokens against Claude Sonnet 5's
+$3. If Otto starts picking the wrong tool, set `OPENAI_MODEL=gpt-5.6-terra` and redeploy; no code
+change is needed.
 
 ---
 
@@ -91,7 +99,7 @@ fly launch --no-deploy                       # creates the app; accept or rename
 fly volumes create otto_data --size 1        # persistent disk for the SQLite file at /data
 fly secrets set \
   FIREBASE_SERVICE_ACCOUNT="$(cat service-account.json)" \
-  ANTHROPIC_API_KEY=sk-ant-... \
+  OPENAI_API_KEY=sk-... \
   ADMIN_TOKEN=$(openssl rand -hex 24) \
   PUBLIC_ORIGIN=https://<your-app>.fly.dev
 fly deploy
@@ -261,7 +269,7 @@ approved). For example:
 
 > "remind me to call mum at 6pm tomorrow"
 
-Otto (the Claude agent) parses it, arms a **real alarm** on your phone via FCM, and at 6pm the
+Otto (the agent) parses it, arms a **real alarm** on your phone via FCM, and at 6pm the
 phone rings. Try "cancel that" or "what alarms do I have?" too.
 
 Repeating alarms work as well — "wake me every weekday at 7", "every day at 22:00 remind me to
@@ -377,7 +385,7 @@ secret (cleared data / unpaired). Re-pair per §6 — see §10 Hardening.
 - No inbound messages → confirm you **subscribed to the `messages` field** (§7 step 5).
 - `401` on inbound → `META_APP_SECRET` is wrong; Meta signs each POST with `X-Hub-Signature-256`
   and the server rejects a bad signature.
-- No AI reply → is `ANTHROPIC_API_KEY` set? Check the boot log's `features.agent`.
+- No AI reply → is `OPENAI_API_KEY` set? Check the boot log's `features.agent` and `model`.
 
 **General:** raise detail with `LOG_LEVEL=debug`. On Fly, `fly logs`; on Docker, `docker logs otto`.
 
@@ -391,7 +399,7 @@ See [`.env.example`](./.env.example) for the full annotated list. Quick summary:
 | --- | --- | --- |
 | Core | `PORT`, `PUBLIC_ORIGIN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `LOG_LEVEL` | Optional (have defaults) |
 | Firebase | `FIREBASE_SERVICE_ACCOUNT` | **Required** |
-| Claude | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Optional — enables the agent |
+| OpenAI | `OPENAI_API_KEY`, `OPENAI_MODEL` | Optional — enables the agent |
 | WhatsApp | `META_APP_SECRET`, `META_VERIFY_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_ACCESS_TOKEN` | Optional — set **all four** |
 | WhatsApp owner | `OWNER_WA_NUMBERS` | Optional but **recommended** — allowlist of your numbers |
 | Google | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Optional — set **both** |

@@ -179,7 +179,7 @@ describe('delivery', () => {
 
   it('writes the deterministic fallback byte-for-byte when there is no model', async () => {
     // config.openai is null in every test, so this IS what the feature delivers under test — and
-    // on any morning the Anthropic API is unreachable.
+    // on any morning the model API is unreachable.
     const device = owner('dev_b8', '447700900008')
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
 
