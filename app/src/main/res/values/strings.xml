@@ -1,11 +1,60 @@
 <resources>
     <string name="app_name">Otto</string>
 
-    <!-- Ring -->
+    <!--
+      Ring. Read half-asleep, in the dark, under time pressure — so: few words and no punctuation
+      to parse. The two buttons are deliberately worded as things the OWNER says rather than as
+      commands Otto gives, because that is the choice actually being made at 6am.
+    -->
     <string name="alarm_channel_name">Alarms</string>
     <string name="alarm_channel_description">A ringing Otto alarm</string>
-    <string name="ring_notification_title">Otto alarm</string>
-    <string name="ring_default_label">Alarm</string>
-    <string name="ring_dismiss">Dismiss</string>
-    <string name="ring_snooze">Snooze 9 min</string>
+    <string name="ring_notification_title">Up. Now.</string>
+    <string name="ring_default_label">You asked for this</string>
+    <string name="ring_dismiss">I\'m up</string>
+    <string name="ring_snooze">9 more minutes</string>
+
+    <!--
+      Nudge channels. These names and descriptions are what the owner reads in Android's own
+      settings when they go looking for the thing that keeps buzzing, so each one says plainly what
+      it is FOR and what it will do. Written for someone mildly annoyed: the goal is that they turn
+      down the right channel instead of turning off the app.
+    -->
+    <string name="nudge_group_name">Reminders</string>
+    <string name="nudge_urgent_channel_name">Urgent nudges</string>
+    <string name="nudge_urgent_channel_description">Things Otto thinks can\'t wait. Makes a sound and appears over whatever you\'re doing. Not an alarm — it won\'t ring or take over the screen.</string>
+    <string name="nudge_channel_name">Nudges</string>
+    <string name="nudge_channel_description">Ordinary reminders and follow-ups. Makes a sound and waits in your notifications.</string>
+    <string name="nudge_quiet_channel_name">Quiet notes</string>
+    <string name="nudge_quiet_channel_description">Confirmations and things Otto wants you to see eventually. Never makes a sound.</string>
+    <string name="nudge_status_channel_name">Otto status</string>
+    <string name="nudge_status_channel_description">The single always-on line showing what\'s still open. Silent. Turn this off without silencing anything else.</string>
+
+    <!--
+      Nudge actions. Worded as things the OWNER says, for the same reason the ring buttons are:
+      these are read on a lockscreen mid-something-else and the choice is theirs, not Otto's.
+    -->
+    <string name="nudge_action_done">Done</string>
+    <string name="nudge_action_snooze">%1$d min</string>
+    <string name="nudge_action_snooze_hours">%1$d hr</string>
+    <string name="nudge_action_later">Not today</string>
+    <string name="nudge_action_open">Open</string>
+
+    <!-- The persistent summary. Deliberately a count and nothing else — it is ambient, not a list. -->
+    <plurals name="nudge_summary_title">
+        <item quantity="one">%1$d thing open</item>
+        <item quantity="other">%1$d things open</item>
+    </plurals>
+
+    <!-- Quick-settings tile. Roughly twelve characters survive before truncation. -->
+    <string name="tile_no_alarm">Otto · nothing</string>
+    <string name="tile_next_alarm">Otto · %1$s</string>
+    <string name="tile_open_count">Otto · %1$d open</string>
+
+    <!--
+      Control panel. Kept light on purpose: the buttons here are controls, not conversation, and
+      the same reasoning that keeps Otto's error messages plain applies to anything the owner
+      reaches for when something has gone wrong.
+    -->
+    <string name="panel_title">Otto</string>
+    <string name="panel_no_alarms">Nothing armed.</string>
 </resources>

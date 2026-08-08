@@ -16,6 +16,11 @@ datastore = "1.2.1"
 # Firebase
 firebaseBom = "34.15.0"
 googleServices = "4.5.0"
+# REQUIRED, not optional. The plugin injects a build-ID resource that
+# CrashlyticsCore.onPreExecute() asserts on at startup. Without it Firebase's
+# init provider throws IllegalStateException and the app dies before any Otto
+# code runs. (Uploading the R8 mapping file is a *second* thing it does.)
+firebaseCrashlyticsPlugin = "3.0.7"
 
 # DI / background
 hilt = "2.60"                 # Dagger Hilt
@@ -89,3 +94,4 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }
+firebase-crashlytics = { id = "com.google.firebase.crashlytics", version.ref = "firebaseCrashlyticsPlugin" }

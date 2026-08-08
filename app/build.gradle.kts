@@ -28,6 +28,7 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
     alias(libs.plugins.google.services)
+    alias(libs.plugins.firebase.crashlytics)
 }
 
 android {
@@ -38,8 +39,12 @@ android {
         applicationId = "com.otto.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        // 1.1.0 is the first build that understands NUDGE / CANCEL_NUDGE. The server gates push
+        // delivery on this exact number (otto-server `src/services/push.ts` MIN_NUDGE_APP_VERSION),
+        // because an older build drops an unknown type SILENTLY — the server would record a
+        // delivered message the owner never saw. Bump both sides together or not at all.
+        versionCode = 2
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -129,9 +134,12 @@ dependencies {
     // Firebase Cloud Messaging (versions pinned by the BOM).
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
-    // Crashlytics (M5): crash + non-fatal reporting. No Gradle plugin is needed while R8/minify
-    // is off (the plugin only uploads the R8 mapping file, and there is none). OttoLog forwards
-    // warn/error here; auto-init reads app/google-services.json.
+    // Crashlytics (M5): crash + non-fatal reporting. OttoLog forwards warn/error here; auto-init
+    // reads app/google-services.json. The Crashlytics Gradle plugin above is REQUIRED even with
+    // R8/minify off: besides uploading the mapping file it injects a build-ID resource that
+    // CrashlyticsCore.onPreExecute() asserts on. Without the plugin, Firebase's init provider
+    // throws IllegalStateException and the app crashes on launch before any Otto code runs
+    // (observed on-device 2026-08-02).
     implementation(libs.firebase.crashlytics)
 
     // Hilt — note TWO compilers on ksp: Dagger's, plus androidx's (generates HiltWorkerFactory)

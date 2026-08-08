@@ -24,6 +24,23 @@ force-stop recovery, warning card); M5 polish (settings/pairing screen, self-hea
 `NextAlarmTileService` quick-settings tile, structured `OttoLog`). A Node FCM test-push helper
 lives in `tools/send-push/`; device-only checks are scripted in `docs/manual-testing.md`.
 
+**M6 — the nudge tier (`feat/nudge-tier`, 99 unit tests, `assembleDebug` green).** The app could
+previously do exactly one thing: ring at full volume, bypass DND and take the lockscreen. So
+"chase me about this" and "wake me up" were the same request, and the server's only alternative
+was a WhatsApp message capped by Meta's 24h reply window. M6 adds a graded notification tier
+(three nudge channels plus an ongoing "N things open" summary), `NUDGE`/`CANCEL_NUDGE` FCM types,
+Done/Snooze buttons that work **from the lockscreen without unlocking**, a `device_events` outbox
+reporting them back, a local snooze re-show that works offline, and a standing periodic heartbeat
+(there was none) carrying whether the owner has muted Otto. Room is at **v3**
+(`MIGRATION_2_3`, schema `3.json`). See "Notification channels" below and the M6 section of
+`docs/manual-testing.md`.
+
+⚠️ **`connectedAndroidTest` must pass before installing over an existing build.** There is no
+`fallbackToDestructiveMigration`, so a migration whose DDL does not reproduce the generated schema
+byte for byte throws at first open — and on this app that means the owner's alarms stop working.
+Never hand-write migration DDL: bump the version, build once so KSP exports the schema JSON, then
+copy its `createSql` verbatim.
+
 **Track-1 correctness hardening (merged to `main`) — 6 fixes done, build
 green:** (1) SYNC is fail-safe — the pure `net/SyncReconciler.kt` never cancels
 alarms on an empty/errored response; (2) a new append-only `alarm_events` outbox (`ReportWorker`
@@ -34,7 +51,7 @@ exported to `app/schemas/`; `AlarmScheduler.cancel(Int)`); (5) stuck-RANG → MI
 gated on `RingService.isActive()` so a live ring is never mis-flagged; (6) HMAC fails closed once
 paired via `push/HmacGate.kt` + a persisted `hasEverPaired` latch. A `core/ReportTrigger` seam
 keeps `AlarmRepository` off WorkManager (JVM-testable). This is Track 1 of a two-track effort;
-Track 2 builds a separate Node/TS **Otto server** (WhatsApp + Claude agent + FCM sender +
+Track 2 builds a separate Node/TS **Otto server** (WhatsApp + AI agent + FCM sender +
 register/report/sync/heartbeat endpoints) — see the approved plan referenced in session notes.
 
 **Release-ready:** `signingConfigs.release` reads a gitignored `keystore.properties` (falls back to
@@ -42,15 +59,29 @@ the debug key so `assembleRelease` still builds); release `SERVER_BASE_URL` is c
 `otto.serverBaseUrl` in `local.properties`/`-P`; `usesCleartextTraffic="false"`; the Settings URL
 override is HTTPS-only; `versionName = 1.0.0`. Both `assembleDebug` and `assembleRelease` are green.
 The **Otto server** now exists as a sibling repo at `../otto-server` (Node/TS, SQLite, Fastify) — its
-`SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/Anthropic/Google/hosting/pairing).
-Still deferred: Crashlytics (needs `dl.google.com` + console) and R8 minify.
+`SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/OpenAI/Google/hosting/pairing). As of
+2026-08-08 the server's agent runs on the **OpenAI Responses API** with `gpt-5.6-luna`
+(`OPENAI_API_KEY` / `OPENAI_MODEL`); it was previously Anthropic Claude Sonnet 5.
+Still deferred: R8 minify. (Crashlytics is no longer deferred — see below.)
 
-**Crashlytics — now enabled.** `implementation(libs.firebase.crashlytics)` is active in
-`app/build.gradle.kts` and `OttoLog.w/e` forward breadcrumbs/non-fatals to
-`FirebaseCrashlytics.getInstance()` (lazily resolved, `runCatching`-guarded so a missing/unconfigured
-SDK can never crash the app). No Gradle plugin is used (none is needed while R8/minify is off — the
-plugin only uploads the R8 mapping file). Actual crash upload should be confirmed once on a real
-device against the Firebase console. See `spec.md` §13.
+**Crashlytics — enabled, and the Gradle plugin is MANDATORY.** `implementation(libs.firebase.crashlytics)`
+is active in `app/build.gradle.kts`, alongside `alias(libs.plugins.firebase.crashlytics)`
+(`com.google.firebase.crashlytics` 3.0.7, catalog key `firebaseCrashlyticsPlugin`; verified compatible
+with AGP 9.2.1). `OttoLog.w/e` forward breadcrumbs/non-fatals to `FirebaseCrashlytics.getInstance()`.
+
+⚠️ **Do not remove that plugin, and do not re-derive that it's optional under R8-off.** An earlier
+revision of this file claimed "no Gradle plugin is needed while R8/minify is off — the plugin only
+uploads the R8 mapping file." **That is false and it shipped a 100%-reproducible launch crash.** The
+plugin *also* injects a build-ID resource that `CrashlyticsCore.onPreExecute()` hard-asserts on; without
+it, `FirebaseInitProvider` throws
+`IllegalStateException: The Crashlytics build ID is missing` during application bind, killing the
+process before `OttoApp` or any Otto code runs (observed on-device 2026-08-02, Samsung SM-XXXXX /
+Android 16). Two things hid it: it needs a real `app/google-services.json` to reach Firebase init, so
+it is structurally unreachable headlessly (all 67 unit tests pass regardless); and `OttoLog`'s
+`runCatching` guard only wraps Otto's *own* calls into Crashlytics — it cannot protect auto-init, which
+runs earlier and outside that guard.
+
+Actual crash *upload* to the Firebase console is still unconfirmed. See `spec.md` §13.
 
 ## Stack (do not substitute — see `spec.md` §4)
 
@@ -68,7 +99,8 @@ These were settled at kickoff. Change them only with a clear reason.
 - **applicationId / namespace = `com.otto.app`.** The Firebase Android app MUST be
   registered with this exact package name so `google-services.json` matches.
 - **M1 commands = `ARM_ALARM` + `CANCEL_ALARM`.** The parser recognises the full v1
-  schema and safely logs/ignores other `type`s; `SYNC`/`PING` and HMAC (`sig`) are M2.
+  schema and safely logs/ignores other `type`s; `SYNC`/`PING` and HMAC (`sig`) are M2;
+  `NUDGE`/`CANCEL_NUDGE` are M6 (see the contract section below — six types now).
 - **compileSdk / targetSdk = 36 (Android 16); minSdk = 26.**
 
 ### Platform realities the code depends on (verified mid-2026)
@@ -117,8 +149,11 @@ OttoApp                Application: @HiltAndroidApp + WorkManager Configuration.
 di/                    Hilt modules
 push/                  OttoFcmService, FcmCommand + parser
 alarm/                 AlarmScheduler (iface) + impl, AlarmReceiver
-ring/                  AlarmRinger (iface) + SimpleRinger, RingActivity
-data/                  AlarmEntity, AlarmState, AlarmDao, OttoDatabase, AlarmRepository
+ring/                  AlarmRinger (iface) + SimpleRinger, RingActivity, NotificationChannels
+nudge/                 NudgeController, NudgeNotifications, NudgeScheduler (iface) + impl,
+                       NudgeActionReceiver, NudgeAlarmReceiver, NudgeLevel/Action/Timing
+data/                  AlarmEntity, AlarmState, AlarmDao, OttoDatabase, AlarmRepository,
+                       NudgeEntity, NudgeState, NudgeDao, NudgeRepository, DeviceEventEntity
 data/prefs/            OttoPreferences (DataStore)
 net/                   OttoApi (Retrofit), DTOs, RegistrationWorker
 boot/                  BootReceiver
@@ -130,6 +165,19 @@ core/                  Clock, DispatcherProvider, Logger, constants
 Invariant: **Room is the source of truth.** The scheduler + AlarmManager are derived
 state, rebuildable from Room (boot, app update, recovery). If they disagree, Room wins.
 Everything keyed by `alarmId`; arm/cancel/ring are idempotent.
+
+The nudge path has a narrower version of the same rule: **the phone is authoritative for what is
+on screen right now; the server stays authoritative for what is open.** `nudges` is not a mirror
+of the owner's reminders and must not become one — there is no sync endpoint and no reconciler,
+because the push carries everything a notification needs. Drift is corrected by three mechanisms
+only: a `CANCEL_NUDGE` push, the nudge's own `expiresAtMillis`, and a sweep of terminal rows.
+
+**`nudge/` is deliberately separate from `alarm/`, all the way down.** Its own scheduler
+interface, its own receivers, its own intent actions, its own request-code band. Never widen
+`AlarmScheduler` to serve a nudge — that interface is the alarm path's contract and giving it a
+second caller with different needs is the most likely way to regress the one thing this app must
+never get wrong. `reArmAll()` iterates the `alarms` table only, so nudges are structurally
+invisible to it.
 
 ## Build prerequisites & how to build
 
@@ -158,7 +206,8 @@ Or just open in Android Studio and Run.
 ## FCM command contract (server → app)
 
 Data-only, high priority. All `data` values are strings (FCM constraint). See `spec.md`
-§7 for the full contract.
+§7 for the full contract. **Six types:** `ARM_ALARM`, `CANCEL_ALARM`, `NUDGE`, `CANCEL_NUDGE`,
+`SYNC`, `PING`.
 
 ```json
 { "message": { "token": "<device token>", "android": { "priority": "high" },
@@ -167,8 +216,60 @@ Data-only, high priority. All `data` values are strings (FCM constraint). See `s
             "allowWhileIdle": "true" } } }
 ```
 
-Rules: idempotent on `alarmId`; past times within a grace window (default 60s) still
-fire, older are marked MISSED; unknown fields ignored; unknown `type` logged and dropped.
+`NUDGE` carries `nudgeId`, `title`, `body` (required) plus `level` (`SILENT|NORMAL|URGENT`),
+`actions` (CSV of `DONE,SNOOZE,LATER,OPEN`), `snoozeMinutes`, `expiresAtMillis`, `ongoing`.
+`CANCEL_NUDGE` carries only `nudgeId`. Built server-side by `src/fcm/commands.ts` `nudgeData` /
+`cancelNudgeData`, and pinned end-to-end by `push/ServerPayloadContractTest.kt`, which holds
+payloads the server actually produced — signature included — because nothing at build time checks
+one repo against the other.
+
+Rules: idempotent on `alarmId` / `nudgeId`; past times within a grace window (default 60s) still
+fire, older are marked MISSED; unknown fields ignored; unknown `type` logged, dropped, **and
+reported back** as a `PUSH/REJECTED` device event.
+
+⚠️ **`v` stays `"1"` forever.** The parser drops any payload whose `v` mismatches, so bumping it
+would make every new push invisible to a device that has not updated — the silent failure the
+rejection reporting exists to remove. New `type` values are the extension mechanism.
+
+⚠️ **The HMAC is verified BEFORE the payload is parsed.** That ordering is a security requirement,
+not tidiness: the rejection path emits an authenticated HTTPS request, so parsing first would let
+anyone holding the FCM token use this device as a probing and amplification oracle. Nothing is
+ever reported about a push that failed the gate.
+
+The canonical HMAC form is generic over the whole `data` map (every key except `sig`, sorted), so
+adding fields or types needs **no crypto change on either side**. That genericity is pinned by a
+tampering test rather than assumed.
+
+## Notification channels
+
+| id | importance | used for |
+|---|---|---|
+| `otto_alarm` | HIGH, bypass-DND, silent (the ringer plays audio itself) | a ringing alarm |
+| `otto_nudge_urgent` | HIGH | heads-up chase, sound + vibration — **not** an alarm |
+| `otto_nudge` | DEFAULT | the everyday rung: sound, no peek |
+| `otto_quiet` | LOW | silent but visible: confirmations, FYIs |
+| `otto_status` | LOW, no badge | the ongoing "N things open" summary |
+
+Two platform facts the design depends on, both easy to get wrong:
+
+1. **Channel settings become the user's at creation.** `createNotificationChannel` updates only
+   name/description/group on an existing channel and ignores importance, sound and vibration. So
+   creation is idempotent (call it unconditionally — an early return there once meant new channels
+   were never created on upgrade, which would have shipped the whole tier dead on arrival), and a
+   channel needing different behaviour needs a **new id**.
+2. **`setBypassDnd(true)` is inert without `ACCESS_NOTIFICATION_POLICY`,** which this app does not
+   request. Alarms clear DND because they are `CATEGORY_ALARM` on the alarm stream. Nudges use
+   `CATEGORY_REMINDER`, which the owner can allow through DND from Android's own Priority
+   settings with no app permission. Do not design anything here around bypass working.
+
+**Never post a chase on `otto_alarm`.** It is the one channel that has to survive a mute, and
+`channelIdFor(level)` is an exhaustive `when` over the three nudge levels with a test pinning that
+it can never return the alarm channel.
+
+Nudges schedule their local re-show with `setAndAllowWhileIdle` — never `setAlarmClock` (which
+raises the system alarm icon and hard-wakes Doze) and never `setExactAndAllowWhileIdle` (which
+spends the exact-alarm budget on something that does not need second accuracy). Deep Doze may run
+it ~15 minutes late; that is accepted, not a bug to fix with exact alarms.
 
 ## Conventions
 

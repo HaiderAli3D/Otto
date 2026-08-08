@@ -4,8 +4,10 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.otto.app.alarm.AlarmController
 import com.otto.app.core.OttoLog
+import com.otto.app.data.NudgeRepository
 import com.otto.app.data.prefs.OttoPreferences
 import com.otto.app.data.prefs.SecretStore
+import com.otto.app.nudge.NudgeController
 import com.otto.app.net.HeartbeatWorker
 import com.otto.app.net.RegistrationWorker
 import com.otto.app.net.SyncWorker
@@ -21,26 +23,27 @@ import javax.inject.Inject
 class OttoFcmService : FirebaseMessagingService() {
 
     @Inject lateinit var controller: AlarmController
+    @Inject lateinit var nudgeController: NudgeController
+    @Inject lateinit var nudgeRepository: NudgeRepository
     @Inject lateinit var preferences: OttoPreferences
     @Inject lateinit var secretStore: SecretStore
 
-    override fun onMessageReceived(message: RemoteMessage) {
+    /**
+     * Done synchronously and on purpose: `onMessageReceived` holds the FCM wakelock only until it
+     * returns, so a Dozing device that this push just woke could re-idle before a background
+     * coroutine ran `setAlarmClock()` — dropping the alarm. The work is a fast DB upsert plus a
+     * schedule, and we are already on a Firebase background thread (not main). The same reasoning
+     * applies to a nudge: a deferred nudge is a late nudge.
+     */
+    override fun onMessageReceived(message: RemoteMessage) = runBlocking {
         OttoLog.d("FCM data message received: keys=${message.data.keys}")
-        when (val result = CommandParser.parse(message.data)) {
-            is ParseResult.Parsed -> execute(message.data, result.command)
-            is ParseResult.Ignored -> OttoLog.i("Ignoring FCM command: ${result.reason}")
-            is ParseResult.Invalid -> OttoLog.w("Invalid FCM command: ${result.reason}")
-        }
-    }
 
-    // Done synchronously and on purpose: onMessageReceived holds the FCM wakelock only until
-    // it returns, so a Dozing device that this push just woke could re-idle before a
-    // background coroutine ran setAlarmClock() — dropping the alarm. The work is a fast DB
-    // upsert + schedule, and we are already on a Firebase background thread (not main).
-    private fun execute(data: Map<String, String>, command: FcmCommand) = runBlocking {
-        // Inbound trust gate — "fail closed once paired" (fix #6). Before the device has ever been
-        // paired we accept unsigned commands to bootstrap; once paired, only a valid signature runs,
-        // so a leaked FCM token (or a secret that later fails to decrypt) can't arm alarms.
+        // VERIFY BEFORE PARSE. Deliberate, and a security requirement rather than a tidy-up: the
+        // rejection path below emits an authenticated HTTPS request to the server, so parsing an
+        // unverified payload first would let anyone holding the FCM token turn this device into a
+        // probing and amplification oracle. Nothing may be reported about a push that failed the
+        // gate — not even that it was rejected.
+        val data = message.data
         val secret = secretStore.getSecret()
         val sigValid = secret != null && HmacVerifier.verify(data, secret)
         if (!HmacGate.shouldExecute(
@@ -58,6 +61,26 @@ class OttoFcmService : FirebaseMessagingService() {
         if (secret == null) {
             OttoLog.w("No HMAC secret provisioned; accepting command unverified (pair to enable)")
         }
+
+        when (val result = CommandParser.parse(data)) {
+            is ParseResult.Parsed -> execute(result.command)
+            // Reported, not merely logged. A contract mismatch is otherwise invisible on BOTH
+            // sides — the server records a successful send, the phone records a drop, and nobody
+            // correlates them. With six command types and a dozen fields that is the likeliest
+            // failure in the system, and an unsupported-version rejection in particular tells the
+            // server "this device is too old for that payload, stop sending it".
+            is ParseResult.Ignored -> {
+                OttoLog.i("Ignoring FCM command: ${result.reason}")
+                reportRejection(data, result.reason)
+            }
+            is ParseResult.Invalid -> {
+                OttoLog.w("Invalid FCM command: ${result.reason}")
+                reportRejection(data, result.reason)
+            }
+        }
+    }
+
+    private suspend fun execute(command: FcmCommand) {
         try {
             when (command) {
                 is FcmCommand.ArmAlarm -> controller.arm(
@@ -67,12 +90,30 @@ class OttoFcmService : FirebaseMessagingService() {
                     allowWhileIdle = command.allowWhileIdle,
                 )
                 is FcmCommand.CancelAlarm -> controller.cancel(command.alarmId)
+                is FcmCommand.Nudge -> nudgeController.show(command)
+                is FcmCommand.CancelNudge -> nudgeController.cancel(command.nudgeId)
                 // Network-bound; hand to workers that outlive the FCM wakelock and retry.
                 FcmCommand.Sync -> SyncWorker.enqueue(applicationContext)
                 FcmCommand.Ping -> HeartbeatWorker.enqueue(applicationContext)
             }
         } catch (t: Throwable) {
             OttoLog.e("Failed to execute FCM command", t)
+        }
+    }
+
+    /**
+     * Tell the server this device could not act on a push.
+     *
+     * Rate-limited structurally by the outbox's unique dedupe key — one row per rejected `type` per
+     * hour, however many arrive — so a server bug looping a malformed payload cannot flood the
+     * queue. That matters more than it sounds: `ReportWorker` drains in order and stops at the
+     * first failure, so a flood is a blockage rather than just noise.
+     */
+    private suspend fun reportRejection(data: Map<String, String>, reason: String) {
+        try {
+            nudgeRepository.recordPushRejection(data["type"]?.takeIf { it.isNotBlank() } ?: "?", reason)
+        } catch (t: Throwable) {
+            OttoLog.e("Failed to record a push rejection", t)
         }
     }
 

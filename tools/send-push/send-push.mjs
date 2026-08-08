@@ -11,12 +11,27 @@
  *
  * Options:
  *   --token <t>            Device FCM token (required). Copy it from the Otto app.
- *   --type <T>            ARM_ALARM (default) | CANCEL_ALARM.
+ *   --type <T>            ARM_ALARM (default) | CANCEL_ALARM | NUDGE | CANCEL_NUDGE | SYNC | PING.
+ *
+ * Alarm options (ARM_ALARM / CANCEL_ALARM):
  *   --alarm-id <id>      Alarm id (default: a generated "alm_test_<ts>").
  *   --in <seconds>        Fire N seconds from now (default 60). Ignored for CANCEL_ALARM.
  *   --at <epochMillis>    Absolute trigger time (overrides --in).
  *   --label <text>        Alarm label (default "Test push").
  *   --allow-while-idle <b>  true | false (default true).
+ *
+ * Nudge options (NUDGE / CANCEL_NUDGE):
+ *   --nudge-id <id>      Nudge id (default: a generated "rem_test_<ts>"). Pushing the SAME id
+ *                         twice replaces the notification in place rather than stacking — that is
+ *                         the property a chase ladder depends on, so it is worth testing directly.
+ *   --title <text>        Notification title (default "Otto").
+ *   --body <text>         Notification body (default "This is a test nudge.").
+ *   --level <L>           SILENT | NORMAL (default) | URGENT.
+ *   --actions <csv>       DONE,SNOOZE (default). Pass "" for a plain notification with no buttons.
+ *   --snooze-minutes <n>  How long Snooze defers it (default 30).
+ *   --expires-in <secs>   Self-cancel after N seconds.
+ *   --ongoing <b>         true | false (default false).
+ *
  *   --secret <hmacKey>    If set, adds the M2 `sig` (HMAC-SHA256 over the canonical payload).
  *   --key <path>          Service-account JSON. Default: $GOOGLE_APPLICATION_CREDENTIALS,
  *                         else ./service-account.json next to this script.
@@ -67,14 +82,47 @@ function computeSig(data, secret) {
   return createHmac('sha256', secret).update(canonical, 'utf8').digest('hex')
 }
 
+const KNOWN_TYPES = ['ARM_ALARM', 'CANCEL_ALARM', 'NUDGE', 'CANCEL_NUDGE', 'SYNC', 'PING']
+
 function buildData(args) {
   const type = args.type || 'ARM_ALARM'
+  if (!KNOWN_TYPES.includes(type)) {
+    // Deliberately still SENDABLE via an explicit unknown type, because "what does the app do with
+    // a type it has never heard of?" is a real thing to test — the app reports it back. Use
+    // --force-unknown for that; a plain typo should fail here rather than silently do nothing.
+    if (!args['force-unknown']) {
+      throw new Error(`Unsupported --type "${type}" (use one of ${KNOWN_TYPES.join(', ')}, or --force-unknown)`)
+    }
+    return { v: '1', type }
+  }
+
+  if (type === 'SYNC' || type === 'PING') return { v: '1', type }
+
+  if (type === 'NUDGE' || type === 'CANCEL_NUDGE') {
+    const nudgeId = args['nudge-id'] || `rem_test_${Date.now()}`
+    if (type === 'CANCEL_NUDGE') return { v: '1', type, nudgeId }
+    const data = {
+      v: '1',
+      type,
+      nudgeId,
+      title: args.title || 'Otto',
+      body: args.body || 'This is a test nudge.',
+      level: args.level || 'NORMAL',
+      // An explicitly empty string is meaningful and NOT the same as omitting the field: the app
+      // reads absent as "use the default buttons" and empty as "no buttons at all".
+      actions: args.actions === undefined ? 'DONE,SNOOZE' : args.actions,
+      snoozeMinutes: args['snooze-minutes'] || '30',
+    }
+    if (args['expires-in']) {
+      data.expiresAtMillis = String(Date.now() + parseInt(args['expires-in'], 10) * 1000)
+    }
+    if (args.ongoing) data.ongoing = args.ongoing
+    return data
+  }
+
   const alarmId = args['alarm-id'] || `alm_test_${Date.now()}`
   if (type === 'CANCEL_ALARM') {
     return { v: '1', type, alarmId }
-  }
-  if (type !== 'ARM_ALARM') {
-    throw new Error(`Unsupported --type "${type}" (use ARM_ALARM or CANCEL_ALARM)`)
   }
   const triggerAtMillis = args.at
     ? String(parseInt(args.at, 10))
@@ -140,7 +188,9 @@ async function main() {
   const body = await res.text()
   if (res.ok) {
     console.log(`OK (${res.status}): ${body}`)
-    console.log(`Sent ${data.type} ${data.alarmId}${data.triggerAtMillis ? ` for ${new Date(Number(data.triggerAtMillis)).toLocaleString()}` : ''}.`)
+    const subject = data.alarmId ?? data.nudgeId ?? ''
+    const when = data.triggerAtMillis ? ` for ${new Date(Number(data.triggerAtMillis)).toLocaleString()}` : ''
+    console.log(`Sent ${data.type} ${subject}${when}.`)
   } else {
     console.error(`FAILED (${res.status}): ${body}`)
     process.exitCode = 1
