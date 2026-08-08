@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type { ToolDef } from './types.js'
 
 /**
  * Google Calendar and Tasks.
@@ -9,11 +9,11 @@ import type Anthropic from '@anthropic-ai/sdk'
  *
  * A literal array, never a function — see the contract in ./index.ts.
  */
-export const googleTools: Anthropic.Tool[] = [
+export const googleTools: ToolDef[] = [
   {
     name: 'list_calendar_events',
     description: 'List Google Calendar events between two local ISO times.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: { timeMinLocalISO: { type: 'string' }, timeMaxLocalISO: { type: 'string' } },
       required: ['timeMinLocalISO', 'timeMaxLocalISO'],
@@ -24,7 +24,7 @@ export const googleTools: Anthropic.Tool[] = [
     description:
       'Create a Google Calendar event. This does NOT ring and does NOT chase; use create_alarm ' +
       'for a ring or create_reminder for something to follow up on.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: { title: { type: 'string' }, startLocalISO: { type: 'string' }, endLocalISO: { type: 'string' } },
       required: ['title', 'startLocalISO', 'endLocalISO'],
@@ -35,7 +35,7 @@ export const googleTools: Anthropic.Tool[] = [
     description:
       'Create a Google Task, optionally due at a local ISO time. Otto cannot read these back or ' +
       'chase them — use create_reminder for anything you should follow up on.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: { title: { type: 'string' }, dueLocalISO: { type: 'string' } },
       required: ['title'],

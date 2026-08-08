@@ -1,5 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk'
-import { config } from '../config.js'
+import type OpenAI from 'openai'
 import { log } from '../lib/log.js'
 import type { Device } from '../services/devices.js'
 import {
@@ -8,146 +7,191 @@ import {
   loadSession,
   saveSession,
   trimToValidStart,
-  type Msg,
+  type Item,
 } from '../services/sessions.js'
+import { MODEL, isTransient, modelClient, outputText } from './llm.js'
 import { systemPrompt } from './prompt.js'
 import { buildTools, runTool } from './tools.js'
 
-const anthropic = config.anthropic ? new Anthropic({ apiKey: config.anthropic.apiKey }) : null
-
-// 15 tools and multi-step reminder work (list → complete → reply) need more headroom than the
-// original 6. The fallback call below burns one step of the budget.
+// 18 tools and multi-step reminder work (list → complete → reply) need headroom. The fallback call
+// below burns one step of the budget.
 const MAX_STEPS = 10
-// Bounds response text only (no `thinking` is set — the old budget_tokens shape 400s on this
-// model). You only pay for what is generated, and 1024 truncated multi-item list replies.
-const MAX_TOKENS = 2048
 
-/** How many messages to keep when repairing a session that keeps failing on a shape error. */
+/**
+ * Bounds reasoning AND response text together — they are drawn from the same budget.
+ *
+ * 8192, up from the 2048 that bounded response text alone, because `effort: 'low'` now spends part
+ * of this on reasoning before a single visible token is produced. Too tight a cap does not merely
+ * truncate the reply; it can return a completion with NO text at all (see `finish`). You only pay
+ * for what is generated, so the headroom is close to free.
+ */
+const MAX_OUTPUT_TOKENS = 8192
+
+/** How many items to keep when repairing a session that keeps failing on a shape error. */
 const SALVAGE_MESSAGES = 8
 
-function extractText(content: Anthropic.ContentBlock[]): string {
-  return content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim()
-}
+type Call = OpenAI.Responses.ResponseFunctionToolCall
 
 /**
- * A copy of `history` with a cache breakpoint on the final content block, so the next step in the
- * tool loop reads this step's entire conversation prefix from cache. Steps are seconds apart, well
- * inside the 5-minute TTL.
+ * Append the model's own output to the running input.
  *
- * Returns a copy deliberately: `cache_control` must never be persisted into the session JSON.
+ * The whole array, in order, reasoning items included — that is the documented replay pattern, and
+ * replaying the reasoning is what makes `effort: 'low'` worth anything across the steps of one turn.
+ * (It is stripped again before the session is persisted; see lib/history.ts `stripReasoning`.)
+ *
+ * The cast is deliberate and narrow. `ResponseOutputItem` includes hosted-tool items — code
+ * interpreter, shell, web search — that are not members of `ResponseInputItem`. This agent declares
+ * only function tools, so nothing but messages, `function_call`s and reasoning items can appear.
  */
-function withConversationCacheBreakpoint(history: Msg[]): Msg[] {
-  if (history.length === 0) return history
-  const out = history.slice()
-  const last = out[out.length - 1]
-  if (!last) return out
+function pushOutput(history: Item[], res: OpenAI.Responses.Response): void {
+  history.push(...(res.output as unknown as Item[]))
+}
 
-  if (typeof last.content === 'string') {
-    out[out.length - 1] = {
-      role: last.role,
-      content: [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }],
+/**
+ * Run one tool call and wrap the result as a `function_call_output`.
+ *
+ * EVERY path through this function returns exactly one output item for `call.call_id`, including
+ * both error paths. That is not tidiness — a missing output makes the NEXT request a 400 ("no tool
+ * output found for function call"), which `isTransient` correctly classifies as non-transient,
+ * which bumps the failure counter, which trims the conversation at 2 and wipes it at 4. A
+ * malformed-arguments bug would present as session corruption.
+ */
+async function resultItem(device: Device, call: Call): Promise<Item> {
+  const out = (value: unknown): Item => ({
+    type: 'function_call_output',
+    call_id: call.call_id,
+    output: JSON.stringify(value),
+  })
+
+  // `arguments` is a JSON STRING here, where the previous provider handed over a parsed object. So
+  // this is a brand-new throw site inside the loop — and truncation at max_output_tokens lands in
+  // it first, as a half-written object.
+  let input: unknown
+  try {
+    input = call.arguments && call.arguments.length > 0 ? JSON.parse(call.arguments) : {}
+  } catch (err) {
+    log.error({ err, tool: call.name, raw: call.arguments.slice(0, 200) }, 'tool arguments were not valid JSON')
+    return out({
+      error: `your arguments for ${call.name} were not valid JSON — call it again with one complete JSON object`,
+    })
+  }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return out({ error: `your arguments for ${call.name} must be a JSON object` })
+  }
+
+  try {
+    return out(await runTool(device, call.name, input as Record<string, unknown>))
+  } catch (err) {
+    log.error({ err, tool: call.name }, 'agent tool failed')
+    return out({ error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+/**
+ * The reply text, or an honest apology.
+ *
+ * The old code was `extractText(...) || 'Done.'`, which is now actively dangerous. Under the
+ * previous provider, empty text with no tool use was near-impossible. Here, reasoning tokens are
+ * drawn from `max_output_tokens`, so a truncated turn comes back `incomplete` with NO text and no
+ * calls — and `|| 'Done.'` would report confident success for work that never happened. This is the
+ * one failure mode that looks healthy from the outside, which is why it logs at error.
+ */
+function finish(res: OpenAI.Responses.Response): string {
+  const text = outputText(res)
+  if (text.length > 0) return text
+
+  if (res.status === 'incomplete') {
+    const reason = res.incomplete_details?.reason
+    log.error({ reason, outputTokens: res.usage?.output_tokens }, 'agent response truncated with no text')
+    if (reason === 'max_output_tokens') {
+      return "That one ran away from me — give me the short version and I'll get it done."
     }
-    return out
+    return "I couldn't finish that thought — try me again."
   }
-  if (!Array.isArray(last.content) || last.content.length === 0) return out
-  const blocks = last.content.slice()
-  const tail = blocks[blocks.length - 1]
-  if (!tail || typeof tail !== 'object') return out
-  blocks[blocks.length - 1] = { ...tail, cache_control: { type: 'ephemeral' } } as (typeof blocks)[number]
-  out[out.length - 1] = { role: last.role, content: blocks }
-  return out
+
+  // Completed, with genuinely nothing to say: the tool loop did the work. The ONLY case that keeps
+  // the old behaviour.
+  return 'Done.'
 }
 
 /**
- * Transient = the request never really landed (network, rate limit, server fault). The persisted
- * history is fine and must be left alone. Anything else (a 400, a shape error) may mean the
- * conversation itself is malformed.
+ * INFO, not debug. Production runs LOG_LEVEL=info, so the previous debug line was effectively off
+ * and a prompt-cache regression — a 10x swing on input cost — was invisible until the bill arrived.
+ * One line per agent turn on a single-user server is nothing.
  */
-function isTransient(err: unknown): boolean {
-  if (err instanceof Anthropic.APIConnectionError) return true
-  if (err instanceof Anthropic.APIConnectionTimeoutError) return true
-  if (err instanceof Anthropic.APIError) {
-    const status = err.status ?? 0
-    return status === 429 || status >= 500
-  }
-  return false
+function logUsage(res: OpenAI.Responses.Response): void {
+  const usage = res.usage
+  if (!usage) return
+  log.info(
+    {
+      input: usage.input_tokens,
+      cacheRead: usage.input_tokens_details?.cached_tokens,
+      cacheWrite: usage.input_tokens_details?.cache_write_tokens,
+      output: usage.output_tokens,
+      reasoning: usage.output_tokens_details?.reasoning_tokens,
+    },
+    'agent usage',
+  )
 }
 
 /**
- * Drive the tool loop, mutating `history`. Guarantees `history` ends on an assistant turn so the
- * next user message still alternates roles (Anthropic rejects two consecutive user turns).
+ * Drive the tool loop, mutating `history`. Guarantees `history` ends on an assistant turn, never on
+ * a dangling `function_call_output`.
  */
-async function runLoop(device: Device, history: Msg[]): Promise<string> {
-  const client = anthropic!
-  const model = config.anthropic!.model
-  // Built ONCE, before the loop: a remember_fact write during this turn must not change the
-  // cached system prefix mid-flight. It takes effect on the next turn.
-  const system = systemPrompt(device)
+async function runLoop(device: Device, history: Item[]): Promise<string> {
+  const client = modelClient()!
+  // Built ONCE, before the loop: a remember_fact write during this turn must not change the cached
+  // prefix mid-flight. It takes effect on the next turn.
+  const instructions = systemPrompt(device)
   const tools = buildTools()
 
-  for (let step = 0; step < MAX_STEPS; step++) {
-    const res = await client.messages.create({
-      model,
-      max_tokens: MAX_TOKENS,
-      system,
-      tools,
-      messages: withConversationCacheBreakpoint(history),
-    })
-    if (step === 0) {
-      log.debug(
-        {
-          cacheRead: res.usage.cache_read_input_tokens,
-          cacheWrite: res.usage.cache_creation_input_tokens,
-          input: res.usage.input_tokens,
-        },
-        'agent usage',
-      )
-    }
-    history.push({ role: 'assistant', content: res.content })
-
-    const toolUses = res.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
-    if (toolUses.length === 0) return extractText(res.content) || 'Done.'
-
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const tu of toolUses) {
-      let output: unknown
-      try {
-        output = await runTool(device, tu.name, tu.input)
-      } catch (err) {
-        log.error({ err, tool: tu.name }, 'agent tool failed')
-        output = { error: err instanceof Error ? err.message : String(err) }
-      }
-      toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(output) })
-    }
-    history.push({ role: 'user', content: toolResults })
+  const base = {
+    model: MODEL,
+    instructions,
+    tools,
+    max_output_tokens: MAX_OUTPUT_TOKENS,
+    // Low, not none: this is a cost-tier model choosing between 18 tools, and that choice is
+    // exactly what reasoning buys. The four one-shot writers use 'none' — they have 200-300 token
+    // budgets, where any reasoning at all would empty the completion.
+    reasoning: { effort: 'low' as const },
+    // The owner's private messages. Nothing here uses previous_response_id, so server-side
+    // retention would buy nothing.
+    store: false,
+    // Required to get reasoning items back at all in stateless mode, which `pushOutput` replays.
+    include: ['reasoning.encrypted_content' as const],
+    // Routes one owner's turns to the same cache shard.
+    prompt_cache_key: device.deviceId,
   }
 
-  // Step cap reached still mid-tool-use: the last message is a user tool_result turn. Make one final
-  // call that forbids further tool use (tool_choice: none) so the model must answer with text,
-  // leaving history ending on an assistant turn (never a dangling tool_result). `tools` MUST stay
-  // defined here — the Anthropic API rejects (400) any request whose messages contain
-  // tool_use/tool_result blocks without a tools parameter.
-  const res = await client.messages.create({
-    model,
-    max_tokens: MAX_TOKENS,
-    system,
-    tools,
-    tool_choice: { type: 'none' },
-    messages: withConversationCacheBreakpoint(history),
-  })
-  history.push({ role: 'assistant', content: res.content })
-  return extractText(res.content) || 'Done.'
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const res = await client.create({ ...base, input: history })
+    if (step === 0) logUsage(res)
+    pushOutput(history, res)
+
+    // Exit on the ABSENCE of tool calls rather than on a status value: more robust, and it
+    // preserves the previous semantics exactly. `status` is consulted only inside `finish`.
+    const calls = res.output.filter((item): item is Call => item.type === 'function_call')
+    if (calls.length === 0) return finish(res)
+
+    // Sequential, not Promise.all: these arm alarms and write rows, and the previous implementation
+    // was sequential. Reordering side effects is not part of a provider migration.
+    for (const call of calls) history.push(await resultItem(device, call))
+  }
+
+  // Step cap reached still mid-tool-use: the last item is a tool output. Make one final call that
+  // forbids further tool use so the model must answer with text, leaving history ending on an
+  // assistant turn. `tools` MUST stay defined — the input contains function_call and
+  // function_call_output items, and dropping the definitions that describe them invites a 400.
+  const res = await client.create({ ...base, input: history, tool_choice: 'none' })
+  pushOutput(history, res)
+  return finish(res)
 }
 
 /**
- * Run one WhatsApp turn: load history, let Claude call tools until it produces a reply, persist a
+ * Run one WhatsApp turn: load history, let the model call tools until it produces a reply, persist a
  * VALID history, and return the reply.
  *
- * Failure handling is graduated rather than destructive. The previous implementation called
+ * Failure handling is graduated rather than destructive. An earlier implementation called
  * `saveSession(..., [])` on ANY throw, so a single 429 or socket reset erased the owner's entire
  * conversation. Now: a transient error persists nothing at all (the last good state survives
  * untouched), and a genuine shape error has to recur before we trim, and recur again before we
@@ -157,18 +201,18 @@ export async function runAgentTurn(params: {
   waUserId: string
   device: Device
   /**
-   * The user turn: a plain string for text and for a transcribed voice note, or content blocks for
-   * a photo. Blocks rather than a second parameter so `services/ingest.ts` decides the shape once
-   * and every path below — history, trimming, the cache breakpoint — stays identical.
+   * The user turn: a plain string for text and for a transcribed voice note, or content parts for a
+   * photo. Parts rather than a second parameter so `services/ingest.ts` decides the shape once and
+   * every path below — history, trimming, persistence — stays identical.
    */
-  content: string | Anthropic.ContentBlockParam[]
+  content: string | OpenAI.Responses.ResponseInputContent[]
 }): Promise<string> {
-  if (!anthropic || !config.anthropic) {
-    return "Otto's AI isn't configured yet (no Anthropic API key set). Alarms sent to your phone still work."
+  if (!modelClient()) {
+    return "Otto's AI isn't configured yet (no OpenAI API key set). Alarms sent to your phone still work."
   }
   const { waUserId, device, content } = params
-  const history: Msg[] = loadSession(waUserId)
-  history.push({ role: 'user', content })
+  const history: Item[] = loadSession(waUserId)
+  history.push({ role: 'user', content } as Item)
 
   try {
     const reply = await runLoop(device, history)

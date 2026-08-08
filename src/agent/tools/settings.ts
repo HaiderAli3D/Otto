@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type { ToolDef } from './types.js'
 
 /**
  * The owner's standing preferences: when Otto speaks first, and when he must not.
@@ -11,7 +11,7 @@ import type Anthropic from '@anthropic-ai/sdk'
  * sentence and should be one call; a `set_quiet_hours` / `set_brief_time` split would make the model
  * choose between them and then chain two round-trips for a single instruction.
  */
-export const settingsTools: Anthropic.Tool[] = [
+export const settingsTools: ToolDef[] = [
   {
     name: 'set_preferences',
     description:
@@ -22,7 +22,7 @@ export const settingsTools: Anthropic.Tool[] = [
       'messaging me too much". Pass only the fields that change; everything you omit is left alone. ' +
       'Returns the settings as they now stand, so confirm using those values rather than what was ' +
       'asked for. All times are the owner\'s local wall clock.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         briefEnabled: { type: 'boolean', description: 'Send a morning brief at all. On by default.' },

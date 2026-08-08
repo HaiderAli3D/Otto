@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type OpenAI from 'openai'
 import { config } from '../config.js'
 import { log } from '../lib/log.js'
 import {
@@ -32,10 +32,10 @@ export type IngestFailure =
   | 'malformed'
 
 export type IngestResult =
-  | { ok: true; source: 'text' | 'voice' | 'image'; content: string | Anthropic.ContentBlockParam[] }
+  | { ok: true; source: 'text' | 'voice' | 'image'; content: string | OpenAI.Responses.ResponseInputContent[] }
   | { ok: false; reason: IngestFailure; noun: string }
 
-/** Exactly Anthropic's image union, derived from the allowlist so the two can never drift. */
+/** Derived from the allowlist so the accepted set and the data URI can never drift apart. */
 type ImageMediaType = (typeof IMAGE_MIME_ALLOW)[number]
 
 function narrowImageMime(mime: string): ImageMediaType | null {
@@ -129,13 +129,11 @@ async function ingestAudio(msg: InboundMessage): Promise<IngestResult> {
 }
 
 /**
- * Photo -> `[image, text]`, in that order, following Anthropic's own guidance: the model reads the
- * picture and then the instruction about it, which is measurably better than the reverse.
+ * Photo -> `[input_image, input_text]`, in that order: the model reads the picture and then the
+ * instruction about it, which is measurably better than the reverse.
  *
- * It is NOT a cost decision. `withConversationCacheBreakpoint` in agent/runner.ts spreads
- * `cache_control` onto the LAST block of the last message, but that marker names a prefix boundary
- * — everything up to and including it is cached — so the image sits inside the cached prefix
- * whichever block carries the marker. An earlier version of this comment claimed the opposite.
+ * It is NOT a cost decision. The photo is the newest thing in the request either way, so it lands
+ * past the end of any cacheable prefix regardless of which part comes first.
  *
  * No describe-the-image call is made: the model's own reply already describes the photo, for zero
  * extra cost, and `stripAttachments` replaces the bytes with that description when the session is
@@ -158,10 +156,16 @@ async function ingestImage(msg: InboundMessage): Promise<IngestResult> {
     ok: true,
     source: 'image',
     content: [
-      { type: 'image', source: { type: 'base64', media_type: mediaType, data: got.bytes.toString('base64') } },
-      // Never an empty string: the API rejects an empty text block, and "no caption" is itself
-      // information — it tells the model the photo has to carry the whole request on its own.
-      { type: 'text', text: caption && caption.length > 0 ? caption : '(photo, no caption)' },
+      // A base64 data URI, no whitespace anywhere. The mime comes from `narrowImageMime`, the same
+      // place the allowlist comes from, so the URI can never claim a type the allowlist rejects.
+      {
+        type: 'input_image',
+        image_url: `data:${mediaType};base64,${got.bytes.toString('base64')}`,
+        detail: 'auto',
+      },
+      // Never an empty string: "no caption" is itself information — it tells the model the photo
+      // has to carry the whole request on its own.
+      { type: 'input_text', text: caption && caption.length > 0 ? caption : '(photo, no caption)' },
     ],
   }
 }

@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type OpenAI from 'openai'
 import { newAlarmId } from '../../lib/ids.js'
 import { isNagPolicy, isTimingKind, previewRungs, type NagPolicy, type TimingKind } from '../../lib/nagLadder.js'
 import { deferPastQuietHours } from '../../lib/quietHours.js'
@@ -33,11 +33,11 @@ import { reminderTools } from './reminders.js'
 import { settingsTools } from './settings.js'
 
 /**
- * The tool surface the Claude agent can call.
+ * The tool surface the agent can call.
  *
- * MUST be a deterministic literal array — tools render at position 0 of the prompt, before the
- * system blocks, so making the list conditional (e.g. on whether Google is connected) would
- * invalidate the prompt cache on every request. Google tools always exist and return
+ * MUST be a deterministic literal array — the serialized tools sit at the very front of the request,
+ * so making the list conditional (e.g. on whether Google is connected) would change the cached
+ * prefix and burn the prompt cache on every request. Google tools always exist and return
  * `{ error: '... not connected' }` at call time instead.
  *
  * That is why the definitions live in sibling modules exporting plain `const` arrays and are
@@ -46,9 +46,28 @@ import { settingsTools } from './settings.js'
  * a module and ONE spread — never an `if`, never a `.filter()`, never a parameter, never a
  * `buildTools(device)`. Order is part of the cached prefix, so append rather than reshuffle;
  * test/tools-order.test.ts pins the names and the order as the regression net.
+ *
+ * The `.map` is where the provider's wire envelope is added, and it exists so the 18 definitions
+ * stay pure prompt content: swapping providers edits this function, not every literal.
+ *
+ * `strict: false` is deliberate and should NOT be flipped casually. Strict mode requires every
+ * property to appear in `required`, but `runTool` below distinguishes absent from present
+ * throughout — `update_reminder` is three-state (undefined leaves a field alone, which is why
+ * `clearRecurrence` exists as a separate flag), `readNagPlan` reads `undefined` as "use the table",
+ * `set_preferences` promises that omitted fields are untouched, and `snooze_reminder` requires
+ * exactly one of two fields. Strict would collapse all of those, so it is a redesign of the
+ * dispatch, not a schema annotation.
  */
-export function buildTools(): Anthropic.Tool[] {
-  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools, ...settingsTools]
+export function buildTools(): OpenAI.Responses.FunctionTool[] {
+  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools, ...settingsTools].map(
+    (t) => ({
+      type: 'function' as const,
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+      strict: false,
+    }),
+  )
 }
 
 function reminderView(r: Reminder, zone: string) {

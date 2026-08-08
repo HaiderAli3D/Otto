@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type { ToolDef } from './types.js'
 
 /**
  * Reminder tools: things the owner has to DO, which Otto chases until they say it is done.
@@ -9,7 +9,7 @@ import type Anthropic from '@anthropic-ai/sdk'
  *
  * A literal array, never a function — see the contract in ./index.ts.
  */
-export const reminderTools: Anthropic.Tool[] = [
+export const reminderTools: ToolDef[] = [
   {
     name: 'create_reminder',
     description:
@@ -18,7 +18,7 @@ export const reminderTools: Anthropic.Tool[] = [
       'forget…", or mentions a task with no fixed ringing moment. Set ring=true when the due ' +
       'time is also a moment that should interrupt them — that arms an alarm AND keeps chasing ' +
       'afterwards. Never create an alarm and a reminder separately for the same thing.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'Short imperative task, e.g. "take the bins out"' },
@@ -101,7 +101,7 @@ export const reminderTools: Anthropic.Tool[] = [
       'snooze_reminder, cancel_reminder and reopen_reminder. Call this before completing ' +
       'anything unless you already have the exact id from this conversation. Also use it to ' +
       'answer "what have I got on?" and "what am I forgetting?".',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         state: { type: 'string', enum: ['open', 'done', 'all'], description: 'Defaults to open.' },
@@ -117,14 +117,14 @@ export const reminderTools: Anthropic.Tool[] = [
       'the exact reminderId from list_reminders or from this conversation — never guess. If two ' +
       'or more open reminders could plausibly match, ask which one instead of picking. For a ' +
       'recurring reminder this completes the current occurrence and rolls it to the next.',
-    input_schema: { type: 'object', properties: { reminderId: { type: 'string' } }, required: ['reminderId'] },
+    parameters: { type: 'object', properties: { reminderId: { type: 'string' } }, required: ['reminderId'] },
   },
   {
     name: 'snooze_reminder',
     description:
       'Push a reminder\'s next follow-up back without completing it. Use when the owner says ' +
       '"not yet", "later", "tomorrow", "give me an hour". Pass exactly one of minutes or untilLocalISO.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         reminderId: { type: 'string' },
@@ -140,14 +140,14 @@ export const reminderTools: Anthropic.Tool[] = [
       'Drop a reminder entirely — the owner no longer wants it, as opposed to having done it. ' +
       'Cancelling a recurring reminder ends the whole series. Prefer complete_reminder when they ' +
       'actually did the thing, so the history stays honest.',
-    input_schema: { type: 'object', properties: { reminderId: { type: 'string' } }, required: ['reminderId'] },
+    parameters: { type: 'object', properties: { reminderId: { type: 'string' } }, required: ['reminderId'] },
   },
   {
     name: 'reopen_reminder',
     description:
       'Undo a completion. Use when the owner says you ticked off the wrong thing, or the task ' +
       'turned out not to be finished after all.',
-    input_schema: { type: 'object', properties: { reminderId: { type: 'string' } }, required: ['reminderId'] },
+    parameters: { type: 'object', properties: { reminderId: { type: 'string' } }, required: ['reminderId'] },
   },
   {
     name: 'update_reminder',
@@ -161,7 +161,7 @@ export const reminderTools: Anthropic.Tool[] = [
       'it back and goes on the record either way, so do not use it to spare them the count. ' +
       'Returns the reminder as it now stands, including the next few times you will actually ' +
       'chase, so confirm with those rather than with what was asked for.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         reminderId: { type: 'string' },

@@ -68,15 +68,16 @@ describe('photos become [image, text] blocks', () => {
     expect(res.ok).toBe(true)
     if (!res.ok) throw new Error('unreachable')
     expect(res.source).toBe('image')
-    // Order is load-bearing for the MODEL, not for the cache: Anthropic's guidance is picture then
-    // instruction. (cache_control marks a prefix boundary, so the image is inside the cached prefix
-    // either way — an earlier comment here had that backwards.)
+    // Order is load-bearing for the MODEL, not for the cache: picture, then the instruction about
+    // it. The photo is the newest thing in the request either way, so it falls past the end of any
+    // cacheable prefix regardless of which part comes first.
     expect(res.content).toEqual([
       {
-        type: 'image',
-        source: { type: 'base64', media_type: 'image/jpeg', data: Buffer.from('jpegbytes').toString('base64') },
+        type: 'input_image',
+        detail: 'auto',
+        image_url: `data:image/jpeg;base64,${Buffer.from('jpegbytes').toString('base64')}`,
       },
-      { type: 'text', text: 'is this the right filter?' },
+      { type: 'input_text', text: 'is this the right filter?' },
     ])
   })
 
@@ -86,9 +87,9 @@ describe('photos become [image, text] blocks', () => {
     const res = await ingestInbound(image())
 
     if (!res.ok) throw new Error('unreachable')
-    const blocks = res.content as Array<{ type: string; text?: string }>
-    // Never an empty text block — the API rejects one, and "no caption" is itself information.
-    expect(blocks[1]).toEqual({ type: 'text', text: '(photo, no caption)' })
+    const parts = res.content as Array<{ type: string; text?: string }>
+    // Never an empty text part — "no caption" is itself information.
+    expect(parts[1]).toEqual({ type: 'input_text', text: '(photo, no caption)' })
   })
 
   it('narrows the media type to what the API actually accepts', async () => {

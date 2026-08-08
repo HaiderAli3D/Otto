@@ -26,10 +26,9 @@ describe('one Otto on every surface', () => {
   // rules, and they had already drifted. Three surfaces, one persona, asserted.
   it('the conversational prompt carries the persona', () => {
     const device = makeDevice('dev_pe1')
-    const core = systemPrompt(device)[0]!
-    expect(core.type).toBe('text')
-    expect(core.text).toContain(PERSONA)
-    expect(core.text).toContain(WRITING)
+    const prompt = systemPrompt(device)
+    expect(prompt).toContain(PERSONA)
+    expect(prompt).toContain(WRITING)
   })
 
   it('the digest composer carries the same persona', () => {
@@ -65,26 +64,28 @@ describe('one Otto on every surface', () => {
     expect(WRITING).toContain('one to three sentences')
   })
 
-  it('keeps the record out of the cached prefix', () => {
-    // The counters move almost every turn. In front of the breakpoint they would re-bill the whole
-    // prefix each request — the same mistake that once cost ~$90/month.
+  // These two used to assert on an explicit cache_control marker. Caching is prefix-based now, so
+  // the guarantee is positional instead: everything volatile must sit AFTER the frozen CORE, whose
+  // last section is WRITING. A volatile line that drifts above it moves the first differing byte
+  // toward the front and throws away the cached prefix for the whole request — the same mistake
+  // that once cost ~$90/month, just with a different mechanism.
+  it('keeps the record after the frozen core', () => {
+    // The counters move on almost every turn.
     const device = makeDevice('dev_pe2')
-    const blocks = systemPrompt(device)
-    const cached = blocks.findIndex((b) => b.cache_control)
-    const tail = blocks[blocks.length - 1]!
-    expect(cached).toBeLessThan(blocks.length - 1)
-    expect(tail.cache_control).toBeUndefined()
-    expect(tail.text).toContain('The record (last 14 days)')
+    const prompt = systemPrompt(device)
+    expect(prompt).toContain('The record (last 14 days)')
+    expect(prompt.indexOf('The record (last 14 days)')).toBeGreaterThan(prompt.indexOf(WRITING))
   })
 
-  it('reports quiet hours in the volatile tail, never in the cached block', () => {
-    // The window itself moves rarely, but "are we inside it right now" flips every few hours. In
-    // front of the breakpoint that one line would re-bill the whole prefix on every request.
+  it('reports quiet hours after the frozen core, and only once', () => {
+    // The window itself moves rarely, but "are we inside it right now" flips every few hours.
     const device = makeDevice('dev_pe8')
-    const blocks = systemPrompt(device)
-    const tail = blocks[blocks.length - 1]!
-    expect(tail.text).toContain('Quiet hours: 22:00–07:00 local.')
-    for (const block of blocks.slice(0, -1)) expect(block.text).not.toContain('Quiet hours: 22:00')
+    const prompt = systemPrompt(device)
+    const line = 'Quiet hours: 22:00–07:00 local.'
+    expect(prompt).toContain(line)
+    expect(prompt.indexOf(line)).toBeGreaterThan(prompt.indexOf(WRITING))
+    // Exactly one occurrence: a copy inside CORE would defeat the whole arrangement.
+    expect(prompt.indexOf(line)).toBe(prompt.lastIndexOf(line))
   })
 })
 
@@ -92,7 +93,7 @@ describe('the quiet-hours section describes what the code actually does', () => 
   // Both of these are pinned as prompt TEXT because the prompt is the only artefact — the model
   // reads these lines and answers the owner from them, so a line that is untrue is a bug the same
   // way a wrong branch is.
-  const core = (deviceId: string): string => systemPrompt(makeDevice(deviceId))[0]!.text
+  const core = (deviceId: string): string => systemPrompt(makeDevice(deviceId))
 
   it('names the owner-chosen due time as an exception to auto-deferral', () => {
     // nagLadder returns rung 0 at a still-future due time untouched. The section used to promise
@@ -122,7 +123,7 @@ describe('nudge writer falls back', () => {
 
   it('returns the templated string byte-for-byte when the model is unavailable', async () => {
     // This is the 3am guarantee. Nudges fire from the scheduler on a machine that may have no
-    // working Anthropic credentials, and a nudge that fails to send is worse than a templated one.
+    // working model credentials, and a nudge that fails to send is worse than a templated one.
     const device = makeDevice('dev_pe3')
     const r = await createReminder(device, { title: 'Take the bins out', dueAtMillis: inHours(1) })
 

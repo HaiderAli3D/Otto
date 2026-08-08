@@ -1,26 +1,68 @@
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { sessions } from '../db/schema.js'
-import { stripAttachments, trimToValidStart, type Msg } from '../lib/history.js'
+import { stripAttachments, stripReasoning, trimToValidStart, type Item } from '../lib/history.js'
 
-export type { Msg }
+export type { Item }
 export { trimToValidStart }
 
-export function loadSession(waUserId: string): Msg[] {
+/**
+ * Does this row predate the move to the Responses API?
+ *
+ * Rows written by the Anthropic build hold `{ role, content: [{ type: 'tool_use' | 'tool_result' |
+ * 'image' | 'text' }] }`. None of those are legal Responses content parts, so replaying one is a
+ * 400 — which is classified non-transient, which bumps the failure counter, which trims the
+ * conversation at 2 and wipes it at 4. The owner would see "Sorry — I hit a snag" up to three times
+ * before it self-healed.
+ *
+ * Discarding is safe for exactly the reason `maybeResetIdleSession` already relies on: durable
+ * knowledge (facts, open reminders, the record) is injected into the system prompt from the
+ * database on every turn, so what is lost is at most a few hours of chit-chat — something this
+ * system already throws away every 8 idle hours.
+ *
+ * Kept rather than run once as a migration: this is idempotent, needs no migration machinery
+ * (`ensureSchema` runs on every boot AND in every test's beforeEach, so an unguarded UPDATE there
+ * would wipe sessions forever), and it also covers a rollback-then-roll-forward, a restored volume
+ * snapshot, and a developer's stale local database. A false positive is not reachable — the types
+ * it looks for are not legal in the new shape at all, so anything matching would 400 anyway.
+ */
+const LEGACY_PART_TYPES = new Set(['tool_use', 'tool_result', 'image', 'text'])
+
+function isLegacyShaped(items: unknown[]): boolean {
+  return items.some((item) => {
+    if (typeof item !== 'object' || item === null) return false
+    const content = (item as { content?: unknown }).content
+    if (!Array.isArray(content)) return false
+    return content.some(
+      (part) =>
+        typeof part === 'object' &&
+        part !== null &&
+        typeof (part as { type?: unknown }).type === 'string' &&
+        LEGACY_PART_TYPES.has((part as { type: string }).type),
+    )
+  })
+}
+
+export function loadSession(waUserId: string): Item[] {
   const row = db.select().from(sessions).where(eq(sessions.waUserId, waUserId)).get()
   if (!row) return []
   try {
-    return JSON.parse(row.messages) as Msg[]
+    const parsed = JSON.parse(row.messages) as unknown[]
+    if (!Array.isArray(parsed)) return []
+    if (isLegacyShaped(parsed)) return []
+    return parsed as Item[]
   } catch {
     return []
   }
 }
 
-export function saveSession(waUserId: string, deviceId: string | null, messages: Msg[], max?: number): void {
-  // Strip attachments BEFORE trimming, never after: stripping rewrites a message's shape (an image
-  // array becomes a plain string), and the leading-shape check has to see that final form. It also
-  // means the byte cap is measured on what actually gets stored.
-  const json = JSON.stringify(trimToValidStart(stripAttachments(messages), max))
+export function saveSession(waUserId: string, deviceId: string | null, messages: Item[], max?: number): void {
+  // Order matters. Reasoning first: it is the cheapest filter and removes the most bytes, so the
+  // attachment strip and the byte cap both measure what actually gets stored.
+  //
+  // Then attachments BEFORE trimming, never after: stripping rewrites an item's shape (an image
+  // array becomes a plain string), and the leading-shape check has to see that final form.
+  const json = JSON.stringify(trimToValidStart(stripAttachments(stripReasoning(messages)), max))
   const now = Date.now()
   db.insert(sessions)
     .values({ waUserId, deviceId, messages: json, updatedAt: now })

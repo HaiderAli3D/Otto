@@ -1,4 +1,3 @@
-import type Anthropic from '@anthropic-ai/sdk'
 import { formatQuietHours } from '../lib/quietHours.js'
 import { describeRoutine } from '../lib/routine.js'
 import { describeBudget } from '../services/budget.js'
@@ -61,40 +60,43 @@ const CORE = [
 ].join('\n\n')
 
 /**
- * System prompt as three blocks, ordered stable → volatile.
+ * The system prompt, as one string, ordered stable → volatile.
  *
- * Render order is tools → system → messages, so the cache breakpoint on the FACTS block caches
- * tools + CORE + facts together. The clock MUST stay in the trailing block: the previous version
- * interpolated a per-second timestamp near the top, which invalidated the whole prefix on every
- * single request. That one line is the difference between ~$90/month and ~$25/month.
+ * THE ORDERING IS LOAD-BEARING AND MUST NOT BE RESHUFFLED. It used to be enforced by an explicit
+ * cache breakpoint on the facts block; caching is now prefix-based, which makes layout the thing
+ * doing the work instead of annotating it:
+ *
+ * The cached prefix is the longest run of leading bytes shared with the previous request, and this
+ * string is serialized ahead of the conversation. So a per-second timestamp near the TOP does not
+ * merely uncache one block — it moves the first differing byte to the front and throws away the
+ * cache for the entire request, tools and all. An earlier version did exactly that, and the one
+ * line was the difference between ~$90/month and ~$25/month.
+ *
+ * Hence: CORE (frozen at build) → facts (changes when a fact is written) → the volatile tail (the
+ * clock, which changes every single turn). Anything new goes at the position matching how often it
+ * moves, never on the end by default.
+ *
+ * (gpt-5.6 does also support explicit `prompt_cache_breakpoint` markers on content blocks, which
+ * would let us pin the boundary rather than infer it. Not used: the implicit breakpoint already
+ * lands in the right place given this ordering, and opting into explicit mode means owning every
+ * boundary by hand.)
  */
-export function systemPrompt(device: Device): Anthropic.TextBlockParam[] {
-  return [
-    { type: 'text', text: CORE },
-    {
-      type: 'text',
-      text: renderFacts(device.deviceId),
-      cache_control: { type: 'ephemeral' },
-    },
-    {
-      // Volatile tail, deliberately AFTER the breakpoint so it can change every turn for free.
-      // Open reminders live here rather than in the cached block precisely because they change
-      // often — and having them always present is what lets the conversation reset safely. The
-      // record belongs here for the same reason: those counters move on almost every turn, and in
-      // front of the breakpoint they would re-bill the whole prefix each time.
-      type: 'text',
-      text: [
-        `Current local time: ${nowIsoInZone(device.timezone)} (timezone ${device.timezone}).`,
-        renderQuietHours(device),
-        renderRoutine(device),
-        renderOpenReminders(device),
-        renderRecord(device.deviceId),
-        describeBudget(device),
-      ]
-        .filter((s): s is string => s !== null)
-        .join('\n\n'),
-    },
+export function systemPrompt(device: Device): string {
+  const volatileTail = [
+    `Current local time: ${nowIsoInZone(device.timezone)} (timezone ${device.timezone}).`,
+    renderQuietHours(device),
+    renderRoutine(device),
+    renderOpenReminders(device),
+    renderRecord(device.deviceId),
+    describeBudget(device),
   ]
+    .filter((s): s is string => s !== null)
+    .join('\n\n')
+
+  // Open reminders sit in the tail rather than beside the facts precisely because they change
+  // often — and having them always present is what lets the conversation reset safely. The record
+  // belongs here for the same reason: those counters move on almost every turn.
+  return [CORE, renderFacts(device.deviceId), volatileTail].join('\n\n')
 }
 
 /**
