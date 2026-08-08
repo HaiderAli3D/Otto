@@ -39,8 +39,12 @@ android {
         applicationId = "com.otto.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        // 1.1.0 is the first build that understands NUDGE / CANCEL_NUDGE. The server gates push
+        // delivery on this exact number (otto-server `src/services/push.ts` MIN_NUDGE_APP_VERSION),
+        // because an older build drops an unknown type SILENTLY — the server would record a
+        // delivered message the owner never saw. Bump both sides together or not at all.
+        versionCode = 2
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
