@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import com.otto.app.net.HeartbeatWorker
 import com.otto.app.ring.NotificationChannels
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
@@ -29,6 +30,9 @@ class OttoApp : Application(), Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         NotificationChannels.ensureCreated(this)
+        // Here rather than in an Activity so it re-arms on an FCM-only process start too. A phone
+        // whose owner never opens the app is exactly the one whose delivery path can rot unnoticed.
+        HeartbeatWorker.enqueuePeriodic(this)
     }
 
     // Must be a computed `get()` (not a direct initializer): the configuration has to be

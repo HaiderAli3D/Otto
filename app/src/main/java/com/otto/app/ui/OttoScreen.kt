@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.dp
 import com.otto.app.R
 import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmState
+import com.otto.app.data.NudgeEntity
+import com.otto.app.nudge.NudgeAction
 import com.otto.app.permissions.PermissionState
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -49,6 +51,8 @@ fun OttoScreen(
     onCancelAlarm: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onSendHeartbeat: () -> Unit,
+    onSendTestNudge: () -> Unit,
+    onNudgeAction: (String, NudgeAction) -> Unit,
 ) {
     val formatter = remember { SimpleDateFormat("MMM d · HH:mm:ss", Locale.getDefault()) }
 
@@ -79,6 +83,9 @@ fun OttoScreen(
                 }
                 OutlinedButton(onClick = onSendHeartbeat, modifier = Modifier.fillMaxWidth()) {
                     Text("Send self heartbeat")
+                }
+                OutlinedButton(onClick = onSendTestNudge, modifier = Modifier.fillMaxWidth()) {
+                    Text("Send test nudge (cycles quiet → normal → urgent)")
                 }
             }
 
@@ -134,6 +141,29 @@ fun OttoScreen(
                         "happens, just open Otto again — armed alarms are restored automatically.",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                // Worth saying explicitly, because the two surfaces fail differently and the second
+                // failure is silent: a denied alarm permission is visible above, but notifications
+                // turned off just means Otto's nudges quietly stop arriving.
+                if (!state.permissions.notificationsGranted) {
+                    Text(
+                        "Notifications are off, so Otto's nudges won't reach you at all. Alarms " +
+                            "still ring — they have a full-screen fallback — but nudges don't.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            SectionCard("Open nudges") {
+                if (state.nudges.isEmpty()) {
+                    Text("Nothing outstanding.", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    // The only place to see what arrived while the phone was face-down. Goes through
+                    // the same controller the lockscreen buttons do, so the two can never diverge.
+                    state.nudges.forEach { nudge ->
+                        NudgeRow(nudge, formatter.format(Date(nudge.postedAtMillis)), onNudgeAction)
+                    }
+                }
             }
 
             SectionCard("Armed alarms") {
@@ -160,6 +190,34 @@ private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Un
         ) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             content()
+        }
+    }
+}
+
+@Composable
+private fun NudgeRow(
+    nudge: NudgeEntity,
+    postedAt: String,
+    onAction: (String, NudgeAction) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(nudge.title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "$postedAt · ${nudge.state}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { onAction(nudge.nudgeId, NudgeAction.SNOOZE) }) {
+                Text(stringResource(R.string.nudge_action_snooze, nudge.snoozeMinutes))
+            }
+            Button(onClick = { onAction(nudge.nudgeId, NudgeAction.DONE) }) {
+                Text(stringResource(R.string.nudge_action_done))
+            }
         }
     }
 }

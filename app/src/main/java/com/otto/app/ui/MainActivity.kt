@@ -65,6 +65,8 @@ class MainActivity : ComponentActivity() {
                     onCancelAlarm = viewModel::cancelAlarm,
                     onOpenSettings = { startActivitySafely(Intent(this, SettingsActivity::class.java)) },
                     onSendHeartbeat = { HeartbeatWorker.enqueue(this) },
+                    onSendTestNudge = viewModel::sendTestNudge,
+                    onNudgeAction = viewModel::actOnNudge,
                 )
             }
         }

@@ -8,6 +8,7 @@ import android.service.quicksettings.TileService
 import com.otto.app.R
 import com.otto.app.core.OttoLog
 import com.otto.app.data.AlarmRepository
+import com.otto.app.data.NudgeRepository
 import com.otto.app.ui.MainActivity
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -32,6 +33,7 @@ class NextAlarmTileService : TileService() {
     @InstallIn(SingletonComponent::class)
     interface Deps {
         fun repository(): AlarmRepository
+        fun nudgeRepository(): NudgeRepository
         fun appScope(): CoroutineScope
     }
 
@@ -42,18 +44,33 @@ class NextAlarmTileService : TileService() {
         val deps = EntryPointAccessors.fromApplication(applicationContext, Deps::class.java)
         deps.appScope().launch(Dispatchers.IO) {
             val next = deps.repository().getNextAlarm()
-            withContext(Dispatchers.Main) { render(next?.triggerAtMillis) }
+            val open = deps.nudgeRepository().getActive().size
+            withContext(Dispatchers.Main) { render(next?.triggerAtMillis, open) }
         }
     }
 
-    private fun render(triggerAtMillis: Long?) {
+    /**
+     * Open nudges win the label when there are any.
+     *
+     * Roughly twelve characters survive before the tile truncates, so it can only ever say one
+     * thing — and "3 open" is the one that needs acting on. A next alarm is already visible in the
+     * status bar's own alarm icon; an outstanding chase is visible nowhere else at a glance.
+     */
+    private fun render(triggerAtMillis: Long?, openNudges: Int) {
         qsTile?.apply {
-            if (triggerAtMillis == null) {
-                state = Tile.STATE_INACTIVE
-                label = getString(R.string.tile_no_alarm)
-            } else {
-                state = Tile.STATE_ACTIVE
-                label = getString(R.string.tile_next_alarm, formatter.format(Date(triggerAtMillis)))
+            when {
+                openNudges > 0 -> {
+                    state = Tile.STATE_ACTIVE
+                    label = getString(R.string.tile_open_count, openNudges)
+                }
+                triggerAtMillis != null -> {
+                    state = Tile.STATE_ACTIVE
+                    label = getString(R.string.tile_next_alarm, formatter.format(Date(triggerAtMillis)))
+                }
+                else -> {
+                    state = Tile.STATE_INACTIVE
+                    label = getString(R.string.tile_no_alarm)
+                }
             }
             updateTile()
         }

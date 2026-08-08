@@ -34,7 +34,7 @@ exported to `app/schemas/`; `AlarmScheduler.cancel(Int)`); (5) stuck-RANG → MI
 gated on `RingService.isActive()` so a live ring is never mis-flagged; (6) HMAC fails closed once
 paired via `push/HmacGate.kt` + a persisted `hasEverPaired` latch. A `core/ReportTrigger` seam
 keeps `AlarmRepository` off WorkManager (JVM-testable). This is Track 1 of a two-track effort;
-Track 2 builds a separate Node/TS **Otto server** (WhatsApp + Claude agent + FCM sender +
+Track 2 builds a separate Node/TS **Otto server** (WhatsApp + AI agent + FCM sender +
 register/report/sync/heartbeat endpoints) — see the approved plan referenced in session notes.
 
 **Release-ready:** `signingConfigs.release` reads a gitignored `keystore.properties` (falls back to
@@ -42,7 +42,9 @@ the debug key so `assembleRelease` still builds); release `SERVER_BASE_URL` is c
 `otto.serverBaseUrl` in `local.properties`/`-P`; `usesCleartextTraffic="false"`; the Settings URL
 override is HTTPS-only; `versionName = 1.0.0`. Both `assembleDebug` and `assembleRelease` are green.
 The **Otto server** now exists as a sibling repo at `../otto-server` (Node/TS, SQLite, Fastify) — its
-`SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/Anthropic/Google/hosting/pairing).
+`SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/OpenAI/Google/hosting/pairing). As of
+2026-08-08 the server's agent runs on the **OpenAI Responses API** with `gpt-5.6-luna`
+(`OPENAI_API_KEY` / `OPENAI_MODEL`); it was previously Anthropic Claude Sonnet 5.
 Still deferred: R8 minify. (Crashlytics is no longer deferred — see below.)
 
 **Crashlytics — enabled, and the Gradle plugin is MANDATORY.** `implementation(libs.firebase.crashlytics)`
