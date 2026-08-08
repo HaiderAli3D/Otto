@@ -1,9 +1,11 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { formatQuietHours } from '../lib/quietHours.js'
+import { describeRoutine } from '../lib/routine.js'
+import { describeBudget } from '../services/budget.js'
 import type { Device } from '../services/devices.js'
 import { renderFacts } from '../services/facts.js'
-import { listReminders } from '../services/reminders.js'
-import { quietHoursFor, quietNow } from '../services/settings.js'
+import { leadCountFor, listReminders } from '../services/reminders.js'
+import { quietHoursFor, quietNow, routineFor } from '../services/settings.js'
 import { nowIsoInZone } from '../services/time.js'
 import { reminderEvidence, renderRecord } from '../services/signals.js'
 import { PERSONA, WRITING } from './persona.js'
@@ -17,7 +19,9 @@ import {
   PREFERENCES,
   PROACTIVE,
   REMINDER_LOOP,
+  REMINDER_TIMING,
   REPLYING,
+  ROUTINE,
   THE_RECORD,
   TIME,
   VOICE_AND_PHOTOS,
@@ -42,10 +46,12 @@ const CORE = [
   CAPABILITIES,
   ALARMS_VS_REMINDERS,
   LEAVE_BY,
+  REMINDER_TIMING,
   REMINDER_LOOP,
   MEMORY,
   PROACTIVE,
   PREFERENCES,
+  ROUTINE,
   ACCOUNTABILITY,
   THE_RECORD,
   TIME,
@@ -80,9 +86,13 @@ export function systemPrompt(device: Device): Anthropic.TextBlockParam[] {
       text: [
         `Current local time: ${nowIsoInZone(device.timezone)} (timezone ${device.timezone}).`,
         renderQuietHours(device),
+        renderRoutine(device),
         renderOpenReminders(device),
         renderRecord(device.deviceId),
-      ].join('\n\n'),
+        describeBudget(device),
+      ]
+        .filter((s): s is string => s !== null)
+        .join('\n\n'),
     },
   ]
 }
@@ -101,13 +111,27 @@ function renderQuietHours(device: Device): string {
   return `Quiet hours: ${formatQuietHours(quiet)} local.${now}`
 }
 
+/**
+ * The owner's sleep routine, when they have stated one.
+ *
+ * Null when they haven't, rather than a default: telling Otto a confident bedtime nobody mentioned
+ * is worse than saying nothing, because it will act on it and then be caught having invented it.
+ *
+ * Values live here in the volatile tail and the RULE lives in the cached `ROUTINE` section, for the
+ * usual reason — anything per-device in front of the breakpoint re-bills the whole prefix.
+ */
+function renderRoutine(device: Device): string | null {
+  const routine = routineFor(device)
+  return routine === null ? null : describeRoutine(routine)
+}
+
 /** The live chase-list. Small, always accurate, and worth a tool round-trip on most turns. */
 function renderOpenReminders(device: Device): string {
   const open = listReminders(device.deviceId, { state: 'open' })
   if (open.length === 0) return 'You are not currently chasing the owner about anything.'
   const now = Date.now()
   const lines = open.map(
-    (r) => `- ${r.title} [${r.reminderId}] (${reminderEvidence(r, device.timezone, now)})`,
+    (r) => `- ${r.title} [${r.reminderId}] (${reminderEvidence(r, device.timezone, now, leadCountFor(device, r))})`,
   )
   return `Open reminders you are chasing:\n${lines.join('\n')}`
 }

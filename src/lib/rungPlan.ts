@@ -196,6 +196,28 @@ export function tableFor(kind: TimingKind, policy: Exclude<NagPolicy, 'off'>): R
   return TABLE[kind][policy]
 }
 
+/**
+ * The smallest gap this particular ladder asks for between two consecutive rungs.
+ *
+ * The spacing floor in `nagLadder.ts` exists to stop a quiet-hours pile-up, and its whole
+ * justification is that it constrains nothing a ladder would have done on its own. That was true
+ * when every ladder's tightest gap was thirty minutes; it stopped being true the moment the tables
+ * gained rungs twenty, ten and three minutes apart. A floor wider than this number does not space a
+ * pile-up — it silently rewrites the schedule, and the visible symptom is a lead rung shunted
+ * forward onto the due instant so a warning and the deadline itself arrive together.
+ *
+ * Returns `Infinity` for a single-rung ladder, so callers keep their own default.
+ */
+export function tightestGap(plan: ResolvedPlan, dueAtMillis: number): number {
+  const instants = [...plan.leadAt, ...plan.chase.map((ms) => dueAtMillis + ms)]
+  let tightest = Number.POSITIVE_INFINITY
+  for (let i = 1; i < instants.length; i++) {
+    const gap = instants[i]! - instants[i - 1]!
+    if (gap > 0 && gap < tightest) tightest = gap
+  }
+  return tightest
+}
+
 /** An explicit per-reminder schedule, as the model supplies it and as it is stored. */
 export type NagPlanSpec = {
   /** Minutes BEFORE the due time. Positive; the field name carries the direction. */
@@ -228,12 +250,13 @@ export type OffsetResult =
  * it in the tool result. Otto is instructed to confirm from what happened rather than from what was
  * asked, and it can only do that if the repairs come back with the answer.
  */
-export function normaliseOffsets(field: string, raw: number[], order: 'lead' | 'chase'): OffsetResult {
+export function normaliseOffsets(field: string, raw: unknown, order: 'lead' | 'chase'): OffsetResult {
+  if (!Array.isArray(raw)) return { ok: false, error: `${field} must be an array of minutes` }
   const seen = new Set<number>()
   const kept: number[] = []
   let clamped = 0
   for (let i = 0; i < raw.length; i++) {
-    const v = raw[i]!
+    const v: unknown = raw[i]
     if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v) || v < 0) {
       return { ok: false, error: `${field}[${i}] must be a whole number of minutes and not negative, got ${String(v)}` }
     }

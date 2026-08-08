@@ -7,10 +7,11 @@ import { nextNagAt } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
 import { deferPastQuietHours } from '../lib/quietHours.js'
 import { armAlarm } from './alarms.js'
+import { budgetAllows, budgetResetsAt } from './budget.js'
 import { getDevice } from './devices.js'
 import { enqueueJob } from './jobs.js'
 import { enqueueAndTryFlush } from './outbox.js'
-import { getReminder, ladderParams } from './reminders.js'
+import { getReminder, ladderParams, resolvedPlanFor } from './reminders.js'
 import { nagQuietHours } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
 
@@ -112,6 +113,28 @@ export async function runNudge(reminderId: string): Promise<void> {
     return
   }
 
+  // Daily ceiling, in the same place and for the same reason as the quiet-hours backstop above:
+  // BEFORE the claim, so being held costs no rung. Burning one against a message nobody was sent
+  // would inflate the "chased N×" counter the persona cites as evidence.
+  //
+  // Pushed to the next local midnight rather than dropped — the reminder is still open and still
+  // needs chasing, it just does not get another interruption today.
+  if (!budgetAllows(device, 'nudge', { escalating: before.escalateWithAlarm }, now)) {
+    const refill = budgetResetsAt(device.timezone, now)
+    const moved = db
+      .update(reminders)
+      .set({ nextNagAtMillis: refill, updatedAt: now })
+      .where(and(eq(reminders.reminderId, reminderId), eq(reminders.nextNagAtMillis, scheduledAt)))
+      .run()
+    if (moved.changes === 0) {
+      log.debug({ reminderId }, 'budget deferral lost the claim; another path handled it')
+      return
+    }
+    enqueueJob('nudge', refill, { reminderId, deviceId: device.deviceId })
+    log.info({ reminderId, refill }, 'daily message budget spent; moved the rung to tomorrow without burning it')
+    return
+  }
+
   const nextRung = nextNagAt(ladderParams(device, before, before.nagCount + 1, now))
 
   const claimed = db
@@ -145,7 +168,13 @@ export async function runNudge(reminderId: string): Promise<void> {
         : undefined
     // Composed after the claim, so only the winner pays for the call. `before` is the pre-increment
     // snapshot, which is what both the writer and its templated fallback expect.
-    const body = await writeNudge(before, device.timezone, overdue)
+    const plan = resolvedPlanFor(device, before)
+    const body = await writeNudge(
+      before,
+      device.timezone,
+      overdue,
+      plan ? { leadCount: plan.leadAt.length, totalRungs: plan.leadAt.length + plan.maxChases } : undefined,
+    )
     const sent = await enqueueAndTryFlush({
       waUserId,
       deviceId: device.deviceId,

@@ -1,6 +1,7 @@
 import { config, parseWeeklyReview } from '../config.js'
 import { nextBriefRunAt } from '../lib/briefSchedule.js'
 import { formatQuietHours, parseQuietHours } from '../lib/quietHours.js'
+import { dayStartHour, dayStartMinute, parseRoutine } from '../lib/routine.js'
 import { log } from '../lib/log.js'
 import { rescheduleBriefChain } from './brief.js'
 import type { Device } from './devices.js'
@@ -50,6 +51,12 @@ export type EffectivePreferences = {
   autoWakeAlarm: boolean
   autoLeaveByAlarm: boolean
   nextBriefLocal: string
+  /** The stated sleep routine, or "not set". Context only — it suppresses nothing. */
+  bedWindow: string
+  wakeWindow: string
+  /** The wall-clock time Otto treats as the owner's morning. Derived from the wake window's end. */
+  dayStartsAt: string
+  dailyMessageBudget: string
 }
 
 function hhmm(hour: number, minute: number): string {
@@ -74,6 +81,7 @@ function effective(device: Device, s: DeviceSettings): EffectivePreferences {
   // the server default, while an explicit "off" is honoured as off. Read through `quietHoursFor` so
   // this and every scheduler path answer from one implementation of that rule.
   const weekly = parseWeeklyReview(s.weeklyReviewAt === null ? config.weeklyReviewDefault : s.weeklyReviewAt)
+  const routine = parseRoutine(s.bedWindow, s.wakeWindow)
   return {
     briefEnabled: s.briefEnabled,
     briefAt: hhmm(s.briefHour, s.briefMinute),
@@ -84,6 +92,12 @@ function effective(device: Device, s: DeviceSettings): EffectivePreferences {
     autoWakeAlarm: s.autoWakeAlarm,
     autoLeaveByAlarm: s.autoLeaveByAlarm,
     nextBriefLocal: epochMillisToLocalHuman(nextBriefRunAt(s, device.timezone, Date.now()), device.timezone),
+    // Reported even when half-stated, so "I told you my bedtime and nothing happened" has a visible
+    // cause: `parseRoutine` is all-or-nothing, and dayStartsAt is the field that shows it.
+    bedWindow: s.bedWindow === null ? 'not set' : s.bedWindow,
+    wakeWindow: s.wakeWindow === null ? 'not set' : s.wakeWindow,
+    dayStartsAt: routine === null ? 'not set' : hhmm(dayStartHour(routine), dayStartMinute(routine)),
+    dailyMessageBudget: s.dailyMessageBudget === 0 ? 'unlimited' : `${s.dailyMessageBudget} messages a day`,
   }
 }
 
@@ -146,9 +160,57 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
     else patch.weeklyReviewAt = raw.toUpperCase()
   }
 
+  // The two routine windows. Same raw-store/parse-at-use rule as quietHours, but "off" clears them
+  // to NULL rather than storing the literal: unlike quiet hours there is no server-wide routine
+  // default to accidentally reinstate, and "I don't keep regular hours" genuinely is no routine.
+  const window = (v: unknown, field: string): string | null | undefined => {
+    if (v === undefined) return undefined
+    const raw = typeof v === 'string' ? v.trim() : null
+    if (raw === null) {
+      errors.push(`${field} must be a string like "02:00-04:00" or "off"`)
+      return undefined
+    }
+    if (isOff(raw)) return null
+    if (parseQuietHours(raw) === null) {
+      errors.push(`${field} "${raw}" must be "HH:MM-HH:MM" (earliest to latest) or "off"`)
+      return undefined
+    }
+    return raw
+  }
+  const bed = window(input.bedWindow, 'bedWindow')
+  const wake = window(input.wakeWindow, 'wakeWindow')
+  if (bed !== undefined) patch.bedWindow = bed
+  if (wake !== undefined) patch.wakeWindow = wake
+
+  if (input.dailyMessageBudget !== undefined) {
+    const v = input.dailyMessageBudget
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 500) {
+      errors.push('dailyMessageBudget must be a whole number between 0 (unlimited) and 500')
+    } else {
+      patch.dailyMessageBudget = v
+    }
+  }
+
   if (errors.length > 0) return { error: errors.join('; ') }
 
   const before = getSettings(device.deviceId)
+
+  // Stating a routine moves the morning brief to the owner's actual morning — unless they set a
+  // brief time in the same breath, in which case they have said where they want it and that wins.
+  //
+  // Without this, "I don't get up till lunchtime" leaves the brief at 07:00 and the owner has to
+  // know to ask for a second change. The write goes through `updateSettings` like any other, so the
+  // BRIEF_TIMING_FIELDS check below sees it and moves the pending job for free.
+  const routineNow = parseRoutine(
+    patch.bedWindow === undefined ? before.bedWindow : patch.bedWindow,
+    patch.wakeWindow === undefined ? before.wakeWindow : patch.wakeWindow,
+  )
+  const routineChanged = patch.bedWindow !== undefined || patch.wakeWindow !== undefined
+  const briefTimeStated = input.briefHour !== undefined || input.briefMinute !== undefined
+  if (routineNow !== null && routineChanged && !briefTimeStated) {
+    patch.briefHour = dayStartHour(routineNow)
+    patch.briefMinute = dayStartMinute(routineNow)
+  }
 
   // Two enabled slots at the same minute is a brief the owner is promised and never gets.
   // `slotForRunAt` resolves that clash to morning by design, so the evening one has no instant it can

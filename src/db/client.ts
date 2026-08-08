@@ -194,11 +194,11 @@ export function ensureSchema(): void {
   ensureColumn('device_settings', 'wake_window', 'wake_window TEXT')
   ensureColumn('device_settings', 'daily_message_budget', 'daily_message_budget INTEGER NOT NULL DEFAULT 60')
 
-  // services/budget.ts counts today's proactive sends per device on every rung fire. outbox_pending
-  // leads with wa_user_id and filters on state='PENDING', so it cannot serve a device_id + created_at
-  // scan. Indexes are safe to add here unconditionally — unlike columns, CREATE INDEX IF NOT EXISTS
-  // is genuinely idempotent.
-  sqlite.exec(`CREATE INDEX IF NOT EXISTS outbox_device_day ON outbox (device_id, created_at);`)
+  // services/budget.ts counts today's delivered messages per device on every rung fire.
+  // outbox_pending leads with wa_user_id and filters on state='PENDING', so it cannot serve a
+  // device_id + sent_at_millis scan. Indexes are safe to add here unconditionally — unlike columns,
+  // CREATE INDEX IF NOT EXISTS is genuinely idempotent.
+  sqlite.exec(`CREATE INDEX IF NOT EXISTS outbox_device_sent ON outbox (device_id, sent_at_millis);`)
 }
 
 function ensureColumn(table: string, column: string, ddl: string): void {

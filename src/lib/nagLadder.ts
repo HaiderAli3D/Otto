@@ -5,6 +5,7 @@ import {
   ABSOLUTE_MAX_RUNGS,
   DEFAULT_TIMING_KIND,
   planRungs,
+  tightestGap,
   type NagPlanSpec,
   type NagPolicy,
   type ResolvedPlan,
@@ -58,23 +59,38 @@ const MINUTE = 60_000
 export const MIN_RUNG_GAP_MS = 30 * MINUTE
 
 /**
- * The spacing floor for one intensity.
+ * The spacing floor for one intensity, before the ladder's own shape is taken into account.
  *
  * Per-policy rather than global because the floor exists to catch a pile-up, not to override the
- * table: every value here is at or below the tightest gap its own ladder ever asks for, so it
- * constrains nothing that ladder would have done on its own. A single global 3 minutes would
- * reinstate for `gentle` exactly the collapse `MIN_RUNG_GAP_MS` documents.
+ * table. A single global 3 minutes would reinstate for `gentle` exactly the collapse
+ * `MIN_RUNG_GAP_MS` documents.
+ *
+ * This is only ever a CEILING on the real floor — see `spacingFloor`. On its own it is not safe to
+ * apply, because a ladder can ask for rungs closer together than its policy's nominal spacing.
  */
 export function minRungGapMs(policy: NagPolicy): number {
   switch (policy) {
     case 'hard':
       return 10 * MINUTE
     case 'relentless':
-      // The tightest rung any table asks for is `appointment` × `relentless`'s due + 3m.
       return 3 * MINUTE
     default:
       return MIN_RUNG_GAP_MS
   }
+}
+
+/**
+ * The floor actually applied: the policy's nominal spacing, or this ladder's own tightest gap,
+ * whichever is smaller.
+ *
+ * Taking the minimum is what keeps the floor's justification true. It is there to separate rungs a
+ * quiet window collapsed onto one instant, and it must never be wide enough to move a rung the
+ * table placed deliberately. `appointment` × `persistent` is the case that proved it: its lead
+ * rungs are 20 minutes apart, so a flat 30-minute floor pushed the last warning forward onto the
+ * appointment itself and the owner got the heads-up and the "it's now" in the same breath.
+ */
+function spacingFloor(policy: NagPolicy, plan: ResolvedPlan, dueAtMillis: number): number {
+  return Math.min(minRungGapMs(policy), tightestGap(plan, dueAtMillis))
 }
 
 /** Where a rung sits relative to the due time. Drives wording, and nothing else. */
@@ -185,7 +201,7 @@ export function nextNagAt(params: {
   //
   // That order is load-bearing. Flooring after the deferral could push a rung that had legitimately
   // cleared the window (say 21:55, with the window opening at 22:00) straight back into it.
-  return deferPastQuietHours(Math.max(at, nowMillis + minRungGapMs(policy)), zone, quiet)
+  return deferPastQuietHours(Math.max(at, nowMillis + spacingFloor(policy, plan, dueAtMillis)), zone, quiet)
 }
 
 /**
@@ -232,7 +248,7 @@ export function nudgeTextFor(ctx: {
   const { title, phase, index, overdueDescription } = ctx
   if (phase === 'lead') {
     if (index === 0) return `${title} — heads up, that one's coming.`
-    if (index === 1) return `${title} is still to do.`
+    if (index === 1) return `${title} — that's due soon.`
     return `${title} — not long left on that.`
   }
   if (phase === 'due') return `${title}.`

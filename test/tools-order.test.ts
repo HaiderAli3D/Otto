@@ -28,6 +28,10 @@ const EXPECTED = [
   'snooze_reminder',
   'cancel_reminder',
   'reopen_reminder',
+  // Kept with its siblings rather than bolted onto the end of the whole list. That shifts every
+  // tool after it down the cached prefix, which costs one full-price turn per user at deploy — the
+  // same one-off as editing promptSections.ts, and worth it to keep the reminder tools together.
+  'update_reminder',
   'remember_fact',
   'recall_facts',
   'forget_fact',

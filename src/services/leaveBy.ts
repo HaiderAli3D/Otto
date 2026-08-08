@@ -2,12 +2,13 @@ import { DateTime } from 'luxon'
 import { leaveByAlarmId, wakeAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
 import { inQuietHours } from '../lib/quietHours.js'
+import { dayStartHour } from '../lib/routine.js'
 import { armAlarm, cancelAlarm, getAlarm } from './alarms.js'
 import type { Device } from './devices.js'
 import { factValue } from './facts.js'
 import type { CalendarEvent } from './google.js'
 import { cancelJobs, enqueueJob } from './jobs.js'
-import { getSettings, quietHoursFor } from './settings.js'
+import { getSettings, quietHoursFor, schedulingRoutine } from './settings.js'
 import { localDateKey } from './time.js'
 import { estimateTravelMinutes } from './travel.js'
 
@@ -30,6 +31,14 @@ export const LEAVE_SOON_MS = 5 * 60_000
 
 /** A preceding event this long before the target still tells us where they are starting from. */
 export const PRECEDING_WINDOW_MS = 3 * 3_600_000
+
+/**
+ * How long after their day starts the owner is assumed to still be at home, and by when they are
+ * assumed to have left work. Offsets rather than clock hours so both track a stated routine; the
+ * values reproduce the original fixed 10:00 and 18:00 for the default 09:00 day start.
+ */
+const AT_HOME_HOURS_AFTER_DAY_START = 1
+const AT_WORK_HOURS_AFTER_DAY_START = 9
 
 /** Two alarms closer together than this are noise, not information. */
 export const MERGE_WINDOW_MS = 20 * 60_000
@@ -246,11 +255,25 @@ export function resolveOrigin(params: {
     return DateTime.fromMillis(start, { zone }).toISODate() === dt.toISODate()
   })
 
-  // Before 10:00, or the first thing they do all day, means they are setting off from home. A
+  // Early in THEIR day, or the first thing they do all day, means they are setting off from home. A
   // weekday mid-block with something already behind them means they are at work. Evenings and
   // weekends are home again. Work falls back to home rather than to nothing: a wrong-but-plausible
   // OFFER is recoverable, and a missing one just means the feature never appears.
-  const key = dt.hour < 10 || firstOfDay ? 'home.address' : !weekend && dt.hour < 18 ? 'work.address' : 'home.address'
+  //
+  // Measured from the owner's own day start rather than from a fixed 10:00 and 18:00. Those two
+  // numbers were the same guess as the ladder's hardcoded 09:00 morning, and they fail the same way:
+  // for someone who gets up at 14:00, every single 11:00 event would be priced from their work
+  // address while they were still asleep at home. Identical arithmetic for the default routine,
+  // whose day starts at 09:00.
+  const dayStart = dayStartHour(schedulingRoutine(params.device))
+  const atHomeUntil = dayStart + AT_HOME_HOURS_AFTER_DAY_START
+  const atWorkUntil = dayStart + AT_WORK_HOURS_AFTER_DAY_START
+  const key =
+    dt.hour < atHomeUntil || firstOfDay
+      ? 'home.address'
+      : !weekend && dt.hour < atWorkUntil
+        ? 'work.address'
+        : 'home.address'
   const raw = factValue(params.device.deviceId, key) ?? (key === 'work.address' ? factValue(params.device.deviceId, 'home.address') : null)
   const address = raw?.trim()
   if (address === undefined || address.length === 0 || isVirtualLocation(address)) return null

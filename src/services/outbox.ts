@@ -4,6 +4,7 @@ import { db } from '../db/client.js'
 import { outbox } from '../db/schema.js'
 import { log } from '../lib/log.js'
 import { inQuietHours, type QuietHours } from '../lib/quietHours.js'
+import { budgetAllows } from './budget.js'
 import { clearInboundWindow, getDevice, listDevices, markTemplateSent, type Device } from './devices.js'
 import { appendAssistantTurns } from './sessions.js'
 import { quietHoursFor } from './settings.js'
@@ -31,6 +32,21 @@ const WINDOW_SAFETY_MS = 30 * 60 * 1000
 
 /** Default lifetime of a queued message — a nudge nobody saw for 18h is stale, not useful. */
 export const DEFAULT_TTL_MS = 18 * 60 * 60 * 1000
+
+/**
+ * How many proactive messages one flush pass will deliver before leaving the rest queued.
+ *
+ * A window that reopens after a day of silence used to dump the entire backlog inside one second:
+ * unreadable, and the exact traffic shape that gets a WhatsApp business number rate-limited. The
+ * remaining rows keep their TTL and go out on the next pass — the 5-minute sweep, the next inbound,
+ * or the next producer's `enqueueAndTryFlush` — so a ten-message backlog drains over minutes
+ * instead of arriving as a wall.
+ *
+ * Deliberately a CAP rather than a sleep between sends. `flushOutbox` runs inside the per-user
+ * promise chain that `routes/whatsapp.ts` serialises every inbound message through, so pausing here
+ * would make the owner's own reply wait behind the backlog being paced.
+ */
+export const MAX_SENDS_PER_FLUSH = 3
 
 /**
  * Hard backstop for a PENDING row, enforced by gc. `expiresAtMillis` covers the normal case, but a
@@ -257,6 +273,26 @@ export async function flushOutbox(
     if (opts.proactiveFor && heldByQuietHours(opts.proactiveFor, row.kind as OutboxKind, now)) {
       log.debug({ waUserId, id: row.id, kind: row.kind }, 'outbox: holding a proactive message for quiet hours')
       continue
+    }
+    // Same shape, same reason, for the daily ceiling — but deliberately NOT for nudges.
+    //
+    // `runNudge` is the primary gate and stops a nudge before it is ever queued. It is also the
+    // only layer that knows whether the reminder behind the row is an escalating one, which is
+    // exempt by the same argument `nagQuietHours` makes: a per-item opt-in the owner set on the one
+    // thing that matters must beat a global default. A row reaching here has already been judged by
+    // a gate with more information than this one has, so re-judging it with less can only overrule
+    // that exemption — which is exactly the bug this comment replaced.
+    //
+    // What this catches is the producers that never go through `runNudge` at all: the brief, the
+    // weekly review, the digest. Held, not retired — the row keeps its TTL and goes out tomorrow.
+    if (opts.proactiveFor && row.kind !== 'nudge' && !budgetAllows(opts.proactiveFor, row.kind as OutboxKind, {}, now)) {
+      log.info({ waUserId, id: row.id, kind: row.kind }, 'outbox: daily message budget spent; holding')
+      continue
+    }
+    // Enough for one pass; the rest keep their place in the queue for the next one.
+    if (opts.proactiveFor && delivered.length >= MAX_SENDS_PER_FLUSH) {
+      log.info({ waUserId, remaining: rows.length - delivered.length }, 'outbox: pass full, leaving the tail queued')
+      break
     }
     // `sentAtMillis` doubles as the claim stamp — the column is written nowhere else and read
     // nowhere at all, so it costs no migration on a branch that deliberately adds no DDL, and it is

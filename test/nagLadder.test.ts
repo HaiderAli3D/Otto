@@ -1,7 +1,9 @@
 import { DateTime } from 'luxon'
 import { describe, expect, it } from 'vitest'
-import { MAX_NAGS, nextNagAt, nudgeText } from '../src/lib/nagLadder.js'
+import { MAX_NAGS, nextNagAt, nudgeText, nudgeTextFor } from '../src/lib/nagLadder.js'
 import { parseQuietHours } from '../src/lib/quietHours.js'
+import { parseRoutine } from '../src/lib/routine.js'
+import { tableFor, type NagPolicy, type TimingKind } from '../src/lib/rungPlan.js'
 
 const ZONE = 'Europe/London'
 const at = (iso: string): number => DateTime.fromISO(iso, { zone: ZONE }).toMillis()
@@ -187,6 +189,144 @@ describe('nextNagAt with quiet hours', () => {
       } else {
         expect(quiet).toBe(bare)
       }
+    }
+  })
+})
+
+describe('walking every ladder the way runNudge walks it', () => {
+  /**
+   * The single most valuable test in this module.
+   *
+   * `runNudge` re-enters `nextNagAt` at the moment each rung fires, feeding the previous result
+   * back as `nowMillis` — so a ladder that looks fine when the clock is held still can still walk
+   * backwards, stall, or run forever in production. This drives all twelve (kind × intensity)
+   * pairs the way the scheduler actually does and asserts the four properties that make a ladder
+   * safe: it terminates, it never goes backwards, it never schedules the past, and it respects its
+   * own post-due ceiling.
+   */
+  const KINDS: TimingKind[] = ['deadline', 'appointment', 'trigger']
+  const POLICIES: NagPolicy[] = ['gentle', 'persistent', 'hard', 'relentless']
+
+  for (const kind of KINDS) {
+    for (const policy of POLICIES) {
+      it(`${kind} × ${policy} terminates and never goes backwards`, () => {
+        const due = at('2026-08-20T12:00:00')
+        const planned = at('2026-07-20T12:00:00') // a month of run-up, so no lead rung is pruned
+        let now = planned
+        const fired: number[] = []
+
+        for (let nagCount = 0; nagCount < 100; nagCount++) {
+          const next = nextNagAt({ policy, nagCount, dueAtMillis: due, zone: ZONE, nowMillis: now, kind, plannedAtMillis: planned })
+          if (next === null) break
+          expect(next, `${kind}/${policy} rung ${nagCount} landed in the past`).toBeGreaterThanOrEqual(now)
+          if (fired.length > 0) {
+            expect(next, `${kind}/${policy} rung ${nagCount} went backwards`).toBeGreaterThanOrEqual(fired.at(-1)!)
+          }
+          fired.push(next)
+          now = next
+        }
+
+        expect(fired.length, `${kind}/${policy} never terminated`).toBeLessThan(100)
+        expect(fired.length, `${kind}/${policy} says nothing at all`).toBeGreaterThan(0)
+
+        const table = tableFor(kind, policy as Exclude<NagPolicy, 'off'>)
+        const postDue = fired.filter((ms) => ms >= due).length
+        expect(postDue, `${kind}/${policy} exceeded its own maxChases`).toBeLessThanOrEqual(table.maxChases)
+        // A deadline that warned nobody in a month of run-up is the feature not working at all.
+        if (kind === 'deadline') expect(fired.filter((ms) => ms < due).length).toBeGreaterThan(0)
+        if (kind === 'trigger') expect(fired.filter((ms) => ms < due).length).toBe(0)
+      })
+    }
+  }
+})
+
+describe('nextNagAt with lead rungs', () => {
+  const due = at('2026-08-20T12:00:00')
+  const planned = at('2026-07-20T12:00:00')
+  const deadline = { policy: 'persistent' as const, dueAtMillis: due, zone: ZONE, kind: 'deadline' as const, plannedAtMillis: planned }
+
+  it('starts a deadline in its run-up, days before anything is late', () => {
+    const first = nextNagAt({ ...deadline, nagCount: 0, nowMillis: planned })!
+    expect(first).toBeLessThan(due)
+    expect(local(first)).toBe('2026-08-17 12:00') // three days before
+  })
+
+  it('lands rung `leadCount` exactly ON the due instant, undeferred even inside quiet hours', () => {
+    // The owner's-own-instant exemption keys on the OFFSET being zero, not the INDEX. With five
+    // lead rungs the due instant sits at index 5, and checking for index 0 would silently withdraw
+    // the exemption from exactly the reminders that warn hardest.
+    const lateDue = at('2026-08-20T23:30:00')
+    const leadCount = 5 // persistent deadline: 3d, 1d, 4h, 1h, 20m
+    const rung = nextNagAt({
+      ...deadline,
+      dueAtMillis: lateDue,
+      nagCount: leadCount,
+      nowMillis: lateDue - 20 * 60_000,
+      quiet: NIGHT,
+    })
+    expect(rung).toBe(lateDue)
+  })
+
+  it('prunes every warning when the deadline is set minutes before it lands', () => {
+    // Rung 0 is then the due instant itself, and it is still the owner's own chosen time.
+    const soon = at('2026-08-20T12:00:00')
+    const first = nextNagAt({ ...deadline, nagCount: 0, plannedAtMillis: soon - 5 * 60_000, nowMillis: soon - 5 * 60_000 })
+    expect(first).toBe(soon)
+  })
+
+  it('gives an appointment a warning before and a check after, then stops', () => {
+    const appt = { policy: 'persistent' as const, dueAtMillis: due, zone: ZONE, kind: 'appointment' as const, plannedAtMillis: planned }
+    let now = planned
+    const fired: number[] = []
+    for (let n = 0; n < 20; n++) {
+      const next = nextNagAt({ ...appt, nagCount: n, nowMillis: now })
+      if (next === null) break
+      fired.push(next)
+      now = next
+    }
+    expect(fired.filter((ms) => ms < due).length).toBe(3) // 2h, 30m, 10m before
+    expect(fired.filter((ms) => ms > due).length).toBe(2) // +10m, +30m
+    // And then it is genuinely over — no daily tail dragging an attended appointment through a week.
+    expect(fired.at(-1)!).toBeLessThan(due + 60 * 60_000)
+  })
+
+  it('puts the daily tail on the owner’s own morning rather than a hardcoded 09:00', () => {
+    const routine = parseRoutine('02:00-04:00', '10:00-14:00')!
+    const tail = nextNagAt({
+      policy: 'persistent',
+      nagCount: 4,
+      dueAtMillis: at('2026-08-03T18:00:00'),
+      zone: ZONE,
+      nowMillis: at('2026-08-03T18:00:00'),
+      routine,
+    })
+    expect(local(tail!)).toBe('2026-08-04 14:00')
+  })
+
+  it('keeps the daily tail on wall-clock across a DST change for a non-default routine', () => {
+    const routine = parseRoutine('02:00-04:00', '10:00-14:00')!
+    const due = at('2026-10-24T18:00:00')
+    const tail = nextNagAt({ policy: 'persistent', nagCount: 4, dueAtMillis: due, zone: ZONE, nowMillis: due, routine })
+    expect(local(tail!)).toBe('2026-10-25 14:00')
+  })
+})
+
+describe('nudgeTextFor', () => {
+  it('never scolds in the run-up — nothing is late yet', () => {
+    // A warning three hours before a deadline that reads like a chase teaches the owner to ignore
+    // the ones that aren't.
+    for (const index of [0, 1, 2, 5]) {
+      const text = nudgeTextFor({ title: 'File the tax return', phase: 'lead', index })
+      expect(text).not.toMatch(/still|outstanding|drop it/i)
+    }
+  })
+
+  it('reproduces nudgeText exactly, which is what the fallback path depends on', () => {
+    expect(nudgeText('Take the bins out', 0)).toBe(nudgeTextFor({ title: 'Take the bins out', phase: 'due', index: 0 }))
+    for (const n of [1, 2, 3, 7]) {
+      expect(nudgeText('Take the bins out', n, 'due Mon')).toBe(
+        nudgeTextFor({ title: 'Take the bins out', phase: 'overdue', index: n - 1, overdueDescription: 'due Mon' }),
+      )
     }
   })
 })

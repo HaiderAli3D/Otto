@@ -1,7 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { newAlarmId } from '../../lib/ids.js'
-import { isNagPolicy, type NagPolicy } from '../../lib/nagLadder.js'
+import { isNagPolicy, isTimingKind, previewRungs, type NagPolicy, type TimingKind } from '../../lib/nagLadder.js'
 import { deferPastQuietHours } from '../../lib/quietHours.js'
+import { DEFAULT_TIMING_KIND, normaliseOffsets, type NagPlanSpec } from '../../lib/rungPlan.js'
 import { armAlarm, cancelAlarm, listArmed } from '../../services/alarms.js'
 import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
@@ -14,9 +15,13 @@ import {
   completeReminder,
   createReminder,
   getReminder,
+  ladderParams,
   listReminders,
   reopenReminder,
   snoozeReminder,
+  timingKindOf,
+  updateReminder,
+  type Reminder,
 } from '../../services/reminders.js'
 import { nagQuietHours } from '../../services/settings.js'
 import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/time.js'
@@ -46,16 +51,77 @@ export function buildTools(): Anthropic.Tool[] {
   return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools, ...settingsTools]
 }
 
-function reminderView(r: { reminderId: string; title: string; dueAtMillis: number | null; state: string; recurrence: string | null; nagPolicy: string; nagCount: number }, zone: string) {
+function reminderView(r: Reminder, zone: string) {
   return {
     reminderId: r.reminderId,
     title: r.title,
     state: r.state,
     dueLocal: r.dueAtMillis === null ? null : epochMillisToLocalHuman(r.dueAtMillis, zone),
     overdue: r.dueAtMillis !== null && r.dueAtMillis < Date.now() && r.state === 'OPEN',
+    // What that due time MEANS, so "when's my dentist thing" and "have I still got time on the tax
+    // return" get answered differently. Without it every listed reminder reads as a trigger.
+    timing: timingKindOf(r),
     repeats: r.recurrence ?? undefined,
     nagPolicy: r.nagPolicy,
     timesNagged: r.nagCount,
+  }
+}
+
+/**
+ * How many upcoming rungs a create/update result shows the owner.
+ *
+ * Three, not the whole ladder: `relentless` has thirty and a tool result is re-sent with every
+ * later turn in the conversation, so the full list would be paid for repeatedly to say something
+ * nobody reads past the first line of.
+ */
+const SCHEDULE_PREVIEW_RUNGS = 3
+
+/**
+ * Read the explicit `leadMinutes`/`chaseMinutes`/`keepChasingDaily` triple off a tool call.
+ *
+ * Returns `{ spec: null }` when the model supplied none, which means "use the table" — the common
+ * case, and the one that keeps a future improvement to the tables reaching every reminder that
+ * never asked for anything special.
+ *
+ * A bad value rejects the whole call with the field named. Repairs (clamping an absurd offset,
+ * dropping duplicates, capping the count) are reported as prose instead, because Otto is told to
+ * confirm from what happened rather than from what was asked and can only do that if the repairs
+ * come back with the answer.
+ */
+function readNagPlan(a: Record<string, unknown>): { error: string } | { spec: NagPlanSpec | null; issues: string[] } {
+  const issues: string[] = []
+  const spec: NagPlanSpec = {}
+
+  for (const [field, order] of [
+    ['leadMinutes', 'lead'],
+    ['chaseMinutes', 'chase'],
+  ] as const) {
+    if (a[field] === undefined) continue
+    const res = normaliseOffsets(field, a[field], order)
+    if (!res.ok) return { error: res.error }
+    if (order === 'lead') spec.leadMinutes = res.minutes
+    else spec.chaseMinutes = res.minutes
+    if (res.clamped > 0) issues.push(`${res.clamped} ${field} entr${res.clamped === 1 ? 'y was' : 'ies were'} over 30 days and got clamped`)
+    if (res.droppedForCount > 0) issues.push(`${res.droppedForCount} of the ${field} were dropped — only the ones nearest the due time were kept`)
+  }
+
+  if (typeof a.keepChasingDaily === 'boolean') spec.keepChasingDaily = a.keepChasingDaily
+  const explicit = spec.leadMinutes !== undefined || spec.chaseMinutes !== undefined
+  return { spec: explicit ? spec : null, issues }
+}
+
+/**
+ * When the next few chases actually land, plus anything that had to be repaired.
+ *
+ * Walked through `previewRungs`, which re-enters the ladder at each result the way the scheduler
+ * does — a preview that held the clock still would show times the system will never produce.
+ */
+function scheduleReport(device: Device, r: Reminder, issues: string[]) {
+  const upcoming = previewRungs(ladderParams(device, r, r.nagCount, Date.now()), SCHEDULE_PREVIEW_RUNGS)
+  return {
+    nextChasesLocal: upcoming.map((ms) => epochMillisToLocalHuman(ms, device.timezone)),
+    chasesNothingScheduled: upcoming.length === 0 ? true : undefined,
+    scheduleNotes: issues.length > 0 ? issues : undefined,
   }
 }
 
@@ -150,22 +216,29 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       if (recurrence !== null && dueAtMillis === null) {
         return { error: 'a recurring reminder needs dueLocalISO for its first occurrence' }
       }
-      const nagPolicy: NagPolicy = isNagPolicy(a.nagPolicy) ? a.nagPolicy : 'gentle'
+      const nagPolicy: NagPolicy = isNagPolicy(a.nagPolicy) ? a.nagPolicy : 'persistent'
+      const timing: TimingKind = isTimingKind(a.timing) ? a.timing : DEFAULT_TIMING_KIND
+      const plan = readNagPlan(a)
+      if ('error' in plan) return { error: plan.error }
       const r = await createReminder(device, {
         title: String(a.title),
         detail: a.detail === undefined ? null : String(a.detail),
         dueAtMillis,
+        timing,
         recurrence,
         nagPolicy,
+        nagPlan: plan.spec,
         ring: a.ring === true,
         escalateWithAlarm: a.escalateWithAlarm === true,
       })
       return {
         reminderId: r.reminderId,
         dueLocal: dueAtMillis === null ? null : epochMillisToLocalHuman(dueAtMillis, device.timezone),
+        timing,
         nagPolicy,
         rings: Boolean(r.alarmId),
         repeats: recurrence ?? undefined,
+        ...scheduleReport(device, r, plan.issues),
       }
     }
     case 'list_reminders': {
@@ -223,6 +296,56 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       const existing = getReminder(reminderId)
       if (!existing) return { error: `no reminder with id ${reminderId}` }
       return { reopened: reopenReminder(device, reminderId), title: existing.title }
+    }
+    case 'update_reminder': {
+      const reminderId = String(a.reminderId)
+      const recurrence =
+        a.clearRecurrence === true ? null : a.recurrence === undefined ? undefined : String(a.recurrence)
+      if (typeof recurrence === 'string' && parseRecurrence(recurrence) === null) {
+        return { error: `invalid recurrence rule "${recurrence}" — use FREQ=DAILY|WEEKLY|MONTHLY with optional INTERVAL/BYDAY` }
+      }
+      const dueAtMillis =
+        a.clearDue === true
+          ? null
+          : a.dueLocalISO === undefined
+            ? undefined
+            : localIsoToEpochMillis(String(a.dueLocalISO), device.timezone)
+
+      // `useDefaultSchedule` clears any stored plan; otherwise an absent pair of arrays leaves
+      // whatever was there alone. The two are mutually exclusive in effect, and clearing wins —
+      // "go back to normal, but warn me an hour before" is a contradiction, and the half that keeps
+      // an explicit array is the half the owner would not have noticed.
+      const plan = readNagPlan(a)
+      if ('error' in plan) return { error: plan.error }
+      const nagPlan = a.useDefaultSchedule === true ? null : plan.spec
+
+      const res = await updateReminder(device, reminderId, {
+        title: a.title === undefined ? undefined : String(a.title),
+        detail: a.detail === undefined ? undefined : String(a.detail),
+        dueAtMillis,
+        timing: isTimingKind(a.timing) ? a.timing : undefined,
+        nagPolicy: isNagPolicy(a.nagPolicy) ? a.nagPolicy : undefined,
+        nagPlan: nagPlan ?? (a.useDefaultSchedule === true ? null : undefined),
+        recurrence,
+        ring: typeof a.ring === 'boolean' ? a.ring : undefined,
+        escalateWithAlarm: typeof a.escalateWithAlarm === 'boolean' ? a.escalateWithAlarm : undefined,
+        resetChase: a.resetChase === true,
+      })
+      if (!res.ok) return { error: res.error }
+      const r = res.reminder
+      return {
+        reminderId,
+        title: r.title,
+        dueLocal: r.dueAtMillis === null ? null : epochMillisToLocalHuman(r.dueAtMillis, device.timezone),
+        timing: timingKindOf(r),
+        nagPolicy: r.nagPolicy,
+        rings: Boolean(r.alarmId),
+        repeats: r.recurrence ?? undefined,
+        // Reported so Otto never says "that's not on your record" about a move that was.
+        countedAsPushingItBack: res.deferred,
+        movedBackTotal: r.deferCount,
+        ...scheduleReport(device, r, plan.issues),
+      }
     }
 
     case 'remember_fact': {

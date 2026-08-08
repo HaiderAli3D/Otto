@@ -19,7 +19,7 @@ import {
   supersedePending,
   windowOpen,
 } from './outbox.js'
-import { listReminders, type Reminder } from './reminders.js'
+import { leadCountFor, listReminders, type Reminder } from './reminders.js'
 import { getSettings, markBriefSent } from './settings.js'
 import { reminderEvidence } from './signals.js'
 import { localDateKey, sameLocalDay } from './time.js'
@@ -132,7 +132,10 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
   const open = listReminders(device.deviceId, { state: 'open' })
   const reminders = remindersForBrief(open).map((r) => ({
     title: r.title,
-    evidence: reminderEvidence(r, zone, nowMillis),
+    // leadCount so a deadline still in its run-up reads as "warned 3× beforehand" rather than
+    // "chased 3×" — the brief is unprompted, and being sharp there about something not yet late is
+    // the worst place to get it wrong.
+    evidence: reminderEvidence(r, zone, nowMillis, leadCountFor(device, r)),
   }))
 
   // Alarms a reminder is RENTING are already being reported as that reminder. Listing both
