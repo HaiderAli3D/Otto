@@ -66,6 +66,9 @@ export function resolvedPlanFor(device: Device, r: Reminder): ResolvedPlan | nul
     plannedAtMillis: r.plannedAtMillis ?? r.createdAt,
     zone: device.timezone,
     override: parseNagPlan(r.nagPlan),
+    // Must match what `nextNagAt` sees, or the lead count reported to the evidence layer would
+    // disagree with the rungs actually scheduled.
+    quiet: nagQuietHours(device, r.escalateWithAlarm),
   })
 }
 

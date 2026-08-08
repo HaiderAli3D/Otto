@@ -33,6 +33,42 @@ import type { OutboxKind } from './outbox.js'
 const HEARTBEAT_STALE_MS = 3 * 24 * 60 * 60 * 1000
 
 /**
+ * The first app build that understands `NUDGE`. Older ones must never be pushed to.
+ *
+ * This gate is the difference between a delayed message and a lost one. The app's parser drops an
+ * unrecognised `type` silently — by design, so a future schema cannot crash it — and a build
+ * predating the nudge tier has no way to report the drop either. So without this check the server
+ * would send a chase, get a successful FCM response, mark the outbox row SENT, and the owner would
+ * simply never see it. That is the exact failure this whole feature exists to remove, reintroduced
+ * one layer down.
+ *
+ * It also makes deployment order a non-issue: the server can ship before the app, and push
+ * delivery switches itself on the first time the phone heartbeats with a new enough version.
+ */
+const MIN_NUDGE_APP_VERSION = '1.1.0'
+
+/**
+ * Dotted-numeric version compare, tolerant of anything that is not one.
+ *
+ * Returns false for a null, empty or unparseable `appVersion` — refusing to push is always the
+ * safe direction here, because the cost of a false negative is a message going over WhatsApp
+ * instead, and the cost of a false positive is a message going nowhere at all.
+ */
+export function versionAtLeast(actual: string | null, minimum: string): boolean {
+  if (!actual) return false
+  const parse = (v: string): number[] => v.split('.').map((p) => Number.parseInt(p, 10))
+  const a = parse(actual)
+  const b = parse(minimum)
+  if (a.some(Number.isNaN)) return false
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0
+    const y = b[i] ?? 0
+    if (x !== y) return x > y
+  }
+  return true
+}
+
+/**
  * How loudly each kind arrives on the phone.
  *
  * The briefs and the weekly review are SILENT because they are scheduled, expected, and nothing in
@@ -66,6 +102,8 @@ const TTL_BY_KIND_MS: Record<OutboxKind, number> = {
 export function pushReachable(device: Device, nowMillis: number = Date.now()): boolean {
   if (!device.fcmToken) return false
   if (!device.hmacSecret) return false
+  // An app too old to understand NUDGE would drop it without a word — see MIN_NUDGE_APP_VERSION.
+  if (!versionAtLeast(device.appVersion, MIN_NUDGE_APP_VERSION)) return false
   if (device.lastHeartbeatAt === null) return false
   return nowMillis - device.lastHeartbeatAt < HEARTBEAT_STALE_MS
 }

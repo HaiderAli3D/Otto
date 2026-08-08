@@ -5,6 +5,7 @@ vi.mock('../src/fcm/sender.js', () => ({
 }))
 
 import { eq } from 'drizzle-orm'
+import { DateTime } from 'luxon'
 import { db, ensureSchema } from '../src/db/client.js'
 import { reminders } from '../src/db/schema.js'
 import { tableFor } from '../src/lib/rungPlan.js'
@@ -18,6 +19,7 @@ import {
   resolvedPlanFor,
   updateReminder,
 } from '../src/services/reminders.js'
+import { updateSettings } from '../src/services/settings.js'
 import { makeDevice } from './helpers.js'
 
 /**
@@ -50,12 +52,36 @@ describe('timing kinds', () => {
   })
 
   it('warns before an appointment and stops chasing shortly after it', async () => {
+    // Quiet hours off explicitly. The suite runs at whatever the wall clock happens to be, and the
+    // default 22:00–07:00 window covers a third of the day — without this the lead rungs of a
+    // 6-hour-out appointment are legitimately dropped (see the next test) and this one would fail
+    // for a third of every day while testing nothing about timing kinds.
     const device = makeDevice('dev_t3')
+    updateSettings(device.deviceId, { quietHours: 'off' })
     const due = inHours(6)
     const r = await createReminder(device, { title: 'the dentist', dueAtMillis: due, timing: 'appointment' })
     expect(r.nextNagAtMillis).toBeLessThan(due)
     // An appointment an hour gone is the past; a daily tail there is what `deadline` is for.
     expect(resolvedPlanFor(device, r)!.tail).toBe('stop')
+  })
+
+  it('drops a warning that quiet hours would push past the thing it warns about', async () => {
+    // "Heads up, the dentist is in two hours" arriving four hours AFTER the dentist is worse than
+    // no warning at all: it reads as a mistake and teaches the owner that the warnings are noise.
+    // So the rung is dropped at plan time rather than delivered late.
+    const device = makeDevice('dev_t8')
+    const now = Date.now()
+    // A window that certainly swallows every lead rung of an appointment two hours out.
+    const start = DateTime.fromMillis(now, { zone: 'UTC' }).minus({ hours: 1 })
+    const end = DateTime.fromMillis(now, { zone: 'UTC' }).plus({ hours: 6 })
+    updateSettings(device.deviceId, { quietHours: `${start.toFormat('HH:mm')}-${end.toFormat('HH:mm')}` })
+
+    const due = inHours(2)
+    const r = await createReminder(device, { title: 'the dentist', dueAtMillis: due, timing: 'appointment' })
+
+    expect(leadCountFor(device, r)).toBe(0)
+    // Rung 0 is then the due instant itself — which the owner chose, so it still stands.
+    expect(r.nextNagAtMillis).toBe(due)
   })
 
   it('gives a deadline set minutes beforehand no run-up at all, starting at the due instant', async () => {

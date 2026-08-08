@@ -1,4 +1,5 @@
 import { DateTime } from 'luxon'
+import { deferPastQuietHours, type QuietHours } from './quietHours.js'
 
 /**
  * What a reminder's due time MEANS, and therefore where its rungs sit relative to it.
@@ -345,6 +346,7 @@ export function planRungs(params: {
   plannedAtMillis: number
   zone: string
   override?: NagPlanSpec | null
+  quiet?: QuietHours
 }): ResolvedPlan {
   const { kind, dueAtMillis, plannedAtMillis, zone } = params
   const policy = params.policy === 'off' ? 'gentle' : params.policy
@@ -366,9 +368,23 @@ export function planRungs(params: {
     maxChases = chase.length + (tail === 'daily' ? EXPLICIT_DAILY_TAIL_RUNGS : 0)
   }
 
+  // A lead rung has to survive two tests, and the second one is easy to miss.
+  //
+  // It must be far enough out to be worth sending at all (`cutoff`) — and it must still land
+  // BEFORE the thing it is warning about once quiet hours have had their say. A "heads up, the
+  // dentist is in two hours" pushed out of a 22:00–07:00 window arrives four hours after the
+  // dentist, which is worse than not warning at all: it is a message that reads as a mistake and
+  // teaches the owner that the warnings are noise.
+  //
+  // Judged here rather than at fire time so the surviving set is a pure function of the plan, and
+  // the nagCount → rung mapping stays stable across every re-entry. Deferral is idempotent, so
+  // storing the raw instant and re-deferring later gives the same answer.
   const cutoff = plannedAtMillis + MIN_LEAD_GAP_MS
+  const quiet = params.quiet ?? null
   const resolved = lead.map((o) => leadInstant(dueAtMillis, o, zone))
-  const leadAt = resolved.filter((at) => at >= cutoff && at < dueAtMillis).sort((a, b) => a - b)
+  const leadAt = resolved
+    .filter((at) => at >= cutoff && deferPastQuietHours(at, zone, quiet) < dueAtMillis)
+    .sort((a, b) => a - b)
 
   return {
     leadAt,

@@ -14,7 +14,7 @@ import { devices } from '../src/db/schema.js'
 import { eq } from 'drizzle-orm'
 import { computeSig } from '../src/fcm/signer.js'
 import { getDevice, type Device } from '../src/services/devices.js'
-import { pushOutboxRow, pushReachable, withdrawNudge } from '../src/services/push.js'
+import { pushOutboxRow, pushReachable, versionAtLeast, withdrawNudge } from '../src/services/push.js'
 import { makeDevice } from './helpers.js'
 
 /** The app drops anything whose sig does not match, so an unsigned push is invisible from here. */
@@ -40,10 +40,14 @@ beforeEach(() => {
 
 const NOW = 1_800_000_000_000
 
-/** A device the server believes it can reach: a token, a secret, and a recent heartbeat. */
-function reachable(deviceId: string): Device {
+/** A device the server believes it can reach: a token, a secret, a recent heartbeat, a new app. */
+function reachable(deviceId: string, appVersion = '1.1.0'): Device {
   makeDevice(deviceId, 'tok_abc')
-  db.update(devices).set({ lastHeartbeatAt: NOW - 60_000 }).where(eq(devices.deviceId, deviceId)).run()
+  db
+    .update(devices)
+    .set({ lastHeartbeatAt: NOW - 60_000, appVersion })
+    .where(eq(devices.deviceId, deviceId))
+    .run()
   return getDevice(deviceId)!
 }
 
@@ -77,6 +81,47 @@ describe('pushReachable', () => {
   it('is false for a device that has never checked in at all', () => {
     makeDevice('dev_p4', 'tok_x')
     expect(pushReachable(getDevice('dev_p4')!, NOW)).toBe(false)
+  })
+
+  it('is false for an app too old to understand NUDGE', () => {
+    // The gate that makes deployment order a non-issue, and the difference between a message that
+    // is delayed and one that is LOST: an older parser drops an unknown type silently and cannot
+    // report the drop, so the server would mark a chase delivered that the owner never saw.
+    for (const old of ['1.0.0', '0.9.9', '1.0', '', null]) {
+      const d = reachable(`dev_old_${old ?? 'null'}`, old as string)
+      db.update(devices).set({ appVersion: old }).where(eq(devices.deviceId, d.deviceId)).run()
+      expect(pushReachable(getDevice(d.deviceId)!, NOW), `appVersion ${old}`).toBe(false)
+    }
+  })
+
+  it('is true from 1.1.0 upward, including later versions', () => {
+    for (const ok of ['1.1.0', '1.1.1', '1.2.0', '2.0.0']) {
+      const d = reachable(`dev_new_${ok}`, ok)
+      expect(pushReachable(d, NOW), `appVersion ${ok}`).toBe(true)
+    }
+  })
+})
+
+describe('versionAtLeast', () => {
+  it('compares numerically rather than lexically', () => {
+    // "1.10.0" < "1.9.0" as strings, which is exactly the bug a naive compare would ship — and it
+    // would silently disable push for every owner past version 1.9.
+    expect(versionAtLeast('1.10.0', '1.9.0')).toBe(true)
+    expect(versionAtLeast('1.9.0', '1.10.0')).toBe(false)
+  })
+
+  it('treats a missing component as zero', () => {
+    expect(versionAtLeast('2', '1.1.0')).toBe(true)
+    expect(versionAtLeast('1.1', '1.1.0')).toBe(true)
+    expect(versionAtLeast('1.0', '1.1.0')).toBe(false)
+  })
+
+  it('refuses rather than guesses on anything unparseable', () => {
+    // Refusing is always the safe direction: a false negative costs a message going over WhatsApp,
+    // a false positive costs a message going nowhere.
+    for (const junk of [null, '', 'dev', '1.x.0', 'v1.1.0']) {
+      expect(versionAtLeast(junk, '1.1.0'), String(junk)).toBe(false)
+    }
   })
 })
 

@@ -1,9 +1,9 @@
 import { DateTime } from 'luxon'
 import { describe, expect, it } from 'vitest'
 import { MAX_NAGS, nextNagAt, nudgeText, nudgeTextFor } from '../src/lib/nagLadder.js'
-import { parseQuietHours } from '../src/lib/quietHours.js'
+import { deferPastQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
 import { parseRoutine } from '../src/lib/routine.js'
-import { tableFor, type NagPolicy, type TimingKind } from '../src/lib/rungPlan.js'
+import { planRungs, tableFor, type NagPolicy, type TimingKind } from '../src/lib/rungPlan.js'
 
 const ZONE = 'Europe/London'
 const at = (iso: string): number => DateTime.fromISO(iso, { zone: ZONE }).toMillis()
@@ -252,19 +252,54 @@ describe('nextNagAt with lead rungs', () => {
   })
 
   it('lands rung `leadCount` exactly ON the due instant, undeferred even inside quiet hours', () => {
-    // The owner's-own-instant exemption keys on the OFFSET being zero, not the INDEX. With five
-    // lead rungs the due instant sits at index 5, and checking for index 0 would silently withdraw
-    // the exemption from exactly the reminders that warn hardest.
+    // The owner's-own-instant exemption keys on the OFFSET being zero, not the INDEX. With lead
+    // rungs the due instant sits at index `leadCount`, and checking for index 0 would silently
+    // withdraw the exemption from exactly the reminders that warn hardest.
+    //
+    // leadCount is DERIVED rather than hardcoded, because quiet hours change it: a 23:30 deadline
+    // inside 22:00–07:00 loses its -20m warning entirely (deferred, that rung would land at 07:00
+    // the next morning, hours after the deadline it was warning about). A literal here would pin a
+    // number that is only true for one window.
     const lateDue = at('2026-08-20T23:30:00')
-    const leadCount = 5 // persistent deadline: 3d, 1d, 4h, 1h, 20m
+    const plannedAt = lateDue - 30 * 24 * 3_600_000
+    const leadCount = planRungs({
+      kind: 'deadline',
+      policy: 'persistent',
+      dueAtMillis: lateDue,
+      plannedAtMillis: plannedAt,
+      zone: ZONE,
+      quiet: NIGHT,
+    }).leadAt.length
+    expect(leadCount).toBeGreaterThan(0)
+
     const rung = nextNagAt({
       ...deadline,
       dueAtMillis: lateDue,
+      plannedAtMillis: plannedAt,
       nagCount: leadCount,
       nowMillis: lateDue - 20 * 60_000,
       quiet: NIGHT,
     })
     expect(rung).toBe(lateDue)
+  })
+
+  it('drops a warning quiet hours would push past its own deadline', () => {
+    // The 23:30 case above, stated directly. `-20m` is 23:10, inside 22:00–07:00, so deferring it
+    // lands at 07:00 the following morning — seven and a half hours after the thing it was warning
+    // about. A warning that arrives after the deadline reads as a bug and teaches the owner that
+    // the warnings are noise, so it is dropped at plan time instead.
+    const lateDue = at('2026-08-20T23:30:00')
+    const plannedAt = lateDue - 30 * 24 * 3_600_000
+    const withWindow = planRungs({
+      kind: 'deadline', policy: 'persistent', dueAtMillis: lateDue, plannedAtMillis: plannedAt, zone: ZONE, quiet: NIGHT,
+    })
+    const without = planRungs({
+      kind: 'deadline', policy: 'persistent', dueAtMillis: lateDue, plannedAtMillis: plannedAt, zone: ZONE,
+    })
+    expect(withWindow.leadAt.length).toBeLessThan(without.leadAt.length)
+    for (const rung of withWindow.leadAt) {
+      expect(deferPastQuietHours(rung, ZONE, NIGHT)).toBeLessThan(lateDue)
+    }
   })
 
   it('prunes every warning when the deadline is set minutes before it lands', () => {

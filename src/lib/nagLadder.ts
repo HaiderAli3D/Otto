@@ -175,6 +175,9 @@ export function nextNagAt(params: {
     plannedAtMillis: params.plannedAtMillis ?? nowMillis,
     zone,
     override: params.plan ?? null,
+    // Passed so a warning that quiet hours would push past its own deadline is dropped at plan
+    // time rather than delivered late.
+    quiet,
   })
 
   const at = rungInstant(plan, nagCount, dueAtMillis, zone, nowMillis, routine)
