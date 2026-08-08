@@ -22,9 +22,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.otto.app.R
 import com.otto.app.data.AlarmEntity
 import com.otto.app.data.AlarmState
 import com.otto.app.permissions.PermissionState
@@ -63,7 +65,7 @@ fun OttoScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Otto control panel", style = MaterialTheme.typography.headlineSmall)
+                Text(stringResource(R.string.panel_title), style = MaterialTheme.typography.headlineSmall)
                 OutlinedButton(onClick = onOpenSettings) { Text("Settings") }
             }
 
@@ -136,7 +138,7 @@ fun OttoScreen(
 
             SectionCard("Armed alarms") {
                 if (state.alarms.isEmpty()) {
-                    Text("No alarms yet.", style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.panel_no_alarms), style = MaterialTheme.typography.bodyMedium)
                 } else {
                     state.alarms.forEach { alarm ->
                         AlarmRow(alarm, formatter.format(Date(alarm.triggerAtMillis)), onCancelAlarm)

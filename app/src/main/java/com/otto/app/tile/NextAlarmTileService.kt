@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import com.otto.app.R
 import com.otto.app.core.OttoLog
 import com.otto.app.data.AlarmRepository
 import com.otto.app.ui.MainActivity
@@ -49,10 +50,10 @@ class NextAlarmTileService : TileService() {
         qsTile?.apply {
             if (triggerAtMillis == null) {
                 state = Tile.STATE_INACTIVE
-                label = "Otto · no alarm"
+                label = getString(R.string.tile_no_alarm)
             } else {
                 state = Tile.STATE_ACTIVE
-                label = "Otto · ${formatter.format(Date(triggerAtMillis))}"
+                label = getString(R.string.tile_next_alarm, formatter.format(Date(triggerAtMillis)))
             }
             updateTile()
         }

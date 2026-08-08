@@ -23,6 +23,16 @@ interface OttoApi {
         @Body body: AlarmEventRequest,
     ): Response<Unit>
 
+    /**
+     * Everything the device reports that is not an alarm state change — a nudge the owner acted on,
+     * a push it could not parse. One route for all of them; see [DeviceEventRequest].
+     */
+    @POST("devices/{deviceId}/events")
+    suspend fun reportDeviceEvent(
+        @Path("deviceId") deviceId: String,
+        @Body body: DeviceEventRequest,
+    ): Response<Unit>
+
     /** SYNC: the server's authoritative alarm set, which the app reconciles to. */
     @GET("devices/{deviceId}/alarms")
     suspend fun fetchAlarms(

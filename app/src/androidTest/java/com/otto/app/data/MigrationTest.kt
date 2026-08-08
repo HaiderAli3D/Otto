@@ -10,9 +10,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Verifies the v1 → v2 migration on a real SQLite engine (fixes #2 and #4). Run on a
- * device/emulator: `./gradlew :app:connectedDebugAndroidTest`. Reads the exported schemas from
- * `app/schemas` (wired as androidTest assets in build.gradle.kts).
+ * Verifies every migration on a real SQLite engine. Run on a device/emulator:
+ * `./gradlew :app:connectedDebugAndroidTest`. Reads the exported schemas from `app/schemas` (wired
+ * as androidTest assets in build.gradle.kts).
+ *
+ * This is the one test that must pass before installing a new build over an existing one. There is
+ * no `fallbackToDestructiveMigration`, so a migration that does not reproduce the generated schema
+ * exactly throws at first open — and on a phone whose job is ringing alarms, that means the alarms
+ * stop and the owner finds out by oversleeping.
  */
 @RunWith(AndroidJUnit4::class)
 class MigrationTest {
@@ -52,6 +57,86 @@ class MigrationTest {
         }
         // The outbox table exists and starts empty (fix #2).
         db.query("SELECT COUNT(*) FROM alarm_events").use { c ->
+            c.moveToFirst()
+            assertEquals(0, c.getInt(0))
+        }
+        db.close()
+    }
+
+    @Test
+    fun migrate2To3_preservesAlarmsAndOutbox_addsNudgeTables() {
+        helper.createDatabase(TEST_DB, 2).apply {
+            execSQL(
+                "INSERT INTO alarms (alarmId, triggerAtMillis, label, state, allowWhileIdle, " +
+                    "snoozeCount, createdAtMillis, updatedAtMillis, reportedToServer, requestCode) " +
+                    "VALUES ('alm_a', 1000, 'A', 'ARMED', 1, 0, 0, 0, 0, 7)",
+            )
+            execSQL("INSERT INTO alarm_events (alarmId, event, atMillis) VALUES ('alm_a', 'ARMED', 1000)")
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB, 3, true, MIGRATION_2_3)
+
+        // v3 is purely additive: nothing the alarm path depends on may be disturbed by it.
+        db.query("SELECT alarmId, requestCode FROM alarms").use { c ->
+            assertEquals(1, c.count)
+            c.moveToFirst()
+            assertEquals("alm_a", c.getString(0))
+            assertEquals(7, c.getInt(1))
+        }
+        db.query("SELECT COUNT(*) FROM alarm_events").use { c ->
+            c.moveToFirst()
+            assertEquals("the alarm outbox must survive untouched", 1, c.getInt(0))
+        }
+        for (table in listOf("nudges", "device_events")) {
+            db.query("SELECT COUNT(*) FROM $table").use { c ->
+                c.moveToFirst()
+                assertEquals("$table must exist and start empty", 0, c.getInt(0))
+            }
+        }
+        db.close()
+    }
+
+    @Test
+    fun migrate2To3_dedupeKeyIndexIsUnique() {
+        // Asserted at the DDL level rather than in Kotlin because the index IS the rate limiter for
+        // push-rejection reporting. If it were created non-unique the app would still compile, still
+        // run, and quietly let a looping server bug fill the outbox — and ReportWorker drains in
+        // order and stops at the first failure, so a flood there is a blockage, not just noise.
+        helper.createDatabase(TEST_DB, 2).close()
+        val db = helper.runMigrationsAndValidate(TEST_DB, 3, true, MIGRATION_2_3)
+
+        val insert = "INSERT OR IGNORE INTO device_events (kind, refId, event, atMillis, dedupeKey) " +
+            "VALUES ('PUSH', 'LAUNCH_ROCKET', 'REJECTED', 1000, 'PUSH:LAUNCH_ROCKET:REJECTED:1')"
+        db.execSQL(insert)
+        db.execSQL(insert)
+
+        db.query("SELECT COUNT(*) FROM device_events").use { c ->
+            c.moveToFirst()
+            assertEquals("a duplicate dedupeKey must not produce a second row", 1, c.getInt(0))
+        }
+        db.close()
+    }
+
+    @Test
+    fun migrate1To3_chainsBothMigrations() {
+        // Cheap, and the only thing that catches a broken chain for a device still on v1.
+        helper.createDatabase(TEST_DB, 1).apply {
+            execSQL(
+                "INSERT INTO alarms (alarmId, triggerAtMillis, label, state, allowWhileIdle, " +
+                    "snoozeCount, createdAtMillis, updatedAtMillis, reportedToServer) " +
+                    "VALUES ('alm_a', 1000, 'A', 'ARMED', 1, 0, 0, 0, 0)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB, 3, true, MIGRATION_1_2, MIGRATION_2_3)
+
+        db.query("SELECT requestCode FROM alarms").use { c ->
+            c.moveToFirst()
+            assertTrue("the v1 -> v2 backfill must still have happened", c.getInt(0) != 0)
+        }
+        db.query("SELECT COUNT(*) FROM nudges").use { c ->
             c.moveToFirst()
             assertEquals(0, c.getInt(0))
         }

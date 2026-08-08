@@ -9,6 +9,35 @@ object OttoConstants {
     /** Notification channel for the ringing alarm (created at app start). */
     const val ALARM_CHANNEL_ID = "otto_alarm"
 
+    /**
+     * Notification channels for nudges — everything Otto says that is NOT an alarm.
+     *
+     * Channel ids are immutable once created: the OS hands their sound, importance and vibration to
+     * the user at creation and ignores every later change, so a channel that needs different
+     * behaviour needs a NEW id and the old one lingers in settings forever. These four are a
+     * one-shot decision, named for what they are FOR rather than how loud they are, so a change of
+     * mind about volume never forces a rename.
+     *
+     * Four levels and no more. Past that the system settings screen becomes unreadable and the
+     * server cannot sensibly reason about which to pick.
+     */
+    const val NUDGE_CHANNEL_GROUP_ID = "otto_reminders"
+
+    /** Heads-up over whatever is on screen, with sound. Not an alarm: no full-screen, no looping. */
+    const val NUDGE_URGENT_CHANNEL_ID = "otto_nudge_urgent"
+
+    /** Makes a sound and lands in the shade without peeking. The everyday rung. */
+    const val NUDGE_CHANNEL_ID = "otto_nudge"
+
+    /** Silent but visible. Confirmations, FYIs, and the quiet end of a chase ladder. */
+    const val NUDGE_QUIET_CHANNEL_ID = "otto_quiet"
+
+    /**
+     * The persistent "N things open" summary, on its own channel so the owner can silence the
+     * always-on line without silencing the content.
+     */
+    const val NUDGE_STATUS_CHANNEL_ID = "otto_status"
+
     /** Intent extra carrying the alarm id from the scheduler's PendingIntent to the receiver. */
     const val EXTRA_ALARM_ID = "com.otto.app.extra.ALARM_ID"
 
@@ -49,4 +78,49 @@ object OttoConstants {
 
     /** Unique WorkManager work name for PING heartbeats. */
     const val WORK_HEARTBEAT = "otto_heartbeat"
+
+    /**
+     * Unique work name for the standing heartbeat.
+     *
+     * There was none until nudges existed, and without one a dead FCM path is invisible to BOTH
+     * sides: the server logs a successful send, the phone shows nothing, and nobody notices until
+     * the owner mentions it. Alarms could survive that gap because a missed one is loud; a missed
+     * nudge is silent by design.
+     */
+    const val WORK_HEARTBEAT_PERIODIC = "otto_heartbeat_periodic"
+
+    /** Intent extra carrying a nudge id from a notification action back to the receiver. */
+    const val EXTRA_NUDGE_ID = "com.otto.app.extra.NUDGE_ID"
+
+    /** Intent extra carrying a nudge's stable notification id. */
+    const val EXTRA_NUDGE_NOTIFICATION_ID = "com.otto.app.extra.NUDGE_NOTIFICATION_ID"
+
+    /**
+     * Id bands, kept disjoint from the alarm path by construction.
+     *
+     * Alarm notification ids and PendingIntent request codes both come from `alarms.requestCode`,
+     * which counts up from 1. Nudges take bands far above that, so the two can never collide even
+     * if one of them is ever changed to allocate differently. `RingService.FOREGROUND_ID` (0xA11A,
+     * 41242) sits well below the lowest band here.
+     *
+     * A nudge action's request code is `NUDGE_PI_BASE + notificationId * 8 + action.ordinal`, which
+     * is injective while there are fewer than eight actions. Distinct request codes are the second
+     * of two defences against PendingIntent collision — the first is a distinct intent action per
+     * button, because PendingIntent equality ignores extras and would otherwise collapse "Done" and
+     * "Snooze" into one intent.
+     */
+    const val NUDGE_SUMMARY_NOTIFICATION_ID = 999_999
+    const val NUDGE_NOTIFICATION_ID_BASE = 1_000_000
+    const val NUDGE_PI_BASE = 2_000_000
+    const val NUDGE_PI_STRIDE = 8
+
+    /** How long a snooze lasts when the server does not say. Distinct from the 9-minute alarm one. */
+    const val DEFAULT_SNOOZE_MINUTES = 30
+
+    /**
+     * Render limits. The server truncates before signing so the payload clears FCM's 4KB cap; these
+     * are the backstop that keeps a server bug from throwing on the phone instead.
+     */
+    const val MAX_NUDGE_TITLE_CHARS = 80
+    const val MAX_NUDGE_BODY_CHARS = 500
 }

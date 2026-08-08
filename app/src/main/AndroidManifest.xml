@@ -93,6 +93,19 @@
             android:name=".alarm.AlarmReceiver"
             android:exported="false" />
 
+        <!-- Buttons pressed on a nudge notification, and the swipe-away delete intent.
+             A broadcast rather than an Activity so the owner can resolve a nudge from the
+             lockscreen without unlocking; not exported, so only our own PendingIntents reach it. -->
+        <receiver
+            android:name=".nudge.NudgeActionReceiver"
+            android:exported="false" />
+
+        <!-- Re-show for a locally snoozed nudge. Its own receiver and its own intent action, so a
+             nudge registration can never match an alarm's PendingIntent. -->
+        <receiver
+            android:name=".nudge.NudgeAlarmReceiver"
+            android:exported="false" />
+
         <!-- Re-arm after reboot / app update -->
         <receiver
             android:name=".boot.BootReceiver"

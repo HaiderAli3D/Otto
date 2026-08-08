@@ -11,6 +11,31 @@ sealed interface FcmCommand {
 
     data class CancelAlarm(val alarmId: String) : FcmCommand
 
+    /**
+     * Show a text nudge — a notification, never an alarm.
+     *
+     * [nudgeId] is the server's own reminder id, and that identity is what makes a chase ladder
+     * usable: rung 2 pushes the same id with new [body] and the phone UPDATES one notification in
+     * place instead of stacking eight. It is also what lets a lockscreen "Done" map straight onto
+     * the reminder it belongs to with no id translation on either side.
+     *
+     * There is deliberately no `showAtMillis`. A NUDGE means "show this now" — the server already
+     * owns scheduling, and a second scheduler here would be a second place a reminder goes missing.
+     */
+    data class Nudge(
+        val nudgeId: String,
+        val title: String,
+        val body: String,
+        val level: com.otto.app.nudge.NudgeLevel,
+        val actions: List<com.otto.app.nudge.NudgeAction>,
+        val snoozeMinutes: Int,
+        val expiresAtMillis: Long?,
+        val ongoing: Boolean,
+    ) : FcmCommand
+
+    /** Clear a nudge — the reminder was completed or cancelled somewhere else. */
+    data class CancelNudge(val nudgeId: String) : FcmCommand
+
     /** Reconcile local alarms against the server's authoritative set. */
     data object Sync : FcmCommand
 
