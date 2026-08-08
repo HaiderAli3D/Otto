@@ -25,7 +25,7 @@ describe('optional integrations default to OFF', () => {
   // The precondition every feature branch inherits: test/setup-env.ts pins only what the server
   // needs to boot, so anything gated must read as null here. If one of these ever goes non-null,
   // a suite has started hitting a real third party — the same guarantee persona.test.ts asserts
-  // about config.anthropic, extended to the three integrations Phase 0 introduced.
+  // about config.openai, extended to the three integrations Phase 0 introduced.
   it('has no speech-to-text configured', () => {
     expect(config.stt).toBeNull()
   })

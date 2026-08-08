@@ -85,7 +85,7 @@ const TOMORROW_0700 = Date.UTC(2026, 7, 4, 7, 0, 0)
 
 describe('the model is never reached in tests', () => {
   it('has no API key configured — the precondition for every byte-for-byte assertion below', () => {
-    expect(config.anthropic).toBeNull()
+    expect(config.openai).toBeNull()
   })
 })
 
@@ -178,7 +178,7 @@ describe('delivery', () => {
   })
 
   it('writes the deterministic fallback byte-for-byte when there is no model', async () => {
-    // config.anthropic is null in every test, so this IS what the feature delivers under test — and
+    // config.openai is null in every test, so this IS what the feature delivers under test — and
     // on any morning the Anthropic API is unreachable.
     const device = owner('dev_b8', '447700900008')
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })

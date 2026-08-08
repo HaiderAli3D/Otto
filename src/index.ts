@@ -24,12 +24,16 @@ async function main(): Promise<void> {
       origin: config.publicOrigin,
       features: {
         whatsapp: Boolean(config.meta),
-        agent: Boolean(config.anthropic),
+        agent: Boolean(config.openai),
         google: Boolean(config.google),
         voice: Boolean(config.stt),
         template: Boolean(config.meta?.template),
         maps: Boolean(config.maps),
       },
+      // Logged because a typo'd OPENAI_MODEL is otherwise invisible: it 404s on the first request,
+      // and every surface fails soft to a template, so a wrong model looks like a quiet Otto
+      // rather than an error. Not a secret, and constant for the process's life.
+      model: config.openai?.model ?? null,
     },
     'Otto server up',
   )

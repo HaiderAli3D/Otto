@@ -1,11 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
-import { config } from '../config.js'
 import type { BriefSlot } from '../lib/briefSchedule.js'
-import { log } from '../lib/log.js'
 import { unquote } from '../lib/text.js'
+import { composeText, modelClient } from './llm.js'
 import { PERSONA, WRITING } from './persona.js'
-
-const anthropic = config.anthropic ? new Anthropic({ apiKey: config.anthropic.apiKey }) : null
 
 /**
  * DELIBERATE DEVIATION FROM compose.ts (1 of 2): this call is BOUNDED, like agent/nudge.ts and
@@ -130,31 +126,17 @@ function renderInput(input: BriefInput): string {
  */
 export async function composeBrief(input: BriefInput): Promise<string> {
   const templated = briefFallback(input)
-  if (!anthropic || !config.anthropic) return templated
+  if (!modelClient()) return templated
 
-  try {
-    const res = await anthropic.messages.create(
-      {
-        model: config.anthropic.model,
-        max_tokens: 300,
-        // Thinking is ON by default from Sonnet 5 / Opus 5 onward and shares max_tokens with the
-        // answer, so a thinking pass would empty the completion and silently fall through to the
-        // template — undoing this module without a single error in the logs.
-        thinking: { type: 'disabled' },
-        system: BRIEF_SYSTEM,
-        messages: [{ role: 'user', content: renderInput(input) }],
-      },
-      { timeout: TIMEOUT_MS, maxRetries: MAX_RETRIES },
-    )
-    const text = res.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    // An empty completion is a failure path like any other, and gets the same deterministic answer.
-    return unquote(text) || templated
-  } catch (err) {
-    log.warn({ err, slot: input.slot }, 'brief composition failed; using the templated fallback')
-    return templated
-  }
+  // An empty completion is a failure path like any other, and gets the same deterministic answer —
+  // composeText returns null for it (and now logs it, which it previously did not).
+  const text = await composeText({
+    system: BRIEF_SYSTEM,
+    user: renderInput(input),
+    maxOutputTokens: 300,
+    timeoutMs: TIMEOUT_MS,
+    maxRetries: MAX_RETRIES,
+    logContext: { surface: 'brief', slot: input.slot },
+  })
+  return (text ? unquote(text) : '') || templated
 }

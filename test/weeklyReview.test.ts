@@ -168,7 +168,7 @@ describe('isWorthSaying', () => {
 
 describe('composeWeeklyReview', () => {
   it('has no API key configured in tests — the precondition for everything below', () => {
-    expect(config.anthropic).toBeNull()
+    expect(config.openai).toBeNull()
   })
 
   it('falls back to a deterministic message carrying the real numbers', async () => {

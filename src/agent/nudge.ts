@@ -1,15 +1,11 @@
-import Anthropic from '@anthropic-ai/sdk'
-import { config } from '../config.js'
 import { nudgeTextFor, rungPhaseFor, type RungPhase } from '../lib/nagLadder.js'
-import { log } from '../lib/log.js'
 import { unquote } from '../lib/text.js'
 import { renderFacts } from '../services/facts.js'
 import { nudgeHistory } from '../services/outbox.js'
 import { timingKindOf, type Reminder } from '../services/reminders.js'
 import { reminderEvidence } from '../services/signals.js'
+import { composeText, modelClient } from './llm.js'
 import { PERSONA, WRITING } from './persona.js'
-
-const anthropic = config.anthropic ? new Anthropic({ apiKey: config.anthropic.apiKey }) : null
 
 /**
  * A nudge fires from the scheduler, not from a reply, so a hung request stalls the job loop rather
@@ -83,8 +79,8 @@ function describePosition(r: Reminder, phase: RungPhase, now: number): string {
  *
  * Every failure path — no API key, timeout, transport error, empty completion — returns the exact
  * templated string this function replaced. That is the point: nudges fire at 3am on a machine that
- * may have no working Anthropic credentials, and a nudge that doesn't send is worse than a nudge
- * that reads like a template.
+ * may have no working model credentials, and a nudge that doesn't send is worse than a nudge that
+ * reads like a template.
  */
 export async function writeNudge(
   r: Reminder,
@@ -96,7 +92,8 @@ export async function writeNudge(
   const phase = rungPhaseFor(leadCount, r.nagCount)
   const index = phase === 'lead' ? r.nagCount : phase === 'due' ? 0 : r.nagCount - leadCount - 1
   const templated = nudgeTextFor({ title: r.title, phase, index, overdueDescription })
-  if (!anthropic || !config.anthropic) return templated
+  // Checked before the context is built: assembling it costs two DB reads (nudge history, facts).
+  if (!modelClient()) return templated
 
   const already = nudgeHistory(r.reminderId)
   const context = [
@@ -118,29 +115,15 @@ export async function writeNudge(
     .filter((l): l is string => l !== null)
     .join('\n\n')
 
-  try {
-    const res = await anthropic.messages.create(
-      {
-        model: config.anthropic.model,
-        max_tokens: 200,
-        // Thinking is ON by default from Sonnet 5 / Opus 5 onward, and max_tokens caps thinking
-        // AND response text together. At 200 tokens a thinking pass would eat the whole budget and
-        // return an empty completion — which falls through to the template and silently undoes this
-        // whole module. One sentence chasing a known task needs no reasoning; turn it off.
-        thinking: { type: 'disabled' },
-        system: NUDGE_SYSTEM,
-        messages: [{ role: 'user', content: context }],
-      },
-      { timeout: TIMEOUT_MS, maxRetries: MAX_RETRIES },
-    )
-    const text = res.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    return unquote(text) || templated
-  } catch (err) {
-    log.warn({ err, reminderId: r.reminderId }, 'nudge composition failed; using the templated fallback')
-    return templated
-  }
+  // `reasoning: { effort: 'none' }` lives in composeText and is load-bearing at this 200-token cap
+  // — see the note there.
+  const text = await composeText({
+    system: NUDGE_SYSTEM,
+    user: context,
+    maxOutputTokens: 200,
+    timeoutMs: TIMEOUT_MS,
+    maxRetries: MAX_RETRIES,
+    logContext: { surface: 'nudge', reminderId: r.reminderId },
+  })
+  return (text ? unquote(text) : '') || templated
 }

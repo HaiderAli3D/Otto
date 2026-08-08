@@ -117,7 +117,7 @@ describe('the quiet-hours section describes what the code actually does', () => 
 
 describe('nudge writer falls back', () => {
   it('has no API key configured in tests — the precondition for everything below', () => {
-    expect(config.anthropic).toBeNull()
+    expect(config.openai).toBeNull()
   })
 
   it('returns the templated string byte-for-byte when the model is unavailable', async () => {

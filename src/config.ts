@@ -75,7 +75,17 @@ const raw = z
     // FCM (required — the whole point is pushing to the phone).
     FIREBASE_SERVICE_ACCOUNT: z.string().min(1, 'FIREBASE_SERVICE_ACCOUNT is required (path or inline JSON)'),
 
-    // Claude agent (optional — endpoints/FCM work without it).
+    // The agent (optional — endpoints/FCM work without it; every surface falls back to a
+    // deterministic template when this is unset).
+    //
+    // This is api.openai.com. It is NOT the STT credential further down, which points at an
+    // OpenAI-COMPATIBLE endpoint (Groq) and takes a Groq key. The two are never interchangeable,
+    // and swapping them fails as a quiet 401 on a path that degrades silently.
+    OPENAI_API_KEY: z.string().optional(),
+    OPENAI_MODEL: z.string().default('gpt-5.6-luna'),
+
+    // Superseded by OPENAI_* above; read only so a stale .env cannot fail the boot. Removed once
+    // the migration lands.
     ANTHROPIC_API_KEY: z.string().optional(),
     ANTHROPIC_MODEL: z.string().default('claude-sonnet-5'),
 
@@ -168,6 +178,7 @@ export const config = {
   logLevel: raw.LOG_LEVEL,
   adminToken: raw.ADMIN_TOKEN ?? null,
   firebase: { serviceAccount, projectId: serviceAccount.project_id },
+  openai: raw.OPENAI_API_KEY ? { apiKey: raw.OPENAI_API_KEY, model: raw.OPENAI_MODEL } : null,
   anthropic: raw.ANTHROPIC_API_KEY
     ? { apiKey: raw.ANTHROPIC_API_KEY, model: raw.ANTHROPIC_MODEL }
     : null,
