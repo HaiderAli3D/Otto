@@ -28,6 +28,10 @@ const EXPECTED = [
   'snooze_reminder',
   'cancel_reminder',
   'reopen_reminder',
+  // Kept with its siblings rather than bolted onto the end of the whole list. That shifts every
+  // tool after it down the cached prefix, which costs one full-price turn per user at deploy — the
+  // same one-off as editing promptSections.ts, and worth it to keep the reminder tools together.
+  'update_reminder',
   'remember_fact',
   'recall_facts',
   'forget_fact',
@@ -49,6 +53,20 @@ describe('tool list is deterministic', () => {
     expect(JSON.stringify(buildTools())).toBe(JSON.stringify(buildTools()))
   })
 
+  it('emits a well-formed function tool for every entry', () => {
+    // The order and name assertions above both pass for a definition file still written against the
+    // OLD provider's `input_schema` key — buildTools would just emit `parameters: undefined` and the
+    // tool would be silently unusable at request time, with nothing failing until production.
+    // This asserts the WIRE shape, which is the part nothing else in the suite can see.
+    for (const tool of buildTools()) {
+      expect(tool.type).toBe('function')
+      expect(tool.name).toBeTruthy()
+      expect(tool.description).toBeTruthy()
+      expect(tool.strict).toBe(false)
+      expect((tool.parameters as { type?: string } | null)?.type).toBe('object')
+    }
+  })
+
   it('is reachable through the legacy ../agent/tools.js path', () => {
     // tools.ts is now a re-export shim. If it stops re-exporting, agent/runner.ts stops working.
     expect(typeof buildTools).toBe('function')
@@ -58,7 +76,7 @@ describe('tool list is deterministic', () => {
   it('has a dispatch case for every declared tool', () => {
     // Definitions and dispatch live in different files and nothing type-checks one against the
     // other, so a tool the model can see but nothing can run would only show up as a confused reply
-    // in production. Read the switch rather than calling the tools: invoking all fifteen with junk
+    // in production. Read the switch rather than calling the tools: invoking all eighteen with junk
     // input would arm alarms and write rows to prove a routing fact.
     const dispatch = readFileSync(new URL('../src/agent/tools/index.ts', import.meta.url), 'utf8')
     for (const name of EXPECTED) expect(dispatch).toContain(`case '${name}':`)
@@ -80,10 +98,8 @@ describe('tool list is deterministic', () => {
  */
 describe('the cached prefix does not contradict itself', () => {
   const schemaOf = (tool: string): Record<string, { description?: string }> =>
-    (buildTools().find((t) => t.name === tool)!.input_schema.properties ?? {}) as Record<
-      string,
-      { description?: string }
-    >
+    (((buildTools().find((t) => t.name === tool)!.parameters as { properties?: unknown })?.properties ??
+      {}) as Record<string, { description?: string }>)
 
   it('does not claim quiet hours suppress everything proactive', () => {
     // The claim was "Nothing proactive goes out inside it." ACCOUNTABILITY names four things that

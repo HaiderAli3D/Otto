@@ -11,15 +11,19 @@ export function baseMime(raw: string): string {
 }
 
 /**
- * Exactly the four types Anthropic's image block accepts. Kept `as const` because ingest narrows a
- * downloaded mime type to this union — if the two lists ever drift, that narrowing stops compiling,
- * which is the point.
+ * The four image types the model accepts. Kept `as const` because ingest narrows a downloaded mime
+ * type to this union — if the two lists ever drift, that narrowing stops compiling, which is the
+ * point.
+ *
+ * Unchanged across the move from Anthropic to OpenAI: both accept exactly these four. Note the
+ * standing caveat that survives with them — an ANIMATED gif or webp is rejected by the model even
+ * though its mime type is on this list, which is why stickers are excluded outright in ingest.ts.
  */
 export const IMAGE_MIME_ALLOW = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const
 
 /**
  * What WhatsApp actually sends for audio. `audio/ogg` is the voice note; the rest arrive when the
- * owner attaches a file. Nothing here is passed to Anthropic — it all goes to the STT provider,
+ * owner attaches a file. Nothing here is passed to the agent model — it all goes to the STT provider,
  * which accepts far more than this, so the list is about refusing to download a video someone
  * mislabelled rather than about what can be transcribed.
  */
@@ -37,7 +41,7 @@ export const AUDIO_MIME_ALLOW = [
 ] as const
 
 /**
- * Size caps, enforced twice (see fetchMedia). The image cap is about the Anthropic request: a photo
+ * Size caps, enforced twice (see fetchMedia). The image cap is about the model request: a photo
  * is re-encoded to base64, which is ~33% bigger again, and it is sent inline in the user turn. The
  * audio cap is the common ceiling for a hosted Whisper endpoint.
  */

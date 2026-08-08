@@ -3,14 +3,15 @@ import { db } from '../db/client.js'
 import { reminders } from '../db/schema.js'
 import { newAlarmId } from '../lib/ids.js'
 import { writeNudge } from '../agent/nudge.js'
-import { nextNagAt, type NagPolicy } from '../lib/nagLadder.js'
+import { nextNagAt } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
 import { deferPastQuietHours } from '../lib/quietHours.js'
 import { armAlarm } from './alarms.js'
+import { budgetAllows, budgetResetsAt } from './budget.js'
 import { getDevice } from './devices.js'
 import { enqueueJob } from './jobs.js'
 import { enqueueAndTryFlush } from './outbox.js'
-import { getReminder } from './reminders.js'
+import { getReminder, ladderParams, resolvedPlanFor } from './reminders.js'
 import { nagQuietHours } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
 
@@ -23,6 +24,18 @@ const STALE_NUDGE_MS = 6 * 60 * 60 * 1000
 
 /** How overdue a reminder must be before an out-of-window escalation may ring the phone. */
 const ESCALATE_AFTER_MS = 60 * 60 * 1000
+
+/**
+ * The minimum gap between two escalation rings for the SAME reminder.
+ *
+ * Load-bearing, not a nicety. The escalation below fires whenever a rung could not be delivered and
+ * the item is an hour overdue — and it used to be bounded only by the ladder being short and slow.
+ * The dense ladders fire rungs three to fifteen minutes apart, so on `relentless` with a shut
+ * WhatsApp window every one of them would arm a real alarm: a phone ringing at full volume every
+ * few minutes, for hours, with no way to stop it short of uninstalling. Two hours is deliberately
+ * far wider than any rung gap so the cooldown, not the ladder, decides the ringing cadence.
+ */
+const ESCALATE_COOLDOWN_MS = 2 * 60 * 60 * 1000
 
 /**
  * Fire one nudge for a reminder.
@@ -75,7 +88,12 @@ export async function runNudge(reminderId: string): Promise<void> {
   //   nagQuietHours returns null for them and the whole reminder is exempt, ringing included;
   // - direct replies — sendText touches neither the outbox nor the ladder;
   // - the wake-check — its own job kind, which never reaches nextNagAt or runNudge.
-  const ownersOwnDueTime = before.nagCount === 0 && before.dueAtMillis !== null && scheduledAt === before.dueAtMillis
+  //
+  // Keyed on the rung landing ON the due instant, NOT on it being rung 0. A deadline warns several
+  // times before it lands, so by the time the owner's own instant comes round `nagCount` is however
+  // many warnings went out — checking for 0 would quietly withdraw the exemption from exactly the
+  // reminders that warn hardest.
+  const ownersOwnDueTime = before.dueAtMillis !== null && scheduledAt === before.dueAtMillis
   const quiet = nagQuietHours(device, before.escalateWithAlarm)
   const deferredTo = ownersOwnDueTime ? now : deferPastQuietHours(now, device.timezone, quiet)
   if (deferredTo !== now) {
@@ -95,14 +113,29 @@ export async function runNudge(reminderId: string): Promise<void> {
     return
   }
 
-  const nextRung = nextNagAt({
-    policy: before.nagPolicy as NagPolicy,
-    nagCount: before.nagCount + 1,
-    dueAtMillis: before.dueAtMillis,
-    zone: device.timezone,
-    nowMillis: now,
-    quiet,
-  })
+  // Daily ceiling, in the same place and for the same reason as the quiet-hours backstop above:
+  // BEFORE the claim, so being held costs no rung. Burning one against a message nobody was sent
+  // would inflate the "chased N×" counter the persona cites as evidence.
+  //
+  // Pushed to the next local midnight rather than dropped — the reminder is still open and still
+  // needs chasing, it just does not get another interruption today.
+  if (!budgetAllows(device, 'nudge', { escalating: before.escalateWithAlarm }, now)) {
+    const refill = budgetResetsAt(device.timezone, now)
+    const moved = db
+      .update(reminders)
+      .set({ nextNagAtMillis: refill, updatedAt: now })
+      .where(and(eq(reminders.reminderId, reminderId), eq(reminders.nextNagAtMillis, scheduledAt)))
+      .run()
+    if (moved.changes === 0) {
+      log.debug({ reminderId }, 'budget deferral lost the claim; another path handled it')
+      return
+    }
+    enqueueJob('nudge', refill, { reminderId, deviceId: device.deviceId })
+    log.info({ reminderId, refill }, 'daily message budget spent; moved the rung to tomorrow without burning it')
+    return
+  }
+
+  const nextRung = nextNagAt(ladderParams(device, before, before.nagCount + 1, now))
 
   const claimed = db
     .update(reminders)
@@ -135,7 +168,13 @@ export async function runNudge(reminderId: string): Promise<void> {
         : undefined
     // Composed after the claim, so only the winner pays for the call. `before` is the pre-increment
     // snapshot, which is what both the writer and its templated fallback expect.
-    const body = await writeNudge(before, device.timezone, overdue)
+    const plan = resolvedPlanFor(device, before)
+    const body = await writeNudge(
+      before,
+      device.timezone,
+      overdue,
+      plan ? { leadCount: plan.leadAt.length, totalRungs: plan.leadAt.length + plan.maxChases } : undefined,
+    )
     const sent = await enqueueAndTryFlush({
       waUserId,
       deviceId: device.deviceId,
@@ -148,7 +187,9 @@ export async function runNudge(reminderId: string): Promise<void> {
     // Out of window and genuinely overdue: FCM is the only channel with no 24h limit, and the app
     // can only be told to ring. Deliberately opt-in per reminder — this wakes them.
     const overdueBy = before.dueAtMillis === null ? 0 : now - before.dueAtMillis
-    if (!sent && before.escalateWithAlarm && overdueBy > ESCALATE_AFTER_MS) {
+    const cooling =
+      before.lastEscalatedAtMillis !== null && now - before.lastEscalatedAtMillis < ESCALATE_COOLDOWN_MS
+    if (!sent && before.escalateWithAlarm && overdueBy > ESCALATE_AFTER_MS && !cooling) {
       const alarmId = newAlarmId()
       await armAlarm(device, {
         alarmId,
@@ -156,8 +197,13 @@ export async function runNudge(reminderId: string): Promise<void> {
         label: before.title,
         recurrence: null,
       })
-      db.update(reminders).set({ alarmId, updatedAt: Date.now() }).where(eq(reminders.reminderId, reminderId)).run()
+      db.update(reminders)
+        .set({ alarmId, lastEscalatedAtMillis: now, updatedAt: Date.now() })
+        .where(eq(reminders.reminderId, reminderId))
+        .run()
       log.warn({ reminderId, alarmId }, 'window shut and overdue; escalating to a ringing alarm')
+    } else if (!sent && before.escalateWithAlarm && cooling) {
+      log.info({ reminderId, since: before.lastEscalatedAtMillis }, 'escalation suppressed; still inside the ring cooldown')
     }
   }
 

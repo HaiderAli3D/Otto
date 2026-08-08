@@ -1,11 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
-import { config } from '../config.js'
-import { log } from '../lib/log.js'
 import { unquote } from '../lib/text.js'
 import type { WeeklyRecord } from '../services/signals.js'
+import { composeText, modelClient } from './llm.js'
 import { PERSONA, WRITING } from './persona.js'
-
-const anthropic = config.anthropic ? new Anthropic({ apiKey: config.anthropic.apiKey }) : null
 
 /** Same envelope as the nudge writer: this runs on the scheduler, so a hung request stalls jobs. */
 const TIMEOUT_MS = 15_000
@@ -36,8 +32,8 @@ export const REVIEW_SYSTEM = [
 /**
  * The review as a plain string of facts.
  *
- * This is what actually ships whenever there is no Anthropic key, the request times out, or the
- * completion comes back empty — and it is what every test exercises, since `config.anthropic` is
+ * This is what actually ships whenever there is no API key, the request times out, or the
+ * completion comes back empty — and it is what every test exercises, since `config.openai` is
  * null under vitest. It has to read as a real message on its own, not as a degraded one.
  */
 function fallback(r: WeeklyRecord): string {
@@ -69,7 +65,7 @@ function fallback(r: WeeklyRecord): string {
  */
 export async function composeWeeklyReview(r: WeeklyRecord, zone: string): Promise<string> {
   const templated = fallback(r)
-  if (!anthropic || !config.anthropic) return templated
+  if (!modelClient()) return templated
 
   const context = [
     `Timezone ${zone}. The last seven days:`,
@@ -83,27 +79,13 @@ export async function composeWeeklyReview(r: WeeklyRecord, zone: string): Promis
     .filter((l): l is string => l !== null)
     .join('\n')
 
-  try {
-    const res = await anthropic.messages.create(
-      {
-        model: config.anthropic.model,
-        max_tokens: 300,
-        // Thinking is ON by default from Sonnet 5 onward and shares this budget with the answer, so
-        // a thinking pass would empty the completion and silently fall back to the template.
-        thinking: { type: 'disabled' },
-        system: REVIEW_SYSTEM,
-        messages: [{ role: 'user', content: context }],
-      },
-      { timeout: TIMEOUT_MS, maxRetries: MAX_RETRIES },
-    )
-    const text = res.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    return unquote(text) || templated
-  } catch (err) {
-    log.warn({ err }, 'weekly review composition failed; using the templated fallback')
-    return templated
-  }
+  const text = await composeText({
+    system: REVIEW_SYSTEM,
+    user: context,
+    maxOutputTokens: 300,
+    timeoutMs: TIMEOUT_MS,
+    maxRetries: MAX_RETRIES,
+    logContext: { surface: 'weeklyReview' },
+  })
+  return (text ? unquote(text) : '') || templated
 }

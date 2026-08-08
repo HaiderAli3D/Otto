@@ -159,12 +159,20 @@ export function ensureSchema(): void {
   // never alters an existing table). Idempotent: guarded by PRAGMA table_info.
   ensureColumn('devices', 'auth_latched', 'auth_latched INTEGER NOT NULL DEFAULT 0')
   ensureColumn('devices', 'last_inbound_at', 'last_inbound_at INTEGER')
+  ensureColumn('devices', 'last_activity_at', 'last_activity_at INTEGER')
   ensureColumn('devices', 'last_digest_at', 'last_digest_at INTEGER')
   ensureColumn('devices', 'last_template_at', 'last_template_at INTEGER')
   ensureColumn('sessions', 'fail_count', 'fail_count INTEGER NOT NULL DEFAULT 0')
   ensureColumn('jobs', 'reminder_id', 'reminder_id TEXT')
   ensureColumn('reminders', 'defer_count', 'defer_count INTEGER NOT NULL DEFAULT 0')
   ensureColumn('alarms', 'wake_check', 'wake_check INTEGER NOT NULL DEFAULT 0')
+
+  // Timing semantics and per-reminder schedules. `trigger` is the only safe backfill for existing
+  // rows — it has no lead rungs, so every reminder written before this column keeps its ladder.
+  ensureColumn('reminders', 'timing_kind', "timing_kind TEXT NOT NULL DEFAULT 'trigger'")
+  ensureColumn('reminders', 'planned_at_millis', 'planned_at_millis INTEGER')
+  ensureColumn('reminders', 'nag_plan', 'nag_plan TEXT')
+  ensureColumn('reminders', 'last_escalated_at_millis', 'last_escalated_at_millis INTEGER')
 
   // device_settings: the entire column set, matching `deviceSettings` in schema.ts. SQLite accepts
   // ADD COLUMN ... NOT NULL only with a constant DEFAULT, which every non-null column here supplies.
@@ -183,6 +191,16 @@ export function ensureSchema(): void {
   ensureColumn('device_settings', 'auto_leave_by_alarm', 'auto_leave_by_alarm INTEGER NOT NULL DEFAULT 0')
   ensureColumn('device_settings', 'default_travel_minutes', 'default_travel_minutes INTEGER NOT NULL DEFAULT 30')
   ensureColumn('device_settings', 'get_ready_minutes', 'get_ready_minutes INTEGER NOT NULL DEFAULT 45')
+  ensureColumn('outbox', 'delivered_via', 'delivered_via TEXT')
+  ensureColumn('device_settings', 'bed_window', 'bed_window TEXT')
+  ensureColumn('device_settings', 'wake_window', 'wake_window TEXT')
+  ensureColumn('device_settings', 'daily_message_budget', 'daily_message_budget INTEGER NOT NULL DEFAULT 60')
+
+  // services/budget.ts counts today's delivered messages per device on every rung fire.
+  // outbox_pending leads with wa_user_id and filters on state='PENDING', so it cannot serve a
+  // device_id + sent_at_millis scan. Indexes are safe to add here unconditionally — unlike columns,
+  // CREATE INDEX IF NOT EXISTS is genuinely idempotent.
+  sqlite.exec(`CREATE INDEX IF NOT EXISTS outbox_device_sent ON outbox (device_id, sent_at_millis);`)
 }
 
 function ensureColumn(table: string, column: string, ddl: string): void {

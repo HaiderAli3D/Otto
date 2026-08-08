@@ -24,6 +24,7 @@ export function ensureDevice(deviceId: string): Device {
     authLatched: false,
     lastHeartbeatAt: null,
     lastInboundAt: null,
+    lastActivityAt: null,
     lastDigestAt: null,
     lastTemplateAt: null,
     createdAt: Date.now(),
@@ -63,7 +64,23 @@ export function linkWhatsapp(deviceId: string, whatsappNumber: string): void {
 
 /** WhatsApp's 24h free-form window. Stamped on EVERY inbound, including non-text. */
 export function markInbound(deviceId: string, atMillis: number = Date.now()): void {
-  db.update(devices).set({ lastInboundAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
+  db.update(devices).set({ lastInboundAt: atMillis, lastActivityAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
+}
+
+/**
+ * The owner did something — replied, or pressed a button on a notification.
+ *
+ * Deliberately separate from `lastInboundAt`, which is a Meta TRANSPORT fact: the 24-hour
+ * free-form window opens only on an inbound WhatsApp message, and a notification tap does not
+ * reopen it. Conflating the two would have the outbox believing it may send free-form text and
+ * eating a 131047 on the next proactive message.
+ *
+ * What this IS good for is the question "are they awake and engaging?", which is what the
+ * wake-check ladder actually wants to know — and a "Done" tapped at 07:05 answers it just as well
+ * as a reply does.
+ */
+export function markActivity(deviceId: string, atMillis: number = Date.now()): void {
+  db.update(devices).set({ lastActivityAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
 }
 
 /**

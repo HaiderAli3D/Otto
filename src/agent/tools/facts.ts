@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type { ToolDef } from './types.js'
 
 /**
  * Memory tools: durable facts about the owner, keyed so a rewrite corrects rather than duplicates.
@@ -9,7 +9,7 @@ import type Anthropic from '@anthropic-ai/sdk'
  *
  * A literal array, never a function — see the contract in ./index.ts.
  */
-export const factTools: Anthropic.Tool[] = [
+export const factTools: ToolDef[] = [
   {
     name: 'remember_fact',
     description:
@@ -20,7 +20,7 @@ export const factTools: Anthropic.Tool[] = [
       'carry on. Do NOT save tasks (use create_reminder), one-off state ("I\'m at the shops"), or ' +
       'anything you could look up. Reuse an existing key to correct or replace a fact rather than ' +
       'adding a near-duplicate — writing the same key overwrites it.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         key: {
@@ -48,7 +48,7 @@ export const factTools: Anthropic.Tool[] = [
       'you. The most relevant facts are already in your context; call this when the owner asks ' +
       'what you know, when you need an older detail, or before writing a fact whose key might ' +
       'already exist.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: { query: { type: 'string', description: 'Keywords or a key prefix, e.g. "work" or "gym".' } },
     },
@@ -56,6 +56,6 @@ export const factTools: Anthropic.Tool[] = [
   {
     name: 'forget_fact',
     description: 'Delete a remembered fact by key. Use when the owner asks you to forget something.',
-    input_schema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+    parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
   },
 ]

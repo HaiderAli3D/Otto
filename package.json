@@ -3,23 +3,26 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Otto server — turns WhatsApp messages into device alarm pushes via a Claude agent + FCM.",
-  "engines": { "node": ">=20" },
+  "description": "Otto server — turns WhatsApp messages into device alarm pushes via an OpenAI agent + FCM.",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
     "better-sqlite3": "^11.8.0",
     "drizzle-orm": "^0.38.3",
     "fastify": "^5.2.1",
     "google-auth-library": "^9.15.0",
     "googleapis": "^144.0.0",
     "luxon": "^3.5.0",
+    "openai": "^7.4.0",
     "pino": "^9.6.0",
     "ulid": "^2.3.0",
     "zod": "^3.24.1"

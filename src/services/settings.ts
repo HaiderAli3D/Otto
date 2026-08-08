@@ -3,6 +3,7 @@ import { config } from '../config.js'
 import { db } from '../db/client.js'
 import { deviceSettings } from '../db/schema.js'
 import { inQuietHours, parseQuietHours, type QuietHours } from '../lib/quietHours.js'
+import { DEFAULT_ROUTINE, parseRoutine, type Routine } from '../lib/routine.js'
 import type { Device } from './devices.js'
 
 export type DeviceSettings = typeof deviceSettings.$inferSelect
@@ -26,6 +27,9 @@ function defaults(deviceId: string): DeviceSettings {
     lastBriefAt: null,
     lastEveningBriefAt: null,
     quietHours: null,
+    bedWindow: null,
+    wakeWindow: null,
+    dailyMessageBudget: 60,
     weeklyReviewAt: null,
     lastWeeklyReviewAt: null,
     autoWakeAlarm: false,
@@ -113,4 +117,24 @@ export function nagQuietHours(device: Device, escalateWithAlarm: boolean): Quiet
 /** Is the device inside its quiet window right now? Wall-clock, judged in `device.timezone`. */
 export function quietNow(device: Device, now: number = Date.now()): boolean {
   return inQuietHours(now, device.timezone, quietHoursFor(device))
+}
+
+/**
+ * The owner's stated sleep routine, or null if they have never given one.
+ *
+ * Null rather than `DEFAULT_ROUTINE` on purpose: the callers that want a fallback say so with
+ * `?? DEFAULT_ROUTINE`, and the ones that must NOT invent a routine — the prompt tail, which would
+ * otherwise tell Otto a confident bedtime the owner never mentioned — can tell the difference.
+ *
+ * All-or-nothing (see `parseRoutine`): half a routine says nothing about when their day starts,
+ * which is the only thing the rest of the system reads out of it.
+ */
+export function routineFor(device: Device): Routine | null {
+  const s = getSettings(device.deviceId)
+  return parseRoutine(s.bedWindow, s.wakeWindow)
+}
+
+/** The routine to schedule against — the owner's if stated, else the 09:00-day-start default. */
+export function schedulingRoutine(device: Device): Routine {
+  return routineFor(device) ?? DEFAULT_ROUTINE
 }

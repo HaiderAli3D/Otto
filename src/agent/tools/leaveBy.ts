@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type { ToolDef } from './types.js'
 import type { Device } from '../../services/devices.js'
 import { hasGoogle, tryListCalendarEvents, type CalendarEvent } from '../../services/google.js'
 import {
@@ -21,7 +21,7 @@ import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/t
  *
  * A literal array, never a function.
  */
-export const leaveByTools: Anthropic.Tool[] = [
+export const leaveByTools: ToolDef[] = [
   {
     name: 'create_leave_by_alarm',
     description:
@@ -32,7 +32,7 @@ export const leaveByTools: Anthropic.Tool[] = [
       'create the event. Returns leaveAtLocal and estimated: if estimated is true the travel time ' +
       'is a fallback rather than live traffic, and you must say so. If it returns ambiguous, ask ' +
       'which one they mean rather than picking.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         eventDescription: {

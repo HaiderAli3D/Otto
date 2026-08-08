@@ -375,7 +375,7 @@ describe('re-planning the same event never leaves an orphan armed', () => {
 describe('the model is told what makes live traffic possible', () => {
   it('names the exact fact keys the planner reads by name', () => {
     const device = makeLondonDevice()
-    const core = systemPrompt(device)[0]!.text
+    const core = systemPrompt(device)
 
     // resolveOrigin reads these two keys and estimateTravelMinutes reads the third. Nothing told
     // the model they existed, and with no origin there is no Routes call at all: every plan comes
@@ -388,7 +388,7 @@ describe('the model is told what makes live traffic possible', () => {
 
   it('names them on remember_fact too, which is where the key is chosen', () => {
     const remember = buildTools().find((t) => t.name === 'remember_fact')!
-    expect(JSON.stringify(remember.input_schema)).toContain('home.address')
+    expect(JSON.stringify(remember.parameters)).toContain('home.address')
   })
 })
 

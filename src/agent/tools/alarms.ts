@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import type { ToolDef } from './types.js'
 
 /**
  * Alarm tools: a ring at an exact moment, with no completion state and no follow-up.
@@ -7,7 +7,7 @@ import type Anthropic from '@anthropic-ai/sdk'
  * (a flag, a device capability, "only if X is connected") re-renders the tool block and burns the
  * whole prompt cache on every request; refuse at call time in runTool instead.
  */
-export const alarmTools: Anthropic.Tool[] = [
+export const alarmTools: ToolDef[] = [
   {
     name: 'create_alarm',
     description:
@@ -16,7 +16,7 @@ export const alarmTools: Anthropic.Tool[] = [
       'hard cutoff. An alarm has no completion state and you never follow up on it. If the owner ' +
       'needs to DO something and you should chase them until it is done, use create_reminder ' +
       'instead (with ring=true if it also needs to ring).',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         whenLocalISO: {
@@ -43,11 +43,11 @@ export const alarmTools: Anthropic.Tool[] = [
     name: 'cancel_alarm',
     description:
       'Cancel a previously set alarm by its alarmId (from list_alarms). Cancelling a recurring alarm stops the whole series.',
-    input_schema: { type: 'object', properties: { alarmId: { type: 'string' } }, required: ['alarmId'] },
+    parameters: { type: 'object', properties: { alarmId: { type: 'string' } }, required: ['alarmId'] },
   },
   {
     name: 'list_alarms',
     description: 'List the alarms currently set (armed) on the phone.',
-    input_schema: { type: 'object', properties: {} },
+    parameters: { type: 'object', properties: {} },
   },
 ]

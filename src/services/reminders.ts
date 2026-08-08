@@ -4,13 +4,78 @@ import { reminders } from '../db/schema.js'
 import { newAlarmId, newReminderId } from '../lib/ids.js'
 import { nextNagAt, type NagPolicy } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
+import {
+  DEFAULT_TIMING_KIND,
+  isTimingKind,
+  parseNagPlan,
+  planRungs,
+  serializeNagPlan,
+  type NagPlanSpec,
+  type ResolvedPlan,
+  type TimingKind,
+} from '../lib/rungPlan.js'
 import { armAlarm, cancelAlarm } from './alarms.js'
 import type { Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
+import { withdrawNudge } from './push.js'
 import { nextOccurrence } from './recurrence.js'
-import { nagQuietHours } from './settings.js'
+import { nagQuietHours, schedulingRoutine } from './settings.js'
 
 export type Reminder = typeof reminders.$inferSelect
+
+/** The stored kind, falling back for a row written before the column existed or hand-edited. */
+export function timingKindOf(r: Reminder): TimingKind {
+  return isTimingKind(r.timingKind) ? r.timingKind : DEFAULT_TIMING_KIND
+}
+
+/**
+ * Everything `nextNagAt` needs about one reminder on one device, in one place.
+ *
+ * Assembled centrally because there are now five call sites and the parameter set has grown past
+ * the point where each of them getting it right independently is plausible. A site that forgot
+ * `plannedAtMillis` would silently re-prune the lead rungs against the current clock and start
+ * skipping rungs; one that forgot `routine` would put every daily chase back at 09:00.
+ */
+export function ladderParams(
+  device: Device,
+  r: Reminder,
+  nagCount: number,
+  nowMillis: number,
+): Parameters<typeof nextNagAt>[0] {
+  return {
+    policy: r.nagPolicy as NagPolicy,
+    nagCount,
+    dueAtMillis: r.dueAtMillis,
+    zone: device.timezone,
+    nowMillis,
+    quiet: nagQuietHours(device, r.escalateWithAlarm),
+    kind: timingKindOf(r),
+    plannedAtMillis: r.plannedAtMillis ?? r.createdAt,
+    routine: schedulingRoutine(device),
+    plan: parseNagPlan(r.nagPlan),
+  }
+}
+
+/** This reminder's resolved ladder — used for the lead/chase split in evidence and wording. */
+export function resolvedPlanFor(device: Device, r: Reminder): ResolvedPlan | null {
+  if (r.dueAtMillis === null) return null
+  return planRungs({
+    kind: timingKindOf(r),
+    policy: r.nagPolicy as NagPolicy,
+    dueAtMillis: r.dueAtMillis,
+    plannedAtMillis: r.plannedAtMillis ?? r.createdAt,
+    zone: device.timezone,
+    override: parseNagPlan(r.nagPlan),
+    // Must match what `nextNagAt` sees, or the lead count reported to the evidence layer would
+    // disagree with the rungs actually scheduled.
+    quiet: nagQuietHours(device, r.escalateWithAlarm),
+  })
+}
+
+/** How many of this reminder's rungs land BEFORE its due time. Zero for triggers and undated rows. */
+export function leadCountFor(device: Device, r: Reminder): number {
+  return resolvedPlanFor(device, r)?.leadAt.length ?? 0
+}
 
 export function getReminder(reminderId: string): Reminder | undefined {
   return db.select().from(reminders).where(eq(reminders.reminderId, reminderId)).get()
@@ -62,8 +127,10 @@ export async function createReminder(
     title: string
     detail?: string | null
     dueAtMillis?: number | null
+    timing?: TimingKind
     recurrence?: string | null
     nagPolicy?: NagPolicy
+    nagPlan?: NagPlanSpec | null
     ring?: boolean
     escalateWithAlarm?: boolean
     waUserId?: string | null
@@ -72,7 +139,11 @@ export async function createReminder(
   const now = Date.now()
   const reminderId = newReminderId()
   const dueAtMillis = params.dueAtMillis ?? null
-  const nagPolicy = params.nagPolicy ?? 'gentle'
+  const timingKind = params.timing ?? DEFAULT_TIMING_KIND
+  // `persistent` rather than `gentle`: the owner asked to be chased properly by default, and rung 0
+  // is the due instant either way, so nothing about the first message changes.
+  const nagPolicy = params.nagPolicy ?? 'persistent'
+  const nagPlan = params.nagPlan ? serializeNagPlan(params.nagPlan) : null
 
   let alarmId: string | null = null
   if (params.ring && dueAtMillis !== null) {
@@ -86,15 +157,6 @@ export async function createReminder(
   }
 
   const escalateWithAlarm = params.escalateWithAlarm ?? false
-  const firstNag = nextNagAt({
-    policy: nagPolicy,
-    nagCount: 0,
-    dueAtMillis,
-    zone: device.timezone,
-    nowMillis: now,
-    quiet: nagQuietHours(device, escalateWithAlarm),
-  })
-
   const row: Reminder = {
     reminderId,
     deviceId: device.deviceId,
@@ -103,11 +165,15 @@ export async function createReminder(
     detail: params.detail ?? null,
     state: 'OPEN',
     dueAtMillis,
+    timingKind,
     recurrence: params.recurrence ?? null,
     nagPolicy,
-    nextNagAtMillis: firstNag,
+    plannedAtMillis: now,
+    nagPlan,
+    nextNagAtMillis: null,
     nagCount: 0,
     lastNaggedAtMillis: null,
+    lastEscalatedAtMillis: null,
     deferCount: 0,
     escalateWithAlarm,
     alarmId,
@@ -116,9 +182,14 @@ export async function createReminder(
     createdAt: now,
     updatedAt: now,
   }
+  // Computed off the assembled row rather than from the params, so the one definition of "this
+  // reminder's ladder" in `ladderParams` covers creation too.
+  const firstNag = nextNagAt(ladderParams(device, row, 0, now))
+  row.nextNagAtMillis = firstNag
+
   db.insert(reminders).values(row).run()
   if (firstNag !== null) enqueueJob('nudge', firstNag, { reminderId, deviceId: device.deviceId })
-  log.info({ reminderId, dueAtMillis, nagPolicy, ring: Boolean(alarmId) }, 'reminder created')
+  log.info({ reminderId, dueAtMillis, timingKind, nagPolicy, ring: Boolean(alarmId) }, 'reminder created')
   return row
 }
 
@@ -139,6 +210,10 @@ export async function completeReminder(
 
   await releaseAlarm(device, r)
   cancelNudges(reminderId)
+  // Clear it from the phone too. A notification still asking about something they have just told
+  // Otto they did is exactly what teaches an owner to ignore the channel. Fire-and-forget: a
+  // completion must not wait on FCM, and the app expires an un-withdrawn nudge on its own.
+  void withdrawNudge(device, reminderId)
 
   const next =
     r.recurrence && r.dueAtMillis !== null
@@ -151,21 +226,21 @@ export async function completeReminder(
       alarmId = newAlarmId()
       await armAlarm(device, { alarmId, triggerAtMillis: next, label: r.title, recurrence: null })
     }
-    const firstNag = nextNagAt({
-      policy: r.nagPolicy as NagPolicy,
-      nagCount: 0,
-      dueAtMillis: next,
-      zone: device.timezone,
-      nowMillis: now,
-      quiet: nagQuietHours(device, r.escalateWithAlarm),
-    })
+    // Re-anchored to NOW, not left on the original createdAt. The new occurrence has a new due
+    // time, so its lead rungs must be pruned against this moment — measuring them against a
+    // createdAt that is weeks old leaves every warning in the plan and every one of them in the
+    // past, and the ladder goes silent until the due instant.
+    const rolled: Reminder = { ...r, dueAtMillis: next, plannedAtMillis: now }
+    const firstNag = nextNagAt(ladderParams(device, rolled, 0, now))
     db.update(reminders)
       .set({
         state: 'OPEN',
         dueAtMillis: next,
+        plannedAtMillis: now,
         nagCount: 0,
         nextNagAtMillis: firstNag,
         lastNaggedAtMillis: null,
+        lastEscalatedAtMillis: null,
         alarmId,
         completedAtMillis: now,
         completedCount: r.completedCount + 1,
@@ -199,6 +274,7 @@ export async function cancelReminder(device: Device, reminderId: string): Promis
   if (!r || r.state === 'CANCELLED') return false
   await releaseAlarm(device, r)
   cancelNudges(reminderId)
+  void withdrawNudge(device, reminderId)
   db.update(reminders)
     .set({ state: 'CANCELLED', nextNagAtMillis: null, recurrence: null, alarmId: null, updatedAt: Date.now() })
     .where(eq(reminders.reminderId, reminderId))
@@ -226,19 +302,152 @@ export function snoozeReminder(reminderId: string, untilMillis: number): boolean
   return true
 }
 
+/** `undefined` leaves a field alone; an explicit `null` clears it. */
+export type ReminderPatch = {
+  title?: string
+  detail?: string | null
+  dueAtMillis?: number | null
+  timing?: TimingKind
+  nagPolicy?: NagPolicy
+  nagPlan?: NagPlanSpec | null
+  recurrence?: string | null
+  ring?: boolean
+  escalateWithAlarm?: boolean
+  resetChase?: boolean
+}
+
+export type ReminderUpdateResult =
+  | { ok: false; error: string }
+  | { ok: true; reminder: Reminder; deferred: boolean; replanned: boolean }
+
+/**
+ * Change an open reminder in place — what it is, when it is, and how hard it gets chased.
+ *
+ * Anything touching the schedule re-plans from scratch: `plannedAtMillis` moves to now (so lead
+ * rungs are pruned against this moment rather than against a creation time that may be weeks old),
+ * the next rung is recomputed, and the pending nudge job is CANCELLED and re-enqueued. Skipping
+ * that last step is the subtle failure — the row would carry the new instant while the job row
+ * still held the old one, and the reminder would fire on a schedule nothing in the database
+ * describes.
+ *
+ * Pushing the due time LATER increments `deferCount`; pulling it earlier does not. Without that
+ * asymmetry this becomes the snooze-laundering path: moving a due time is indistinguishable from
+ * snoozing in effect, so the one counter that is caused purely by the owner's own choices would
+ * quietly read zero for someone who had dodged a task six times.
+ */
+export async function updateReminder(
+  device: Device,
+  reminderId: string,
+  patch: ReminderPatch,
+): Promise<ReminderUpdateResult> {
+  const r = getReminder(reminderId)
+  if (!r) return { ok: false, error: `no reminder with id ${reminderId}` }
+  if (r.state !== 'OPEN') return { ok: false, error: `reminder "${r.title}" is ${r.state}, so there is nothing to change` }
+
+  const now = Date.now()
+  const dueAtMillis = patch.dueAtMillis === undefined ? r.dueAtMillis : patch.dueAtMillis
+  const timingKind = patch.timing ?? timingKindOf(r)
+  const nagPolicy = patch.nagPolicy ?? (r.nagPolicy as NagPolicy)
+  const nagPlan = patch.nagPlan === undefined ? r.nagPlan : patch.nagPlan === null ? null : serializeNagPlan(patch.nagPlan)
+  const escalateWithAlarm = patch.escalateWithAlarm ?? r.escalateWithAlarm
+
+  const deferred = dueAtMillis !== null && r.dueAtMillis !== null && dueAtMillis > r.dueAtMillis
+  const replanned =
+    dueAtMillis !== r.dueAtMillis ||
+    timingKind !== timingKindOf(r) ||
+    nagPolicy !== r.nagPolicy ||
+    nagPlan !== r.nagPlan ||
+    escalateWithAlarm !== r.escalateWithAlarm ||
+    patch.resetChase === true
+
+  // Ring is a separate object with its own lifecycle, so settle it before the ladder: a due time
+  // that moved has to move the alarm too, and `armAlarm` is idempotent on the id.
+  let alarmId = r.alarmId
+  const wantsRing = patch.ring ?? Boolean(r.alarmId)
+  const title = patch.title ?? r.title
+  if (alarmId && (!wantsRing || dueAtMillis === null)) {
+    await releaseAlarm(device, r)
+    alarmId = null
+  } else if (wantsRing && dueAtMillis !== null && (!alarmId || replanned || patch.title !== undefined)) {
+    alarmId = alarmId ?? newAlarmId()
+    await armAlarm(device, { alarmId, triggerAtMillis: dueAtMillis, label: title, recurrence: null })
+  }
+
+  const next: Reminder = {
+    ...r,
+    title,
+    detail: patch.detail === undefined ? r.detail : patch.detail,
+    dueAtMillis,
+    timingKind,
+    recurrence: patch.recurrence === undefined ? r.recurrence : patch.recurrence,
+    nagPolicy,
+    nagPlan,
+    escalateWithAlarm,
+    alarmId,
+    plannedAtMillis: replanned ? now : r.plannedAtMillis,
+    nagCount: patch.resetChase === true ? 0 : r.nagCount,
+    deferCount: deferred ? r.deferCount + 1 : r.deferCount,
+    updatedAt: now,
+  }
+
+  if (replanned) next.nextNagAtMillis = replan(device, next, now)
+
+  db.update(reminders)
+    .set({
+      title: next.title,
+      detail: next.detail,
+      dueAtMillis: next.dueAtMillis,
+      timingKind: next.timingKind,
+      recurrence: next.recurrence,
+      nagPolicy: next.nagPolicy,
+      nagPlan: next.nagPlan,
+      escalateWithAlarm: next.escalateWithAlarm,
+      alarmId: next.alarmId,
+      plannedAtMillis: next.plannedAtMillis,
+      nagCount: next.nagCount,
+      nextNagAtMillis: next.nextNagAtMillis,
+      deferCount: next.deferCount,
+      updatedAt: now,
+    })
+    .where(eq(reminders.reminderId, reminderId))
+    .run()
+
+  if (replanned) {
+    cancelNudges(reminderId)
+    if (next.nextNagAtMillis !== null) {
+      enqueueJob('nudge', next.nextNagAtMillis, { reminderId, deviceId: r.deviceId })
+    }
+  }
+
+  log.info({ reminderId, replanned, deferred, nextNagAtMillis: next.nextNagAtMillis }, 'reminder updated')
+  return { ok: true, reminder: next, deferred, replanned }
+}
+
+/**
+ * The next rung under a freshly-changed schedule, never null while there is still something to say.
+ *
+ * The clamp matters. `nagCount` indexes into the ladder, and a new ladder can be shorter than the
+ * old one — switching a reminder chased eight times down to `gentle` leaves the index past the end
+ * of the table, `nextNagAt` correctly returns null, and the reminder silently stops being chased at
+ * the exact moment the owner was fiddling with how it gets chased. Falling back to the first
+ * post-due rung keeps an edit from ever ending a ladder by accident; ending one is what
+ * `cancel_reminder` and `nagPolicy: 'off'` are for.
+ */
+function replan(device: Device, r: Reminder, now: number): number | null {
+  const direct = nextNagAt(ladderParams(device, r, r.nagCount, now))
+  if (direct !== null) return direct
+  if (r.dueAtMillis === null || r.nagPolicy === 'off') return null
+  const leadCount = leadCountFor(device, r)
+  if (r.nagCount <= leadCount) return null
+  return nextNagAt(ladderParams(device, r, leadCount, now))
+}
+
 /** Undo a completion — the owner says the wrong thing got ticked off, or it wasn't finished. */
 export function reopenReminder(device: Device, reminderId: string): boolean {
   const r = getReminder(reminderId)
   if (!r || r.state === 'OPEN') return false
   const now = Date.now()
-  const nag = nextNagAt({
-    policy: r.nagPolicy as NagPolicy,
-    nagCount: r.nagCount,
-    dueAtMillis: r.dueAtMillis,
-    zone: device.timezone,
-    nowMillis: now,
-    quiet: nagQuietHours(device, r.escalateWithAlarm),
-  })
+  const nag = nextNagAt(ladderParams(device, r, r.nagCount, now))
   db.update(reminders)
     .set({ state: 'OPEN', completedAtMillis: null, nextNagAtMillis: nag, updatedAt: now })
     .where(eq(reminders.reminderId, reminderId))
@@ -258,14 +467,11 @@ export function onReminderAlarmEvent(alarmId: string, event: string, device: Dev
   const r = db.select().from(reminders).where(eq(reminders.alarmId, alarmId)).get()
   if (!r || r.state !== 'OPEN') return
   const now = Date.now()
-  const nag = nextNagAt({
-    policy: r.nagPolicy as NagPolicy,
-    nagCount: Math.max(r.nagCount, 1), // the ring itself counts as rung 0
-    dueAtMillis: r.dueAtMillis,
-    zone: device.timezone,
-    nowMillis: now,
-    quiet: nagQuietHours(device, r.escalateWithAlarm),
-  })
+  // The ring IS the rung that lands on the due instant, so the chat follow-up starts at the one
+  // after it. With lead rungs that is `leadCount + 1`, not 1 — a deadline whose five warnings
+  // already went out must not be sent back to warning number two by its own alarm going off.
+  const afterTheRing = leadCountFor(device, r) + 1
+  const nag = nextNagAt(ladderParams(device, r, Math.max(r.nagCount, afterTheRing), now))
   if (nag === null) return
   db.update(reminders)
     .set({ nextNagAtMillis: nag, updatedAt: now })

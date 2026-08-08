@@ -5,7 +5,7 @@
 #       └─ persistent 1 GB disk for the SQLite file at /data (see [[mounts]] below).
 #   fly secrets set \
 #       FIREBASE_SERVICE_ACCOUNT="$(cat service-account.json)" \
-#       ANTHROPIC_API_KEY=sk-ant-... \
+#       OPENAI_API_KEY=sk-... \
 #       ADMIN_TOKEN=$(openssl rand -hex 24) \
 #       PUBLIC_ORIGIN=https://<your-app>.fly.dev
 #       └─ FIREBASE_SERVICE_ACCOUNT accepts the JSON inline (multiline is fine via $(cat ...)).
@@ -27,7 +27,9 @@ primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https:
   # secrets, alarm series) is wiped on every deploy.
   DATABASE_PATH = "/data/otto.sqlite"
   DEFAULT_TIMEZONE = "Europe/London"
-  ANTHROPIC_MODEL = "claude-sonnet-5"
+  # A SECOND source of truth for the model, and the one that wins in production — deleting this
+  # line silently falls back to the zod default in src/config.ts. Keep the two strings identical.
+  OPENAI_MODEL = "gpt-5.6-luna"
   # Not a secret, so it lives here rather than in `fly secrets`.
   PUBLIC_ORIGIN = "https://your-otto-server.fly.dev"
 

@@ -4,7 +4,9 @@ import { db } from '../db/client.js'
 import { outbox } from '../db/schema.js'
 import { log } from '../lib/log.js'
 import { inQuietHours, type QuietHours } from '../lib/quietHours.js'
+import { budgetAllows } from './budget.js'
 import { clearInboundWindow, getDevice, listDevices, markTemplateSent, type Device } from './devices.js'
+import { pushOutboxRow } from './push.js'
 import { appendAssistantTurns } from './sessions.js'
 import { quietHoursFor } from './settings.js'
 import { sendTemplate, sendText, type SendResult } from './whatsapp.js'
@@ -31,6 +33,21 @@ const WINDOW_SAFETY_MS = 30 * 60 * 1000
 
 /** Default lifetime of a queued message — a nudge nobody saw for 18h is stale, not useful. */
 export const DEFAULT_TTL_MS = 18 * 60 * 60 * 1000
+
+/**
+ * How many proactive messages one flush pass will deliver before leaving the rest queued.
+ *
+ * A window that reopens after a day of silence used to dump the entire backlog inside one second:
+ * unreadable, and the exact traffic shape that gets a WhatsApp business number rate-limited. The
+ * remaining rows keep their TTL and go out on the next pass — the 5-minute sweep, the next inbound,
+ * or the next producer's `enqueueAndTryFlush` — so a ten-message backlog drains over minutes
+ * instead of arriving as a wall.
+ *
+ * Deliberately a CAP rather than a sleep between sends. `flushOutbox` runs inside the per-user
+ * promise chain that `routes/whatsapp.ts` serialises every inbound message through, so pausing here
+ * would make the owner's own reply wait behind the backlog being paced.
+ */
+export const MAX_SENDS_PER_FLUSH = 3
 
 /**
  * Hard backstop for a PENDING row, enforced by gc. `expiresAtMillis` covers the normal case, but a
@@ -258,6 +275,26 @@ export async function flushOutbox(
       log.debug({ waUserId, id: row.id, kind: row.kind }, 'outbox: holding a proactive message for quiet hours')
       continue
     }
+    // Same shape, same reason, for the daily ceiling — but deliberately NOT for nudges.
+    //
+    // `runNudge` is the primary gate and stops a nudge before it is ever queued. It is also the
+    // only layer that knows whether the reminder behind the row is an escalating one, which is
+    // exempt by the same argument `nagQuietHours` makes: a per-item opt-in the owner set on the one
+    // thing that matters must beat a global default. A row reaching here has already been judged by
+    // a gate with more information than this one has, so re-judging it with less can only overrule
+    // that exemption — which is exactly the bug this comment replaced.
+    //
+    // What this catches is the producers that never go through `runNudge` at all: the brief, the
+    // weekly review, the digest. Held, not retired — the row keeps its TTL and goes out tomorrow.
+    if (opts.proactiveFor && row.kind !== 'nudge' && !budgetAllows(opts.proactiveFor, row.kind as OutboxKind, {}, now)) {
+      log.info({ waUserId, id: row.id, kind: row.kind }, 'outbox: daily message budget spent; holding')
+      continue
+    }
+    // Enough for one pass; the rest keep their place in the queue for the next one.
+    if (opts.proactiveFor && delivered.length >= MAX_SENDS_PER_FLUSH) {
+      log.info({ waUserId, remaining: rows.length - delivered.length }, 'outbox: pass full, leaving the tail queued')
+      break
+    }
     // `sentAtMillis` doubles as the claim stamp — the column is written nowhere else and read
     // nowhere at all, so it costs no migration on a branch that deliberately adds no DDL, and it is
     // what lets a claim orphaned by a crash be told apart from one that is genuinely in flight.
@@ -290,14 +327,37 @@ export async function flushOutbox(
     }
 
     if (res.ok) {
-      db.update(outbox).set({ state: 'SENT', sentAtMillis: Date.now() }).where(eq(outbox.id, row.id)).run()
+      db.update(outbox)
+        .set({ state: 'SENT', sentAtMillis: Date.now(), deliveredVia: 'whatsapp' })
+        .where(eq(outbox.id, row.id))
+        .run()
       delivered.push(row.body)
       continue
     }
     if (res.outOfWindow) {
       if (deviceId) clearInboundWindow(deviceId)
+
+      // A shut window is no longer a wall. Meta permits free-form text only inside 24 hours of the
+      // owner's last inbound, and with no approved template configured `shouldKnock` can never fire
+      // either — so before the phone could take notifications, everything here simply queued until
+      // it expired. A push has no window, costs nothing, and carries the real text.
+      //
+      // Attempted on the CLAIMED row, so the two transports can never both deliver it: whichever
+      // succeeds marks it SENT, and if push fails too the row goes back exactly where it was.
+      const device = deviceId ? getDevice(deviceId) : null
+      if (device && (await pushOutboxRow(device, row, Date.now()))) {
+        db.update(outbox)
+          .set({ state: 'SENT', sentAtMillis: Date.now(), deliveredVia: 'push' })
+          .where(eq(outbox.id, row.id))
+          .run()
+        delivered.push(row.body)
+        // Deliberately NOT `break`. The window being shut said nothing about the phone, and the
+        // whole point is that the rest of the queue can still get through.
+        continue
+      }
+
       db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
-      log.warn({ waUserId, id: row.id }, 'outbox flush hit a shut window; leaving queued')
+      log.warn({ waUserId, id: row.id }, 'outbox flush hit a shut window and the phone is unreachable; leaving queued')
       break // no point trying the rest
     }
     if (res.permanent) {

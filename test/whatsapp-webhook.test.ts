@@ -182,8 +182,8 @@ describe('readable inbound reaches the agent', () => {
     await vi.waitFor(() => expect(runAgentTurnMock).toHaveBeenCalled())
     const content = runAgentTurnMock.mock.calls[0]?.[0].content as Array<Record<string, unknown>>
     expect(Array.isArray(content)).toBe(true)
-    expect(content[0]).toMatchObject({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg' } })
-    expect(content[1]).toEqual({ type: 'text', text: 'when is this due?' })
+    expect(content[0]).toMatchObject({ type: 'input_image', image_url: expect.stringContaining('data:image/jpeg;base64,') })
+    expect(content[1]).toEqual({ type: 'input_text', text: 'when is this due?' })
     expect(fetchMediaMock).toHaveBeenCalledWith('media-photo', expect.objectContaining({ maxBytes: expect.any(Number) }))
   })
 

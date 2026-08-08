@@ -5,8 +5,8 @@ import { sendData } from '../fcm/sender.js'
 import { log } from '../lib/log.js'
 import { advanceRecurrence, listArmed, recordEvent } from '../services/alarms.js'
 import { verifyRequestSig } from '../services/deviceAuth.js'
-import { getDevice, latchAuth, setHeartbeat, setTimezone, setToken } from '../services/devices.js'
-import { onReminderAlarmEvent } from '../services/reminders.js'
+import { getDevice, latchAuth, markActivity, setHeartbeat, setTimezone, setToken } from '../services/devices.js'
+import { completeReminder, onReminderAlarmEvent, snoozeReminder } from '../services/reminders.js'
 import { isValidZone } from '../services/time.js'
 import { scheduleWakeCheck } from '../services/wakeCheck.js'
 
@@ -113,6 +113,61 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       // Fire-and-forget like the rest of this block: the route still answers 204.
       if (device && body.event === 'DISMISSED') scheduleWakeCheck(alarmId, device, body.atMillis)
     }
+    return reply.code(204).send()
+  })
+
+  /**
+   * Everything the device reports that is not an alarm state change.
+   *
+   * One route for all of it, with `kind` saying which vocabulary `event` is drawn from, so a new
+   * device-side signal is a constant on both sides rather than a new endpoint and a new drain loop.
+   *
+   * A nudge action is the owner acting on the reminder itself, so DONE and SNOOZE are applied to
+   * the reminder here rather than merely logged — that is the whole point of putting buttons on a
+   * lockscreen. `refId` for a nudge IS the reminder id (see fcm/commands.ts `nudgeData`).
+   */
+  app.post('/devices/:deviceId/events', async (req, reply) => {
+    const { deviceId } = req.params as { deviceId: string }
+    const body = z
+      .object({
+        deviceId: z.string(),
+        kind: z.string(),
+        refId: z.string(),
+        event: z.string(),
+        atMillis: z.number(),
+        appVersion: z.string().optional(),
+        detail: z.string().optional(),
+        untilMillis: z.number().optional(),
+      })
+      .parse(req.body)
+
+    const device = getDevice(deviceId)
+    if (!device) return reply.code(404).send({ error: 'unknown device' })
+
+    log.info({ deviceId, kind: body.kind, event: body.event, refId: body.refId }, 'Recorded device event')
+
+    if (body.kind === 'NUDGE') {
+      // A tap is proof they are awake and engaging, but it must NOT stamp lastInboundAt: that
+      // column is a Meta transport fact — the 24h free-form window — and a notification button does
+      // not reopen it. Claiming otherwise would have the outbox believing it could send free-form
+      // text and eating a 131047 on the next proactive message.
+      markActivity(deviceId, body.atMillis)
+
+      switch (body.event) {
+        case 'DONE':
+          await completeReminder(device, body.refId)
+          break
+        case 'SNOOZED':
+          if (body.untilMillis !== undefined) snoozeReminder(body.refId, body.untilMillis)
+          break
+        // DEFERRED and DISMISSED are recorded and nothing more. "Not today" and "swiped it away"
+        // are signals about the owner, not instructions — the ladder decides what happens next, and
+        // acting on them here would give a swipe the same power as an explicit snooze.
+        default:
+          break
+      }
+    }
+
     return reply.code(204).send()
   })
 

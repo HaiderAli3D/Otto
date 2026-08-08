@@ -281,19 +281,31 @@ export function isWorthSaying(r: WeeklyRecord): boolean {
 }
 
 /**
- * The parenthetical shown after a reminder title, e.g. `today 18:00, OVERDUE, chased 4×, moved 3×`.
+ * The parenthetical shown after a reminder title, e.g.
+ * `today 18:00, OVERDUE, chased 4× since it was due, moved 3×`.
  *
  * Shared by the prompt's chase-list and the nudge writer so the two can never disagree about what
  * Otto is entitled to say about a given reminder.
+ *
+ * `leadCount` splits `nagCount` into warnings and chases, and getting this wrong is worse than
+ * leaving it out. A deadline warns several times in the run-up, so a reminder that is not due for
+ * another three days can already have a `nagCount` of five — rendered as "chased 5×" the persona
+ * reads that as licence to be uncomfortable about something nobody is late for yet. "Warned 4×
+ * beforehand and they still hadn't started" is both true and stronger, and it is a sentence Otto
+ * could not say at all before.
  */
 export function reminderEvidence(
   r: { dueAtMillis: number | null; nagCount: number; deferCount: number },
   zone: string,
   nowMillis: number = Date.now(),
+  leadCount = 0,
 ): string {
   const parts = [r.dueAtMillis === null ? 'no date' : epochMillisToLocalHuman(r.dueAtMillis, zone)]
   if (r.dueAtMillis !== null && r.dueAtMillis < nowMillis) parts.push('OVERDUE')
-  if (r.nagCount > 0) parts.push(`chased ${r.nagCount}×`)
+  const warned = Math.min(r.nagCount, leadCount)
+  const chased = Math.max(0, r.nagCount - leadCount)
+  if (warned > 0) parts.push(`warned ${warned}× beforehand`)
+  if (chased > 0) parts.push(leadCount > 0 ? `chased ${chased}× since it was due` : `chased ${chased}×`)
   if (r.deferCount > 0) parts.push(`moved ${r.deferCount}×`)
   return parts.join(', ')
 }

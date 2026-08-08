@@ -1,9 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk'
-import { config } from '../config.js'
-import { log } from '../lib/log.js'
+import { composeText, modelClient } from './llm.js'
 import { PERSONA, WRITING } from './persona.js'
-
-const anthropic = config.anthropic ? new Anthropic({ apiKey: config.anthropic.apiKey }) : null
 
 /** Exported so a test can pin that this surface and the others share one persona. */
 export const DIGEST_SYSTEM = [
@@ -47,7 +43,7 @@ function fallback(items: DigestItem[]): string {
  */
 export async function composeDigest(items: DigestItem[], zone: string): Promise<string> {
   if (items.length === 0) return ''
-  if (!anthropic || !config.anthropic || items.length < 2) return fallback(items)
+  if (!modelClient() || items.length < 2) return fallback(items)
 
   const rendered = items
     .map((i) => {
@@ -58,25 +54,13 @@ export async function composeDigest(items: DigestItem[], zone: string): Promise<
     })
     .join('\n')
 
-  try {
-    const res = await anthropic.messages.create({
-      model: config.anthropic.model,
-      max_tokens: 300,
-      // Same reason as agent/nudge.ts: thinking is on by default from Sonnet 5 onward and shares
-      // this 300-token budget with the answer, so a thinking pass would empty the digest into its
-      // templated fallback.
-      thinking: { type: 'disabled' },
-      system: DIGEST_SYSTEM,
-      messages: [{ role: 'user', content: `Timezone ${zone}. Outstanding:\n${rendered}` }],
-    })
-    const text = res.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    return text || fallback(items)
-  } catch (err) {
-    log.warn({ err }, 'digest composition failed; using the templated fallback')
-    return fallback(items)
-  }
+  // No timeout/maxRetries override here, unlike the scheduler-driven surfaces: this one runs on the
+  // inbound path, where the SDK defaults are fine. Deliberately does NOT unquote, as before.
+  const text = await composeText({
+    system: DIGEST_SYSTEM,
+    user: `Timezone ${zone}. Outstanding:\n${rendered}`,
+    maxOutputTokens: 300,
+    logContext: { surface: 'digest' },
+  })
+  return text || fallback(items)
 }
