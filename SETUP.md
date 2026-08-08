@@ -255,10 +255,21 @@ vars; if any is missing the webhook route stays unmounted.
    - Then under **Webhook fields**, **subscribe to the `messages` field**. (Without this you get
      no inbound messages.)
 
-> **24-hour customer-service window:** WhatsApp only allows free-form replies within 24h of the
-> user's last inbound message; outside it you must use pre-approved templates. Otto only ever
-> *replies* to a message you just sent, so it always stays inside the window — no templates
-> needed.
+> **24-hour customer-service window:** WhatsApp only allows free-form messages within 24h of your
+> last inbound one; outside that window Meta rejects them with error 131047, and only a
+> pre-approved template may be sent.
+>
+> This used to matter a great deal, because Otto speaks first constantly — nudges, briefs, the
+> weekly review, wake-checks, warnings — and outside the window all of it simply queued until it
+> expired. **It no longer does.** When the window is shut Otto delivers to your phone as a
+> notification instead, carrying the real text, with Done and Snooze buttons you can use from the
+> lockscreen. A push has no window, costs nothing, and can be withdrawn later.
+>
+> So `META_TEMPLATE_NAME` is optional and, for a single-owner setup with the app installed,
+> not worth configuring: a template costs money, has a six-hour cooldown, carries one short
+> variable, cannot be retracted, and is the most-blocked message type there is.
+>
+> What the window still governs is *which* channel each message takes — see §10.
 
 ---
 
