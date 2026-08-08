@@ -52,6 +52,18 @@ export const deviceSettings = sqliteTable('device_settings', {
   lastBriefAt: integer('last_brief_at'),
   lastEveningBriefAt: integer('last_evening_brief_at'),
   quietHours: text('quiet_hours'), // "22:00-07:00" | "off" | null => config.quietHoursDefault
+  // When the owner actually sleeps, as two ranges: "02:00-04:00" / "10:00-14:00".
+  //
+  // Deliberately NOT a do-not-disturb window — quietHours above remains the only thing that
+  // suppresses anything, and an owner can have a routine with quiet hours switched off entirely.
+  // This is context Otto reasons about, plus the one input that decides which wall-clock hour a
+  // rung Otto CHOOSES lands on (lib/routine.ts `dayStartHour`, the end of the wake window).
+  bedWindow: text('bed_window'),
+  wakeWindow: text('wake_window'),
+  // Runaway backstop, not a volume policy: proactive messages per local day before Otto defers the
+  // rest to tomorrow. 0 means unlimited. High by default because the ladders are meant to be loud;
+  // this exists so a misconfigured `relentless` reminder cannot empty the battery overnight.
+  dailyMessageBudget: integer('daily_message_budget').notNull().default(60),
   weeklyReviewAt: text('weekly_review_at'), // "SUN:18:00" | "off" | null => config.weeklyReviewDefault
   lastWeeklyReviewAt: integer('last_weekly_review_at'),
   autoWakeAlarm: integer('auto_wake_alarm', { mode: 'boolean' }).notNull().default(false),
@@ -159,11 +171,31 @@ export const reminders = sqliteTable(
     detail: text('detail'),
     state: text('state').notNull().default('OPEN'), // OPEN | DONE | CANCELLED
     dueAtMillis: integer('due_at_millis'), // null = undated "someday"
+    // What dueAtMillis MEANS: deadline (finish BY it) | appointment (it happens AT it) |
+    // trigger (say nothing until it). Decides whether rungs sit before the due time, after it, or
+    // both — see lib/rungPlan.ts. `trigger` is the only safe default for rows written before this
+    // column existed: it has zero lead rungs, so every one of them keeps the ladder it had.
+    timingKind: text('timing_kind').notNull().default('trigger'),
     recurrence: text('recurrence'), // same RRULE subset as alarms
-    nagPolicy: text('nag_policy').notNull().default('gentle'), // off | gentle | persistent
+    nagPolicy: text('nag_policy').notNull().default('gentle'), // off | gentle | persistent | hard | relentless
+    // When this schedule was last PLANNED — creation, a recurrence roll-forward, or any edit that
+    // moved the due time. Lead rungs are pruned against this rather than against the current clock,
+    // so the mapping from nagCount to a rung cannot shift under the ladder between fires. Null
+    // falls back to createdAt; it cannot simply BE createdAt, because a recurring reminder writes a
+    // new dueAtMillis while createdAt stays weeks old and every lead rung would survive the prune
+    // already in the past.
+    plannedAtMillis: integer('planned_at_millis'),
+    // An explicit per-reminder schedule as JSON ({leadMinutes,chaseMinutes,keepChasingDaily}), or
+    // null for "use the table". Only written when the owner actually specified timings, so a later
+    // improvement to the tables still reaches every reminder that never asked for anything special.
+    nagPlan: text('nag_plan'),
     nextNagAtMillis: integer('next_nag_at_millis'), // null = ladder exhausted / nagging off
     nagCount: integer('nag_count').notNull().default(0),
     lastNaggedAtMillis: integer('last_nagged_at_millis'),
+    // Last time the escalation path armed a real ringing alarm for this reminder. Gates a cooldown:
+    // the dense ladders fire rungs minutes apart, and without this a shut WhatsApp window turns
+    // `escalateWithAlarm` into a phone that rings every five minutes for hours.
+    lastEscalatedAtMillis: integer('last_escalated_at_millis'),
     // Times the owner has pushed this back without finishing it. Never reset — it is the record
     // Otto cites when he pushes back, and a deferral the owner later "fixed" is still a deferral.
     deferCount: integer('defer_count').notNull().default(0),
