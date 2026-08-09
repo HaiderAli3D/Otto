@@ -129,6 +129,54 @@ gate so a forged push can never make this device emit an authenticated request.
 With nudges open, the shade shows a silent, ongoing "N things open" line and the quick-settings
 tile reads `Otto · N open`. Resolve them all and both should disappear.
 
+## Location on demand (M7)
+
+Everything here needs app **1.2.0+** and a `--secret` matching the paired device. The `--dry-run`
+flag needs a service-account JSON like every other push.
+
+### The grant is two steps, and only the second one works
+Grant **Location** from the app's Permissions card and stop at "While using the app". Send a
+request with the app closed:
+```
+node tools/send-push/send-push.mjs --token <t> --secret <s> \
+  --type REQUEST_LOCATION --reason "work out when to leave for the dentist"
+```
+The server should record `BACKGROUND_DENIED` — **that is a pass**. The row under the permission
+should explain why. Now set "Allow all the time" from the same button and repeat: a fix arrives.
+
+### The one that matters most — screen off, phone Dozing
+```
+adb shell dumpsys deviceidle force-idle
+node tools/send-push/send-push.mjs --token <t> --secret <s> --type REQUEST_LOCATION --high-accuracy true
+```
+With the screen off and the phone in your pocket, a fix should still reach
+`POST /devices/{id}/location`. **This is the biggest unknown in the design**: the Doze
+documentation is explicit about Wi-Fi scans and silent about GPS. If it fails, the correct outcome
+is a `TIMEOUT` answer and the server planning from home — never an exact alarm or a wakelock to
+force it.
+
+### The owner always sees it
+Every fix posts a silent, visible notice on **Quiet notes** reading "Otto checked your location —
+To work out when to leave for the dentist". Send one without `--reason` and it should fall back to
+the generic wording rather than showing a blank line. A fix that produces no notice is a bug even
+if the coordinate arrives.
+
+### A late answer is a wrong answer
+```
+node tools/send-push/send-push.mjs --token <t> --secret <s> --type REQUEST_LOCATION --expires-in 1
+```
+Turn airplane mode on first, send, then turn it off a minute later. The app must report `EXPIRED`
+rather than a fix — and must never post a coordinate captured before the outage. This is the one
+place where the app's usual at-least-once retry behaviour would be the bug.
+
+### It only ever answers once
+After any of the above, check that nothing keeps running: no ongoing location notification, no
+second POST, and `adb shell dumpsys location | grep otto` shows no registered listener.
+
+### With location refused entirely
+Deny location outright and confirm the whole app still works — arm an alarm, receive a nudge, act
+on it from the lockscreen. Location sits outside `allCriticalGranted` precisely so this holds.
+
 ## Alarm regression pass — MANDATORY after any nudge change
 
 The nudge tier shares a process, a database and a boot receiver with the alarm path. Re-run

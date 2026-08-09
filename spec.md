@@ -228,6 +228,9 @@ command code. Every value in `data` is a string (FCM constraint).
 |---|---|
 | `ARM_ALARM` | Arm or replace the alarm with `alarmId` at `triggerAtMillis`. Idempotent. |
 | `CANCEL_ALARM` | Cancel `alarmId` if present. No-op if unknown. |
+| `NUDGE` | Post a notification — never an alarm. Carries `nudgeId`, `title`, `body`, plus `level`, `actions`, `snoozeMinutes`, `expiresAtMillis`, `ongoing`. Pushing the same `nudgeId` updates one notification in place. |
+| `CANCEL_NUDGE` | Withdraw a nudge by `nudgeId`. |
+| `REQUEST_LOCATION` | Take ONE location fix and POST it back. Carries `requestId` (required), `maxAgeSeconds`, `expiresAtMillis`, `highAccuracy`, `reason`. Answers exactly once — no interval, no duration, no stop command, and nothing left running. |
 | `SYNC` | Reconcile. App fetches the authoritative alarm list from the server and arms/cancels to match. |
 | `PING` | Liveness check. App reports a heartbeat with token and app version. |
 
@@ -240,7 +243,17 @@ command code. Every value in `data` is a string (FCM constraint).
 - Integrity (M2): `sig` is an HMAC over a canonical ordering of the data fields
   using a shared secret provisioned at pairing. Reject messages that fail the
   check. This prevents a leaked token alone from arming alarms.
-- Forward compatibility: ignore unknown fields; drop and log unknown `type`.
+- Forward compatibility: ignore unknown fields; drop and log unknown `type`. A dropped `type` is
+  also REPORTED back as a `PUSH/REJECTED` device event, because a contract mismatch is otherwise
+  invisible on both sides — the server records a successful send and the phone records a drop.
+- Version gating: the server must not send a `type` the installed app predates. `NUDGE` requires
+  app ≥ 1.1.0, `REQUEST_LOCATION` ≥ 1.2.0 (`otto-server/src/services/push.ts`). This matters most
+  for `REQUEST_LOCATION`, which has no fallback transport: a nudge that cannot be pushed goes over
+  WhatsApp, while an unanswerable location request just leaves the agent waiting.
+- Location, specifically: the app answers one `REQUEST_LOCATION` and posts the result — or the
+  reason there is not one — to `POST /devices/{deviceId}/location`. It registers no location
+  updates and writes no coordinate to its database, so there is no location history to keep or
+  delete. Every fix posts a visible notification on `otto_quiet` naming what it was for.
 
 ### 7.4 App to server reports (HTTPS)
 
