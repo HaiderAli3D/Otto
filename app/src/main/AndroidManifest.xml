@@ -13,6 +13,26 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
+    <!--
+      Location, ON DEMAND ONLY. Otto is ASKED where the owner is (REQUEST_LOCATION) and answers
+      once; no update stream is ever registered and no coordinate is ever written to Room.
+
+      ACCESS_BACKGROUND_LOCATION is not optional paranoia here, it is the precondition. There are
+      TWO independent gates and a high-priority FCM message only opens one of them. It IS an
+      exemption to the background foreground-service START restriction (API 31+), but it is NOT on
+      the while-in-use exemption list (API 34+) — so a location-typed foreground service started
+      while the app is backgrounded throws SecurityException without background location. A push
+      arriving with the screen off is exactly the case this feature exists for.
+
+      Sideloaded to the owner's phone only, so Play's restricted-permission policy does not apply;
+      the constraint is reliability. Still opt-in: these are runtime permissions and nothing here
+      works until the owner grants them, and every other feature works while they are denied.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
     <!-- Exact alarms: USE_EXACT_ALARM is auto-granted to genuine alarm apps on API 33+;
          SCHEDULE_EXACT_ALARM is only needed (and pre-granted) on API 31-32. -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
@@ -66,6 +86,17 @@
             android:name=".ring.RingService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+          Short-lived foreground service that holds the process open for exactly one location fix.
+          Typed `location` because API 34+ checks the declared type against the held permissions at
+          startForeground() time. Never started unless ACCESS_BACKGROUND_LOCATION is held AND the
+          push actually arrived at high priority — see LocationDispatcher.
+        -->
+        <service
+            android:name=".location.LocationService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
 
         <!-- FCM: high-priority data messages -->
         <service

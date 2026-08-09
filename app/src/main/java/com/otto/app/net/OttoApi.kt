@@ -45,4 +45,17 @@ interface OttoApi {
         @Path("deviceId") deviceId: String,
         @Body body: HeartbeatRequest,
     ): Response<Unit>
+
+    /**
+     * The answer to a REQUEST_LOCATION — a fix, or the reason there is not one.
+     *
+     * Its own route rather than another `kind` on `devices/{deviceId}/events`: that outbox drains
+     * strictly in id order and stops at the first failure, which is a guarantee worth nothing here
+     * at the price of the only one that matters. See [LocationReportRequest].
+     */
+    @POST("devices/{deviceId}/location")
+    suspend fun reportLocation(
+        @Path("deviceId") deviceId: String,
+        @Body body: LocationReportRequest,
+    ): Response<Unit>
 }

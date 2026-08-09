@@ -39,12 +39,17 @@ android {
         applicationId = "com.otto.app"
         minSdk = 26
         targetSdk = 36
-        // 1.1.0 is the first build that understands NUDGE / CANCEL_NUDGE. The server gates push
-        // delivery on this exact number (otto-server `src/services/push.ts` MIN_NUDGE_APP_VERSION),
+        // 1.1.0 was the first build that understood NUDGE / CANCEL_NUDGE; 1.2.0 is the first that
+        // understands REQUEST_LOCATION. The server gates each on its own minimum
+        // (otto-server `src/services/push.ts` MIN_NUDGE_APP_VERSION / MIN_LOCATION_APP_VERSION),
         // because an older build drops an unknown type SILENTLY — the server would record a
         // delivered message the owner never saw. Bump both sides together or not at all.
-        versionCode = 2
-        versionName = "1.1.0"
+        //
+        // The gate matters more for location than it did for nudges: a nudge has a fallback
+        // transport (WhatsApp) and a location request has none, so an ungated send would leave the
+        // agent waiting on an answer that is never coming.
+        versionCode = 3
+        versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -141,6 +146,13 @@ dependencies {
     // throws IllegalStateException and the app crashes on launch before any Otto code runs
     // (observed on-device 2026-08-02).
     implementation(libs.firebase.crashlytics)
+
+    // Location: FusedLocationProviderClient, for one-shot fixes only — no update stream is ever
+    // registered. Play services is already on the graph via firebase-messaging, so the incremental
+    // cost is small. Checked against the compileSdk-36 pins: this pulls at most androidx core 1.9.0
+    // and fragment 1.1.0 transitively, both below the core 1.16.0 pinned in libs.versions.toml, so
+    // nothing here forces the core/lifecycle bump that would drag compileSdk to 37.
+    implementation(libs.play.services.location)
 
     // Hilt — note TWO compilers on ksp: Dagger's, plus androidx's (generates HiltWorkerFactory)
     implementation(libs.hilt.android)

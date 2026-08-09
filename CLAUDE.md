@@ -83,6 +83,38 @@ runs earlier and outside that guard.
 
 Actual crash *upload* to the Firebase console is still unconfirmed. See `spec.md` §13.
 
+**M7 — location on demand (`feat/journey-mapping`, 119 unit tests, `assembleDebug` green).**
+`versionName = 1.2.0` / `versionCode 3`. The phone can now answer *"where are you?"* — once, when
+asked, never continuously. A new `REQUEST_LOCATION` push takes one fix and POSTs it to a new
+`POST /devices/{id}/location`. Ships **dormant**: the server gates the command on
+`MIN_LOCATION_APP_VERSION`, so this release changes no behaviour until that gate opens.
+
+⚠️ **Four things about this that are easy to get wrong, all of them load-bearing:**
+
+1. **`ACCESS_BACKGROUND_LOCATION` is the precondition, not an extra.** There are TWO gates and a
+   high-priority FCM message opens only one. It IS an exemption to the background foreground-service
+   *start* restriction (API 31+), and it is NOT on the while-in-use exemption list (API 34+) — so a
+   `location`-typed FGS started while backgrounded throws `SecurityException` without it. Sideloaded,
+   so Play's restricted-permission policy does not apply; reliability is the constraint.
+2. **The grant is two steps and must not be one.** Requesting a foreground permission and the
+   background one together makes the system ignore the request and grant *neither*; and from API 30
+   "Allow all the time" has no dialog at all, so step two is a Settings deep link.
+3. **A location fix is NEVER retried, only re-taken.** This is the one place the app's established
+   pattern is the bug: `ReportWorker` is at-least-once with ordered draining because a late nudge
+   event is still true, whereas a late fix is *wrong* and nothing downstream could tell. Hence a
+   dedicated endpoint rather than a `device_events` kind (that outbox stops at the first failure),
+   `capturedAtMillis` separate from `atMillis` so the server judges staleness on the fix, and
+   **no Room change at all** — the request survives process death in WorkManager's own `Data`, so
+   there is nothing to replay and "Otto keeps no location history" is true by construction.
+4. **Verify-before-parse is now the most security-critical ordering in the app.** It was already
+   required because the rejection path emits an authenticated request. It is now required because a
+   `REQUEST_LOCATION` handler downstream of an unverified parse would let anyone holding the FCM
+   token ask this phone where its owner is.
+
+Every fix posts a visible `otto_quiet` notice carrying the server's `reason` — "Otto checked your
+location, to work out when to leave for the dentist". That is the design, not a foreground service's
+obligation being met.
+
 ## Stack (do not substitute — see `spec.md` §4)
 
 Kotlin · Jetpack Compose · Coroutines/Flow · Firebase Cloud Messaging (high-priority
@@ -152,6 +184,9 @@ alarm/                 AlarmScheduler (iface) + impl, AlarmReceiver
 ring/                  AlarmRinger (iface) + SimpleRinger, RingActivity, NotificationChannels
 nudge/                 NudgeController, NudgeNotifications, NudgeScheduler (iface) + impl,
                        NudgeActionReceiver, NudgeAlarmReceiver, NudgeLevel/Action/Timing
+location/              LocationController (Android-free core), LocationProvider (iface) +
+                       FusedLocationProvider, LocationReporter (iface), LocationService (FGS),
+                       LocationWorker, LocationDispatcher, LocationNotifications
 data/                  AlarmEntity, AlarmState, AlarmDao, OttoDatabase, AlarmRepository,
                        NudgeEntity, NudgeState, NudgeDao, NudgeRepository, DeviceEventEntity
 data/prefs/            OttoPreferences (DataStore)
@@ -206,8 +241,8 @@ Or just open in Android Studio and Run.
 ## FCM command contract (server → app)
 
 Data-only, high priority. All `data` values are strings (FCM constraint). See `spec.md`
-§7 for the full contract. **Six types:** `ARM_ALARM`, `CANCEL_ALARM`, `NUDGE`, `CANCEL_NUDGE`,
-`SYNC`, `PING`.
+§7 for the full contract. **Seven types:** `ARM_ALARM`, `CANCEL_ALARM`, `NUDGE`, `CANCEL_NUDGE`,
+`REQUEST_LOCATION`, `SYNC`, `PING`.
 
 ```json
 { "message": { "token": "<device token>", "android": { "priority": "high" },
@@ -218,10 +253,12 @@ Data-only, high priority. All `data` values are strings (FCM constraint). See `s
 
 `NUDGE` carries `nudgeId`, `title`, `body` (required) plus `level` (`SILENT|NORMAL|URGENT`),
 `actions` (CSV of `DONE,SNOOZE,LATER,OPEN`), `snoozeMinutes`, `expiresAtMillis`, `ongoing`.
-`CANCEL_NUDGE` carries only `nudgeId`. Built server-side by `src/fcm/commands.ts` `nudgeData` /
-`cancelNudgeData`, and pinned end-to-end by `push/ServerPayloadContractTest.kt`, which holds
-payloads the server actually produced — signature included — because nothing at build time checks
-one repo against the other.
+`CANCEL_NUDGE` carries only `nudgeId`. `REQUEST_LOCATION` carries `requestId` (**required** — an
+answer the server cannot match to its own question is no answer) plus `maxAgeSeconds` (clamped app-side),
+`expiresAtMillis`, `highAccuracy`, `reason`. Built server-side by `src/fcm/commands.ts` `nudgeData` /
+`cancelNudgeData` / `requestLocationData`, and pinned end-to-end by `push/ServerPayloadContractTest.kt`,
+which holds payloads the server actually produced — signature included — because nothing at build
+time checks one repo against the other.
 
 Rules: idempotent on `alarmId` / `nudgeId`; past times within a grace window (default 60s) still
 fire, older are marked MISSED; unknown fields ignored; unknown `type` logged, dropped, **and

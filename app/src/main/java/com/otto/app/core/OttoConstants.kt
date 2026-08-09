@@ -123,4 +123,38 @@ object OttoConstants {
      */
     const val MAX_NUDGE_TITLE_CHARS = 80
     const val MAX_NUDGE_BODY_CHARS = 500
+
+    /** Unique WorkManager work name for answering a REQUEST_LOCATION when the service path is shut. */
+    const val WORK_LOCATION = "otto_location"
+
+    /**
+     * Notification id for the transparency notice shown while a fix is being taken.
+     *
+     * Its own id, above the nudge bands, because it is not a nudge and must never replace one.
+     */
+    const val LOCATION_NOTIFICATION_ID = 3_000_000
+
+    /**
+     * How old a cached fix may be before the provider goes and gets a fresh one, when the server
+     * does not say. Kept short: the whole value of an on-demand fix is that it is current.
+     */
+    const val DEFAULT_LOCATION_MAX_AGE_MILLIS = 2 * 60 * 1000L
+
+    /** Ceiling on the age the SERVER may ask for. Trusting it would make "current" unfalsifiable. */
+    const val MAX_LOCATION_AGE_SECONDS = 30 * 60L
+
+    /** How long to wait for a fix before answering TIMEOUT. Shorter than the agent's own patience. */
+    const val LOCATION_FIX_TIMEOUT_MILLIS = 25_000L
+
+    /**
+     * How long a location request stays worth answering when the server names no expiry.
+     *
+     * A fix that arrives after the journey was planned is not a late answer, it is a wrong one, so
+     * a request that has sat through a retry chain expires rather than replying with the present
+     * about a question asked in the past.
+     */
+    const val LOCATION_REQUEST_TTL_MILLIS = 10 * 60 * 1000L
+
+    /** Shown to the owner on the transparency notification; clamped like a nudge title. */
+    const val MAX_LOCATION_REASON_CHARS = 120
 }

@@ -38,6 +38,16 @@ class MainActivity : ComponentActivity() {
             viewModel.refreshPermissions()
         }
 
+    /**
+     * The FIRST half of the location grant. Both foreground permissions in one call, never with
+     * the background one alongside it — requesting a foreground and the background permission
+     * together makes the system ignore the request and grant neither.
+     */
+    private val locationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            viewModel.refreshPermissions()
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -61,6 +71,7 @@ class MainActivity : ComponentActivity() {
                     onGrantExactAlarm = { startActivitySafely(permissionsManager.exactAlarmSettingsIntent()) },
                     onGrantFullScreenIntent = { startActivitySafely(permissionsManager.fullScreenIntentSettingsIntent()) },
                     onGrantBattery = { startActivitySafely(permissionsManager.batteryExemptionIntent()) },
+                    onGrantLocation = ::grantLocation,
                     onArmTest = viewModel::armTestAlarm,
                     onCancelAlarm = viewModel::cancelAlarm,
                     onOpenSettings = { startActivitySafely(Intent(this, SettingsActivity::class.java)) },
@@ -103,6 +114,24 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(PermissionsManager.POST_NOTIFICATIONS)
         } else {
             startActivitySafely(permissionsManager.appNotificationSettingsIntent())
+        }
+    }
+
+    /**
+     * Location, in the two steps the platform insists on.
+     *
+     * Foreground first, because asking for both at once grants neither. Then "Allow all the time",
+     * which from API 30 has no dialog at all — the owner has to set it on the app's settings page,
+     * so the second step is a deep link rather than a second request.
+     *
+     * Only "Allow all the time" can answer a push arriving with the screen off, so stopping after
+     * step one leaves the feature looking granted and answering BACKGROUND_DENIED every time.
+     */
+    private fun grantLocation() {
+        if (!permissionsManager.locationGranted()) {
+            locationPermissionLauncher.launch(PermissionsManager.FOREGROUND_LOCATION)
+        } else {
+            startActivitySafely(permissionsManager.locationSettingsIntent())
         }
     }
 
