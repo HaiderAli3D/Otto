@@ -25,6 +25,24 @@ export const log = pino({
       '*.apiKey',
       'api_key',
       '*.api_key',
+      // Coordinates. NOT latent — the location route and the journey planner both handle these on
+      // paths where a debugging `log.info({ body })` is the obvious next thing somebody types, and
+      // that one line would write the owner's home address to the host's log aggregator. Redacted
+      // rather than trusted, for exactly the reason stated above about the config object.
+      'lat',
+      '*.lat',
+      'lng',
+      '*.lng',
+      'latitude',
+      '*.latitude',
+      'longitude',
+      '*.longitude',
+      'latLng',
+      '*.latLng',
+      'coords',
+      '*.coords',
+      'fix',
+      '*.fix',
       'req.headers.authorization',
       'req.headers["x-hub-signature-256"]',
       'req.headers["x-otto-sig"]',

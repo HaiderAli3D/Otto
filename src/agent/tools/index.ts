@@ -3,10 +3,19 @@ import { newAlarmId } from '../../lib/ids.js'
 import { isNagPolicy, isTimingKind, previewRungs, type NagPolicy, type TimingKind } from '../../lib/nagLadder.js'
 import { deferPastQuietHours } from '../../lib/quietHours.js'
 import { DEFAULT_TIMING_KIND, normaliseOffsets, type NagPlanSpec } from '../../lib/rungPlan.js'
-import { armAlarm, cancelAlarm, listArmed } from '../../services/alarms.js'
+import { armAlarm, cancelAlarm, getAlarm, listArmed } from '../../services/alarms.js'
 import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
 import { createCalendarEvent, createTask, hasGoogle, listCalendarEvents, type CalendarEvent } from '../../services/google.js'
+import { eventKeyOf } from '../../services/leaveBy.js'
+import {
+  addNote,
+  deleteNote,
+  noteCountsBySubject,
+  readNotes,
+  type Note,
+  type NoteSubject,
+} from '../../services/notes.js'
 import { supersedePending } from '../../services/outbox.js'
 import { setPreferences } from '../../services/preferences.js'
 import { parseRecurrence } from '../../services/recurrence.js'
@@ -28,7 +37,10 @@ import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/t
 import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
 import { googleTools } from './google.js'
+import { createJourney, journeyTools } from './journey.js'
 import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
+import { noteTools } from './notes.js'
+import { managePlaces, placeTools } from './places.js'
 import { reminderTools } from './reminders.js'
 import { settingsTools } from './settings.js'
 
@@ -59,7 +71,19 @@ import { settingsTools } from './settings.js'
  * dispatch, not a schema annotation.
  */
 export function buildTools(): OpenAI.Responses.FunctionTool[] {
-  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools, ...settingsTools].map(
+  return [
+    ...alarmTools,
+    ...reminderTools,
+    ...factTools,
+    ...googleTools,
+    ...leaveByTools,
+    ...settingsTools,
+    ...placeTools,
+    // Appended at the very end, like manage_places and for the same reason: it shifts nothing
+    // already in the cached prefix, and notes have no sibling group worth sitting next to.
+    ...noteTools,
+    ...journeyTools,
+  ].map(
     (t) => ({
       type: 'function' as const,
       name: t.name,
@@ -70,7 +94,7 @@ export function buildTools(): OpenAI.Responses.FunctionTool[] {
   )
 }
 
-function reminderView(r: Reminder, zone: string) {
+function reminderView(r: Reminder, zone: string, noteCount = 0) {
   return {
     reminderId: r.reminderId,
     title: r.title,
@@ -83,6 +107,11 @@ function reminderView(r: Reminder, zone: string) {
     repeats: r.recurrence ?? undefined,
     nagPolicy: r.nagPolicy,
     timesNagged: r.nagCount,
+    // A COUNT, never the text. Notes are only ever read on request, so without a signpost here the
+    // model has no way to know there is anything to offer and "only when you ask" degrades into
+    // "only when you remember there was something to ask about". Omitted at zero, like `repeats`,
+    // so the common reminder costs no extra tokens in a list the owner reads all day.
+    notes: noteCount > 0 ? noteCount : undefined,
   }
 }
 
@@ -158,12 +187,72 @@ function scheduleReport(device: Device, r: Reminder, issues: string[]) {
  */
 function calendarEventView(e: CalendarEvent) {
   return {
+    // The one handle by which the model can address this event later — today only to hang a note
+    // off it. Deliberately `eventKeyOf` rather than `e.id`: leave-by already established that key
+    // (Google's id, falling back to the summary when it gave none) and hands it back from
+    // create_leave_by_alarm, so a second notion of event identity would be a bug waiting to happen.
+    eventId: eventKeyOf(e),
     summary: e.summary,
     startIso: e.startIso,
     endIso: e.endIso,
     location: e.location ?? undefined,
     allDay: e.isAllDay ? true : undefined,
   }
+}
+
+function noteView(n: Note, zone: string, includeSubject: boolean) {
+  return {
+    noteId: n.noteId,
+    writtenLocal: epochMillisToLocalHuman(n.createdAt, zone),
+    // Suppressed when the read was already filtered to one subject: every row would carry the same
+    // three values, and a tool result is re-sent with every later turn in the conversation.
+    about: includeSubject ? (n.subjectLabel ?? undefined) : undefined,
+    subjectKind: includeSubject ? (n.subjectKind ?? undefined) : undefined,
+    subjectId: includeSubject ? (n.subjectId ?? undefined) : undefined,
+    body: n.body,
+  }
+}
+
+/**
+ * Turn whichever of reminderId/alarmId/eventId the model passed into a subject, or say why not.
+ *
+ * Two properties are load-bearing. First, a reminder or alarm id is VERIFIED to exist on this
+ * device — a note filed against a hallucinated id would be written, reported as saved, and then be
+ * unreachable from the only tool that could read it back, which is the exact silent-loss failure
+ * notes exist to prevent. Second, an event id is deliberately NOT verified: checking it would mean
+ * a Google round-trip on every note, and the id is already the loose end that `subjectLabel` on the
+ * row is there to survive.
+ *
+ * More than one id is an error rather than a precedence rule. A note belongs to one thing, and
+ * silently picking the first of three would file it somewhere the model did not intend.
+ */
+function resolveNoteSubject(
+  device: Device,
+  a: Record<string, unknown>,
+): { subject: NoteSubject | null } | { error: string } {
+  const given = (['reminderId', 'alarmId', 'eventId'] as const).filter(
+    (k) => typeof a[k] === 'string' && String(a[k]).trim() !== '',
+  )
+  if (given.length > 1) {
+    return { error: `a note attaches to one thing — you passed ${given.join(' and ')}` }
+  }
+  if (given.length === 0) return { subject: null }
+
+  if (given[0] === 'reminderId') {
+    const id = String(a.reminderId).trim()
+    const r = getReminder(id)
+    if (!r || r.deviceId !== device.deviceId) return { error: `no reminder with id ${id} — call list_reminders first` }
+    return { subject: { kind: 'reminder', id, label: r.title } }
+  }
+  if (given[0] === 'alarmId') {
+    const id = String(a.alarmId).trim()
+    const alarm = getAlarm(id)
+    if (!alarm || alarm.deviceId !== device.deviceId) return { error: `no alarm with id ${id} — call list_alarms first` }
+    return { subject: { kind: 'alarm', id, label: alarm.label } }
+  }
+  const id = String(a.eventId).trim()
+  const label = typeof a.eventTitle === 'string' && a.eventTitle.trim() !== '' ? a.eventTitle.trim() : null
+  return { subject: { kind: 'event', id, label } }
 }
 
 /**
@@ -263,7 +352,10 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
     case 'list_reminders': {
       const state = a.state === 'done' || a.state === 'all' ? a.state : 'open'
       const rows = listReminders(device.deviceId, { state, overdueOnly: a.overdueOnly === true })
-      return { reminders: rows.map((r) => reminderView(r, device.timezone)) }
+      // ONE grouped query for the whole page rather than a count per row — this is the path that
+      // answers "what have I got on?", so an N+1 here would be paid on the most-used tool there is.
+      const counts = noteCountsBySubject(device.deviceId, 'reminder')
+      return { reminders: rows.map((r) => reminderView(r, device.timezone, counts[r.reminderId] ?? 0)) }
     }
     case 'complete_reminder': {
       const reminderId = String(a.reminderId)
@@ -397,6 +489,9 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         title: String(a.title),
         startIso: String(a.startLocalISO),
         endIso: String(a.endLocalISO),
+        location: a.location === undefined ? null : String(a.location),
+        // Never suppressed from this tool — see the param's doc in services/google.ts. Only the
+        // journey planner, which has already arranged its own notifications, turns them off.
       })
     }
     case 'create_task': {
@@ -416,6 +511,53 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       // setPreferences is the trust boundary that type-checks every field. Coercing here would
       // duplicate that and lose the error messages the model needs to correct itself.
       return setPreferences(device, a)
+    }
+    case 'manage_places': {
+      // Body beside the definition in ./places.js, like create_leave_by_alarm: four actions and a
+      // resolution ladder are more than the two lines every other case here is.
+      return await managePlaces(device, a)
+    }
+    case 'plan_journey': {
+      return await createJourney(device, a)
+    }
+    case 'add_note': {
+      const body = typeof a.body === 'string' ? a.body.trim() : ''
+      if (body === '') return { error: 'a note needs some text — pass what they actually said in body' }
+      const subject = resolveNoteSubject(device, a)
+      if ('error' in subject) return subject
+      const note = addNote(device.deviceId, body, subject.subject)
+      return {
+        noteId: note.noteId,
+        addedTo: note.subjectLabel ?? (note.subjectId === null ? 'nothing in particular' : note.subjectId),
+        // Restated because it is the thing most likely to be got wrong in the reply to the owner:
+        // a model that has just filed something is prone to promising it will bring it up later.
+        reminder: 'stored — nothing will read this back to them unless they ask',
+      }
+    }
+    case 'read_notes': {
+      const subject = resolveNoteSubject(device, a)
+      if ('error' in subject) return subject
+      const page = readNotes(device.deviceId, {
+        subject: subject.subject ? { kind: subject.subject.kind, id: subject.subject.id } : undefined,
+        query: typeof a.query === 'string' && a.query.trim() !== '' ? a.query.trim() : undefined,
+        sinceMillis:
+          a.sinceLocalISO === undefined ? undefined : localIsoToEpochMillis(String(a.sinceLocalISO), device.timezone),
+        untilMillis:
+          a.untilLocalISO === undefined ? undefined : localIsoToEpochMillis(String(a.untilLocalISO), device.timezone),
+        standaloneOnly: a.standaloneOnly === true,
+      })
+      return {
+        notes: page.notes.map((n) => noteView(n, device.timezone, subject.subject === null)),
+        total: page.total,
+        // Only present when something was actually dropped, so a complete read cannot be misread as
+        // a trimmed one — and a trimmed one can never be misreported as complete.
+        omitted: page.omitted > 0 ? page.omitted : undefined,
+      }
+    }
+    case 'delete_note': {
+      const noteId = String(a.noteId)
+      const deleted = deleteNote(device.deviceId, noteId)
+      return deleted ? { deleted: true, noteId } : { error: `no note with id ${noteId} — call read_notes first` }
     }
 
     default:

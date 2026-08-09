@@ -128,6 +128,12 @@ export async function createLeaveByAlarm(device: Device, a: Record<string, unkno
   if (matches.length === 0) {
     return {
       error: `no event matching "${description}" in the next 36 hours`,
+      // The one failure tool overlap actually produces, repaired at the point it happens. Both
+      // descriptions name the other, but "is it already on the calendar?" is not something the
+      // model can know without calling one of them — so when the guess turns out wrong, say so
+      // here rather than letting Otto tell the owner it cannot find a dentist appointment thirty
+      // seconds after being told about one.
+      hint: 'if they have just told you about this and it is not on their calendar yet, use plan_journey instead — it creates the event as well',
       candidates: events
         .filter((e) => !e.isAllDay && e.status !== 'cancelled')
         .slice(0, CANDIDATE_LIMIT)

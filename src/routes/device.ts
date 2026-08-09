@@ -6,6 +6,7 @@ import { log } from '../lib/log.js'
 import { advanceRecurrence, listArmed, recordEvent } from '../services/alarms.js'
 import { verifyRequestSig } from '../services/deviceAuth.js'
 import { getDevice, latchAuth, markActivity, setHeartbeat, setTimezone, setToken } from '../services/devices.js'
+import { recordDeviceLocation } from '../services/location.js'
 import { completeReminder, onReminderAlarmEvent, snoozeReminder } from '../services/reminders.js'
 import { isValidZone } from '../services/time.js'
 import { scheduleWakeCheck } from '../services/wakeCheck.js'
@@ -194,6 +195,55 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       .parse(req.body)
     setHeartbeat(deviceId, body.atMillis, body.appVersion)
     applyTimezone(deviceId, body.timezone)
+    return reply.code(204).send()
+  })
+
+  /**
+   * The answer to one REQUEST_LOCATION — a fix, or the reason there is not one.
+   *
+   * Its own route rather than another `kind` on `/events`, because that outbox drains in id order
+   * and stops at the first failure: a location report could queue behind a stale row and arrive long
+   * after it stopped meaning anything. Freshness is the whole value here; ordering is worth nothing.
+   *
+   * A refusal travels the same road as a fix, and that is deliberate — Otto may be mid-plan while
+   * this is in flight, so "I can't" has to arrive as fast as "here I am".
+   *
+   * `capturedAtMillis` is when the PHONE took the fix. Staleness is judged on it, never on arrival
+   * time; judging on arrival would accept a fix delayed by a retry as current. Coordinates are
+   * validated here rather than trusted, because everything downstream treats a stored fix as real.
+   */
+  app.post('/devices/:deviceId/location', async (req, reply) => {
+    const { deviceId } = req.params as { deviceId: string }
+    const body = z
+      .object({
+        requestId: z.string().min(1).max(64),
+        status: z.string().min(1).max(32),
+        latitude: z.number().min(-90).max(90).optional(),
+        longitude: z.number().min(-180).max(180).optional(),
+        accuracyMeters: z.number().min(0).max(1_000_000).optional(),
+        capturedAtMillis: z.number().int().optional(),
+        atMillis: z.number().int(),
+        isMock: z.boolean().optional(),
+        appVersion: z.string().max(32).optional(),
+        detail: z.string().max(500).optional(),
+      })
+      .parse(req.body)
+
+    const hasCoords = body.latitude !== undefined && body.longitude !== undefined
+    recordDeviceLocation({
+      deviceId,
+      requestId: body.requestId,
+      // A status of OK with no coordinates is a contradiction, and treating it as OK would store a
+      // "fix" that `usableFix` then has to reject on a second, unrelated ground.
+      status: body.status === 'OK' && !hasCoords ? 'UNAVAILABLE' : body.status,
+      latLng: hasCoords ? { lat: body.latitude!, lng: body.longitude! } : null,
+      accuracyMeters: body.accuracyMeters === undefined ? null : Math.round(body.accuracyMeters),
+      isMock: body.isMock ?? false,
+      fixAtMillis: body.capturedAtMillis ?? null,
+    })
+    // Deliberately no coordinate in the log line. lib/log.ts redacts them, and this route is the one
+    // place where a careless `req.body` would otherwise write the owner's home to the host's logs.
+    log.info({ deviceId, requestId: body.requestId, status: body.status }, 'location: answer received')
     return reply.code(204).send()
   })
 }

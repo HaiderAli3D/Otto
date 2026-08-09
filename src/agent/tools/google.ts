@@ -23,10 +23,20 @@ export const googleTools: ToolDef[] = [
     name: 'create_calendar_event',
     description:
       'Create a Google Calendar event. This does NOT ring and does NOT chase; use create_alarm ' +
-      'for a ring or create_reminder for something to follow up on.',
+      'for a ring or create_reminder for something to follow up on. Always pass location when ' +
+      'the event happens somewhere — without it nothing can ever work out when they need to leave.',
     parameters: {
       type: 'object',
-      properties: { title: { type: 'string' }, startLocalISO: { type: 'string' }, endLocalISO: { type: 'string' } },
+      properties: {
+        title: { type: 'string' },
+        startLocalISO: { type: 'string' },
+        endLocalISO: { type: 'string' },
+        location: {
+          type: 'string',
+          description:
+            'Where it is. A full address if you have one — this is what the travel time is worked out from.',
+        },
+      },
       required: ['title', 'startLocalISO', 'endLocalISO'],
     },
   },

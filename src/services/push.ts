@@ -48,6 +48,22 @@ const HEARTBEAT_STALE_MS = 3 * 24 * 60 * 60 * 1000
 const MIN_NUDGE_APP_VERSION = '1.1.0'
 
 /**
+ * The first app build that understands `REQUEST_LOCATION`.
+ *
+ * Same mechanism as the nudge gate above, and MORE important rather than merely analogous. That
+ * comment says the gate "makes deployment order a non-issue: the server can ship before the app" —
+ * true for a nudge BECAUSE a nudge has a second transport and falls back to WhatsApp. A location
+ * request has none. Sent to a phone that cannot parse it, the command is dropped silently, the
+ * agent waits out its timeout for an answer that was never coming, and the only trace on this side
+ * is a log line: `routes/device.ts` does not persist the PUSH/REJECTED the phone dutifully reports.
+ *
+ * So this gate is not an optimisation, it is the thing that keeps a stalled app release a no-op
+ * instead of a broken conversation. Correct deploy order: app 1.2.0 first, confirm via heartbeat
+ * that `devices.appVersion` reads 1.2.0, then the server.
+ */
+const MIN_LOCATION_APP_VERSION = '1.2.0'
+
+/**
  * Dotted-numeric version compare, tolerant of anything that is not one.
  *
  * Returns false for a null, empty or unparseable `appVersion` — refusing to push is always the
@@ -104,6 +120,22 @@ export function pushReachable(device: Device, nowMillis: number = Date.now()): b
   if (!device.hmacSecret) return false
   // An app too old to understand NUDGE would drop it without a word — see MIN_NUDGE_APP_VERSION.
   if (!versionAtLeast(device.appVersion, MIN_NUDGE_APP_VERSION)) return false
+  if (device.lastHeartbeatAt === null) return false
+  return nowMillis - device.lastHeartbeatAt < HEARTBEAT_STALE_MS
+}
+
+/**
+ * Can this device be ASKED where its owner is?
+ *
+ * Deliberately a separate predicate from `pushReachable` rather than a flag on it: the two gate
+ * different capabilities behind different minimum versions, and collapsing them would mean a device
+ * that can take a nudge but not a location request is treated as one that can do neither, or worse,
+ * as one that can do both.
+ */
+export function locationCapable(device: Device, nowMillis: number = Date.now()): boolean {
+  if (!device.fcmToken) return false
+  if (!device.hmacSecret) return false
+  if (!versionAtLeast(device.appVersion, MIN_LOCATION_APP_VERSION)) return false
   if (device.lastHeartbeatAt === null) return false
   return nowMillis - device.lastHeartbeatAt < HEARTBEAT_STALE_MS
 }

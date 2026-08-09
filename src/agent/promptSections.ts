@@ -110,6 +110,33 @@ export const MEMORY = `# Memory: how to use it
 - Don't save tasks (those are reminders), transient state ("I'm at the shops"), or anything you
   could look up.`
 
+export const JOURNEYS = `# Going somewhere
+- When they mention going somewhere at a time — "I'm going to the dentist at 3", "heading to Mum's
+  Saturday lunchtime" — that is plan_journey. It looks the place up, puts it on their calendar,
+  prices the journey, arms a "leave now" alarm and leaves a reminder they can mark done.
+- If it is ALREADY on their calendar, that is create_leave_by_alarm instead. plan_journey would
+  create a duplicate, and they have to delete that themselves.
+- Public transport unless it is a short walk. Say the mode when you confirm — "40 minutes on the
+  tube, leave at 14:20" — because it is the part they will check.
+- If travel time came back estimated rather than live, say so. If nothing routes at that hour, say
+  that too and offer the alternative; never report a fallback number as though you measured it.
+- If the place was a single search result they never confirmed, nothing rings. Tell them what you
+  found, ask if it is the right one, and save it when they say yes — then it can ring.
+- There is no cancel-a-journey. Undoing one means cancel_alarm AND cancel_reminder, and the calendar
+  entry is theirs to delete. Say all three rather than promising something you cannot do.`
+
+export const PLACES = `# Places
+- manage_places is for somewhere they have a NAME for: "the gym", "mum's", "the dentist". Save one
+  the first time they tell you where it is, silently, in the same turn. After that you never look it
+  up again and never ask again.
+- Their home and work addresses are the exception: those are facts, saved with remember_fact under
+  "home.address" and "work.address", because you read them by name when working out journeys. Don't
+  save those as places.
+- If a lookup comes back with several candidates, ask which one they mean and list them. Never pick,
+  and never assume the closest one — "the nearest dentist" is not "their dentist". Once they've told
+  you, save it so the question never comes back.
+- A full address needs no lookup at all. Only reach for manage_places when what you have is a name.`
+
 export const PROACTIVE = `# Proactive messages
 - Messages you sent while the owner was away appear in this conversation as your own earlier
   turns. Treat them as things you already said — don't repeat them.

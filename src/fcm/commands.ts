@@ -104,3 +104,40 @@ export function cancelNudgeData(nudgeId: string, secret: string): Record<string,
   data.sig = computeSig(data, secret)
   return data
 }
+
+/** The reason is shown to the owner on their phone, so it is clamped like a title rather than a body. */
+const MAX_REASON_CHARS = 120
+
+/**
+ * Ask the phone where the owner is, once.
+ *
+ * Not tracking, and the shape of this payload is the argument: there is a `requestId` because the
+ * phone answers exactly ONCE per question, and deliberately no interval, no duration and no
+ * stop counterpart. There is nothing here to leave running.
+ *
+ * `reason` is not decoration. The phone must post a visible notification to take a fix at all, and
+ * this string is what turns that notice from "Otto checked your location" into "Otto checked your
+ * location, to work out when to leave for the dentist". It is the difference between the feature
+ * being transparent and feeling covert, and it costs one field.
+ *
+ * ⚠️ Never send this without checking `locationCapable(device)` first. An app older than
+ * MIN_LOCATION_APP_VERSION drops an unrecognised type, and unlike a nudge — which falls back to
+ * WhatsApp — a location request has NO second transport. The agent would simply wait for an answer
+ * that was never coming.
+ */
+export function requestLocationData(params: {
+  requestId: string
+  maxAgeSeconds?: number
+  expiresAtMillis?: number | null
+  highAccuracy?: boolean
+  reason?: string | null
+  secret: string
+}): Record<string, string> {
+  const data: Record<string, string> = { v: V, type: 'REQUEST_LOCATION', requestId: params.requestId }
+  if (params.maxAgeSeconds !== undefined) data.maxAgeSeconds = String(params.maxAgeSeconds)
+  if (params.expiresAtMillis != null) data.expiresAtMillis = String(params.expiresAtMillis)
+  if (params.highAccuracy !== undefined) data.highAccuracy = params.highAccuracy ? 'true' : 'false'
+  if (params.reason) data.reason = params.reason.slice(0, MAX_REASON_CHARS)
+  data.sig = computeSig(data, params.secret)
+  return data
+}

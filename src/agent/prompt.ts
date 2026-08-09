@@ -13,8 +13,10 @@ import {
   ALARMS_VS_REMINDERS,
   CAPABILITIES,
   IDENTITY,
+  JOURNEYS,
   LEAVE_BY,
   MEMORY,
+  PLACES,
   PREFERENCES,
   PROACTIVE,
   REMINDER_LOOP,
@@ -45,9 +47,15 @@ const CORE = [
   CAPABILITIES,
   ALARMS_VS_REMINDERS,
   LEAVE_BY,
+  // Immediately after LEAVE_BY, because the only thing the model has to get right about either is
+  // which one it is looking at — and that decision is easiest to make with both rules adjacent.
+  JOURNEYS,
   REMINDER_TIMING,
   REMINDER_LOOP,
   MEMORY,
+  // Directly after MEMORY, because from the owner's side a saved place IS something Otto remembers
+  // — the split between a fact and a place row is an implementation detail they never see.
+  PLACES,
   PROACTIVE,
   PREFERENCES,
   ROUTINE,

@@ -245,6 +245,140 @@ export const facts = sqliteTable(
 )
 
 /**
+ * Something the owner SAID about a thing, held verbatim until they ask for it back.
+ *
+ * The fourth store Otto can write to, and the boundary matters more than the table does. `facts`
+ * holds a standing truth and is upserted by key, so a correction REPLACES it. `reminders.detail`
+ * holds the one line worth repeating while chasing, and every nudge reads it. A note is neither: it
+ * is dated, it is appended, nothing ever rewrites it, and — the load-bearing half — NOTHING reads
+ * it proactively. Not a nudge, not a brief, not the cached prompt. It exists to be asked for.
+ *
+ * That last property is also why notes are exempt from the sweeps in services/gc.ts. They cost
+ * nothing until `read_notes` is called, and every row here is something the owner actually said —
+ * which `facts` already establishes Otto never silently forgets.
+ *
+ * [subjectKind, subjectId] are both set or both null; null means a standalone jotting. The pair is
+ * polymorphic rather than three foreign keys because a note about a meeting has to hang off a
+ * Google event id, which no constraint in this database could ever enforce anyway.
+ */
+export const notes = sqliteTable(
+  'notes',
+  {
+    noteId: text('note_id').primaryKey(),
+    deviceId: text('device_id').notNull(),
+    subjectKind: text('subject_kind'), // 'reminder' | 'alarm' | 'event' | null
+    subjectId: text('subject_id'), // reminderId | alarmId | eventKeyOf(event) | null
+    // The subject's title AS IT READ WHEN THE NOTE WAS WRITTEN, and deliberately never refreshed.
+    // Nothing cascades into this table and nothing can: alarms get swept, calendar events get
+    // deleted, reminders get cancelled. Without the label a search hit reads `note on rem_01H8QK…`
+    // and is worthless — with it the note outlives its subject and still says what it was about.
+    subjectLabel: text('subject_label'),
+    body: text('body').notNull(),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    // Leads with device_id so the same index serves both "this subject's notes" and the flat
+    // newest-first scan that an unfiltered search does.
+    bySubject: index('notes_subject').on(t.deviceId, t.subjectKind, t.subjectId, t.createdAt),
+    byDevice: index('notes_device_time').on(t.deviceId, t.createdAt),
+  }),
+)
+
+/**
+ * A place the owner has a name for. "the gym", "mum's", "the office".
+ *
+ * A table rather than more `facts` rows, and the reason is the coordinates. A fact is ONE short
+ * sentence of prose the model reads; a place is a structured tuple — alias, label, formatted
+ * address, Google place id, lat/lng — that server code joins on. Stuffing that into `facts.value`
+ * would mean parsing prose on the hot path of every journey, which is exactly the failure mode
+ * `parseBufferMinutes` in services/travel.ts exists to contain and is not worth repeating.
+ *
+ * `home.address` and `work.address` stay FACTS and are not mirrored here. They are read by name by
+ * `resolveOrigin` (services/leaveBy.ts), they predate this table, and two rows that can disagree
+ * about where the owner lives is a worse failure than one lookup that has to check two places.
+ * `resolvePlace` consults the facts for those two aliases; nothing writes them here.
+ *
+ * UNIQUE(device_id, alias) for the same reason `facts_key` is unique: saving "the gym" again after
+ * they change gym must CORRECT the row, not leave two of them for a coin flip to choose between.
+ */
+export const savedPlaces = sqliteTable(
+  'saved_places',
+  {
+    placeRowId: text('place_row_id').primaryKey(),
+    deviceId: text('device_id').notNull(),
+    // Normalised for lookup — lowercased, "the " stripped. `label` keeps what they actually said.
+    alias: text('alias').notNull(),
+    label: text('label').notNull(),
+    address: text('address').notNull(),
+    // Google's stable id. Preferred over `address` when routing: the address was geocoded once,
+    // already, and handing Routes free text again is a second chance to pick the wrong branch.
+    googlePlaceId: text('google_place_id'),
+    lat: integer('lat'), // stored ×1e6 as an integer — SQLite reals compare badly and we only
+    lng: integer('lng'), // ever need ~10cm precision for a distance lower bound
+    useCount: integer('use_count').notNull().default(0),
+    lastUsedAtMillis: integer('last_used_at_millis'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({ byAlias: uniqueIndex('saved_places_alias').on(t.deviceId, t.alias) }),
+)
+
+/**
+ * Billed Google Routes requests, per device, per UTC day. A spend guard, not analytics.
+ *
+ * In a table rather than a Map, and that is a deliberate reversal. The counter used to live in
+ * memory, justified by "a restart clearing it is the correct failure mode — the runaway loop it
+ * exists to stop does not survive the restart either". That reasoning holds only while the spender
+ * is an in-process chain. It stopped holding when journeys arrived: `jobs` is a table,
+ * `rescheduleJob` persists, and `seedSchedulerJobs()` re-seeds on boot, so a container crash-looping
+ * every ninety seconds would reset an in-memory ceiling every ninety seconds while the durable queue
+ * kept handing out billable work — and the first sign would be the bill.
+ *
+ * The day key is UTC, not the device's: this bounds SPEND, and the bill is not keyed on anyone's
+ * timezone. Old rows are swept by services/gc.ts along with everything else that grows.
+ */
+export const travelCalls = sqliteTable(
+  'travel_calls',
+  {
+    deviceId: text('device_id').notNull(),
+    dayKey: text('day_key').notNull(), // "2026-08-09", UTC
+    count: integer('count').notNull().default(0),
+  },
+  (t) => ({ byDay: uniqueIndex('travel_calls_day').on(t.deviceId, t.dayKey) }),
+)
+
+/**
+ * The last place the phone said it was, and why it was asked. ONE ROW PER DEVICE, upserted.
+ *
+ * Not a log, and the primary key is the whole argument. An append-only table would accumulate a
+ * movement history nobody asked for and nothing reads — the exact thing this feature promises not to
+ * build. One row can answer "where are they now" and "when did Otto last look, and what for", which
+ * is everything either side needs.
+ *
+ * `gc` NULLS the coordinates after LOCATION_TTL_MS while keeping the row, so the accountability half
+ * outlives the private half. A fix has no value past the journey that requested it.
+ *
+ * `fixAtMillis` is when the PHONE took the fix, and staleness is judged on it rather than on
+ * `receivedAtMillis`. Judging on receipt would accept a fix delayed by a retry chain as current,
+ * which is precisely the failure the app avoids by never replaying one.
+ */
+export const deviceLocations = sqliteTable('device_locations', {
+  deviceId: text('device_id').primaryKey(),
+  requestId: text('request_id'),
+  /** OK | PERMISSION_DENIED | BACKGROUND_DENIED | LOCATION_DISABLED | TIMEOUT | EXPIRED | … */
+  status: text('status').notNull(),
+  lat: integer('lat'), // ×1e6, like saved_places — SQLite reals compare badly across platforms
+  lng: integer('lng'),
+  accuracyMeters: integer('accuracy_meters'),
+  isMock: integer('is_mock', { mode: 'boolean' }).notNull().default(false),
+  fixAtMillis: integer('fix_at_millis'),
+  receivedAtMillis: integer('received_at_millis').notNull(),
+  /** What Otto said it was for, kept so "when did you last check on me?" is answerable in words. */
+  reason: text('reason'),
+})
+
+/**
  * Queued outbound WhatsApp messages. Everything Otto says that is NOT a direct reply goes here.
  *
  * Free-form sends are only legal inside Meta's 24h window (an approved template is optional config

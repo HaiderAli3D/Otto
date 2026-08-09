@@ -143,7 +143,7 @@ cloudflared tunnel --url http://localhost:3000
 **restart** `npm run dev` (the URL changes each run, so this is for testing, not production).
 
 > Because the tunnel URL is not localhost, the server now **requires `ADMIN_TOKEN` to be set**
-> and refuses to boot without it (see §10 Hardening). Generate one: `openssl rand -hex 24`.
+> and refuses to boot without it (see §11 Hardening). Generate one: `openssl rand -hex 24`.
 
 ---
 
@@ -190,7 +190,7 @@ still rings after pairing — the server signs with the same secret.)
 
 Pairing also hardens the **other direction**: once the app holds the secret it signs every HTTP
 call it makes, and the server locks that device to signed calls after the first one arrives
-(`authEnforced: true` in `GET /admin/devices`). Details and recovery in §10 Hardening.
+(`authEnforced: true` in `GET /admin/devices`). Details and recovery in §11 Hardening.
 
 The same response shows `hasToken` (is the FCM token registered?) and the `deviceId` you'll need
 for Google OAuth in §9.
@@ -269,7 +269,7 @@ vars; if any is missing the webhook route stays unmounted.
 > not worth configuring: a template costs money, has a six-hour cooldown, carries one short
 > variable, cannot be retracted, and is the most-blocked message type there is.
 >
-> What the window still governs is *which* channel each message takes — see §10.
+> What the window still governs is *which* channel each message takes — see §11.
 
 ---
 
@@ -328,7 +328,45 @@ Docs: [Using OAuth 2.0 for Web Server Applications](https://developers.google.co
 
 ---
 
-## 10. Hardening
+## 10. Google Maps — journeys (optional)
+
+Without this, Otto can still set a leave-by alarm, but the travel time is a flat guess from
+`DEFAULT_TRAVEL_MINUTES` rather than a real one, and it has to ask you for an address every time
+instead of looking a place up.
+
+**ONE key, TWO APIs, and both must be enabled on it.** Enabling only Routes is the trap: travel
+times start working, place lookup silently returns nothing, and Otto goes on asking for addresses
+with no error anywhere to explain why.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/) pick the **same project** as
+   your Firebase app (Firebase projects are Cloud projects).
+2. **APIs & Services → Library**, and enable both:
+   - **Routes API** — travel time, with live traffic and real timetables.
+   - **Places API (New)** — turning "the gym" into an address. Note the **(New)**: the legacy
+     "Places API" is a different product and will not answer the endpoint Otto calls.
+3. **APIs & Services → Credentials → Create credentials → API key.**
+4. Restrict it — **Edit API key → API restrictions → Restrict key**, and select exactly those two.
+   An unrestricted key that leaks can be spent against every API in the project.
+5. Set it:
+   ```bash
+   fly secrets set GOOGLE_MAPS_API_KEY=AIza...      # Fly
+   # or add GOOGLE_MAPS_API_KEY=AIza... to .env     # VPS / local
+   ```
+
+**Billing.** Both APIs need billing enabled on the project and both have a monthly free allowance
+that a single person's use sits comfortably inside. Otto also caps itself per device per day —
+40 Routes requests and 15 Places lookups — because this is your card, and a scheduler bug that
+turned a chain into a loop would otherwise show up as a bill rather than an error. Over the cap it
+degrades to the flat estimate and says so rather than failing.
+
+**Check it works:** message Otto "where is Wembley Stadium?" — a reply with a real address means
+Places is on. Then "I'm going to Wembley Stadium at 3pm tomorrow": a reply naming a travel mode
+("40 minutes on the tube") means Routes is on too. If it says the time is an estimate, one of the
+two is not enabled or the key is restricted too tightly.
+
+---
+
+## 11. Hardening
 
 What protects what, and how to recover when a protection bites.
 
@@ -367,7 +405,7 @@ secrets, signatures and tokens by design, but quieter is safer.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **Phone doesn't ring:**
 - `GET /admin/devices` → is `hasToken: true`? If false, open the app (§5 step 2) so it registers
@@ -387,7 +425,7 @@ secrets, signatures and tokens by design, but quieter is safer.
   (or wait for a heartbeat) so it reports the phone's real zone.
 
 **App gets 401s from the server:** the device is latched to signed requests but the app lost its
-secret (cleared data / unpaired). Re-pair per §6 — see §10 Hardening.
+secret (cleared data / unpaired). Re-pair per §6 — see §11 Hardening.
 
 **WhatsApp not replying:**
 - Webhook won't verify → the **Verify token** in Meta must exactly equal `META_VERIFY_TOKEN`, and
