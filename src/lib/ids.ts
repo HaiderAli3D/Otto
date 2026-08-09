@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { ulid } from 'ulid'
+import { monotonicFactory, ulid } from 'ulid'
 
 /** Server-generated stable alarm id. Idempotent arming on the app keys off this. */
 export const newAlarmId = (): string => `alm_${ulid()}`
@@ -11,6 +11,19 @@ export const newFactId = (): string => `fct_${ulid()}`
 
 /** A saved place. Never shown to the model — it addresses places by alias, which is the point. */
 export const newSavedPlaceId = (): string => `plc_${ulid()}`
+
+/**
+ * A note. Shown to the model, because deleting one needs the id and nothing else identifies it.
+ *
+ * MONOTONIC, unlike every other id here, and that is load-bearing rather than tidy. Notes are an
+ * append-only log read back in the order they were written, and two added in one turn — "milk" then
+ * "and bread" — land in the same millisecond. A plain `ulid()` re-randomises its low bits on every
+ * call, so those two would sort by coin flip and the list would silently reorder itself. The
+ * monotonic factory guarantees the second id sorts after the first within the same millisecond,
+ * which is exactly the tiebreaker `readNotes` orders on.
+ */
+const noteUlid = monotonicFactory()
+export const newNoteId = (): string => `not_${noteUlid()}`
 
 /** Joins the parts of a derived id. A control character, so it cannot occur in a summary. */
 const SEP = '\u0000'

@@ -134,6 +134,22 @@ export function ensureSchema(): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS facts_key ON facts (device_id, key);
 
+    CREATE TABLE IF NOT EXISTS notes (
+      note_id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      subject_kind TEXT,
+      subject_id TEXT,
+      subject_label TEXT,
+      body TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    -- Both indexes lead with device_id: the first serves "everything noted about this one thing",
+    -- and because subject_kind/subject_id are optional prefixes it also serves the flat
+    -- newest-first scan an unfiltered search does.
+    CREATE INDEX IF NOT EXISTS notes_subject ON notes (device_id, subject_kind, subject_id, created_at);
+    CREATE INDEX IF NOT EXISTS notes_device_time ON notes (device_id, created_at);
+
     CREATE TABLE IF NOT EXISTS saved_places (
       place_row_id TEXT PRIMARY KEY,
       device_id TEXT NOT NULL,
@@ -149,6 +165,13 @@ export function ensureSchema(): void {
       updated_at INTEGER NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS saved_places_alias ON saved_places (device_id, alias);
+
+    CREATE TABLE IF NOT EXISTS travel_calls (
+      device_id TEXT NOT NULL,
+      day_key TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS travel_calls_day ON travel_calls (device_id, day_key);
 
     CREATE TABLE IF NOT EXISTS outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

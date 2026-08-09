@@ -189,10 +189,21 @@ describe('list_calendar_events hands the model a view, not the row', () => {
     const res = (await runTool(device, 'list_calendar_events', window)) as { events: unknown[] }
 
     // A tool result is appended to the session history and re-sent on every later turn, so width
-    // here is a bill for the rest of the conversation. The id is forty opaque characters that no
-    // tool accepts as input — create_leave_by_alarm matches on the title.
+    // here is a bill for the rest of the conversation — which is why this asserts the WHOLE shape
+    // and not just the fields it cares about.
+    //
+    // The id was excluded on the grounds that no tool accepted it as input. `add_note` now does, so
+    // that premise is gone and the forty characters buy something: without them the model cannot
+    // address a meeting at all, and notes taken in one could only be filed against its title. Title
+    // was rejected as the key because it is not unique — every daily "Standup" would silently share
+    // one pile of notes, and two unrelated meetings with the same name would merge.
+    //
+    // It is `eventKeyOf`, not `e.id`, so there is exactly one notion of event identity in the
+    // system: leave-by established that key (Google's id, falling back to the summary when it gives
+    // none) and create_leave_by_alarm already hands the same value back.
     expect(res.events).toEqual([
       {
+        eventId: 'a1b2c3d4e5f6g7h8i9j0k1l2m3_20260804T110000Z',
         summary: 'Standup',
         startIso: '2026-08-04T12:00:00+01:00',
         endIso: '2026-08-04T13:00:00+01:00',
