@@ -9,6 +9,9 @@ export const newReminderId = (): string => `rem_${ulid()}`
 
 export const newFactId = (): string => `fct_${ulid()}`
 
+/** A saved place. Never shown to the model — it addresses places by alias, which is the point. */
+export const newSavedPlaceId = (): string => `plc_${ulid()}`
+
 /** Joins the parts of a derived id. A control character, so it cannot occur in a summary. */
 const SEP = '\u0000'
 

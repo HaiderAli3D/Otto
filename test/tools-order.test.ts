@@ -40,6 +40,10 @@ const EXPECTED = [
   'create_task',
   'create_leave_by_alarm',
   'set_preferences',
+  // Appended at the very end, which shifts nothing already in the cached prefix — the trade the
+  // comment above `update_reminder` weighs, decided the other way because nothing is gained by
+  // sitting this next to a sibling.
+  'manage_places',
 ]
 
 describe('tool list is deterministic', () => {

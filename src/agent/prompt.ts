@@ -15,6 +15,7 @@ import {
   IDENTITY,
   LEAVE_BY,
   MEMORY,
+  PLACES,
   PREFERENCES,
   PROACTIVE,
   REMINDER_LOOP,
@@ -48,6 +49,9 @@ const CORE = [
   REMINDER_TIMING,
   REMINDER_LOOP,
   MEMORY,
+  // Directly after MEMORY, because from the owner's side a saved place IS something Otto remembers
+  // — the split between a fact and a place row is an implementation detail they never see.
+  PLACES,
   PROACTIVE,
   PREFERENCES,
   ROUTINE,

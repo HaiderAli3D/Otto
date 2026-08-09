@@ -210,23 +210,79 @@ export async function tryListCalendarEvents(
   }
 }
 
-/** Create a timed event on the device's primary calendar from local wall-clock ISO strings. */
+/**
+ * Create a timed event on the device's primary calendar from local wall-clock ISO strings.
+ *
+ * `location` is not cosmetic and omitting it used to break the leave-by feature outright. Every
+ * planner reads the event back from Google and prices the journey from `event.location`
+ * (services/leaveBy.ts `computeLeaveByPlan`); an event written without one comes back
+ * `blocked: 'no-location'`, which `services/handlers/leaveBy.ts` reads as "this stopped being a
+ * journey" and answers by CANCELLING both alarms — silently, 45 minutes before departure. So an
+ * event Otto creates for somewhere it is also planning a journey to must carry the address.
+ */
 export async function createCalendarEvent(
   deviceId: string,
-  params: { title: string; startIso: string; endIso: string },
+  params: {
+    title: string
+    startIso: string
+    endIso: string
+    location?: string | null
+    /**
+     * Drop Google Calendar's own default reminders for this event.
+     *
+     * Only the journey planner sets this. When Otto has already arranged a get-ready nudge, a
+     * "leaving soon" nudge and a leave-now alarm, Calendar's default popup is a fourth notification
+     * from a producer the server cannot see or coordinate with. Left alone for the ordinary
+     * `create_calendar_event` tool, where the owner may well be relying on it.
+     */
+    suppressDefaultReminders?: boolean
+  },
 ): Promise<{ id: string; htmlLink?: string }> {
   const auth = authedClientFor(deviceId)
   const timeZone = zoneFor(deviceId)
   const calendar = google.calendar({ version: 'v3', auth })
+  const location = params.location?.trim()
   const res = await calendar.events.insert({
     calendarId: 'primary',
     requestBody: {
       summary: params.title,
       start: { dateTime: params.startIso, timeZone },
       end: { dateTime: params.endIso, timeZone },
+      ...(location ? { location } : {}),
+      ...(params.suppressDefaultReminders ? { reminders: { useDefault: false, overrides: [] } } : {}),
     },
   })
   return { id: res.data.id!, htmlLink: res.data.htmlLink ?? undefined }
+}
+
+/**
+ * One event by id, or null.
+ *
+ * Exists so a planner can create an event and then plan from GOOGLE's copy rather than from the
+ * object it just built. That is not fastidiousness: `eventKeyOf` falls back to the summary when an
+ * event has no id, and the leave-by recheck later looks the event up in Google's list by that key —
+ * where it has a real id, matches nothing, and concludes the event was deleted. Which, again, it
+ * answers by cancelling the alarms.
+ */
+export async function getCalendarEvent(deviceId: string, eventId: string): Promise<CalendarEvent | null> {
+  try {
+    const auth = authedClientFor(deviceId)
+    const calendar = google.calendar({ version: 'v3', auth })
+    const res = await calendar.events.get({ calendarId: 'primary', eventId })
+    const e = res.data
+    return {
+      id: e.id ?? '',
+      summary: e.summary ?? '(no title)',
+      startIso: e.start?.dateTime ?? e.start?.date ?? '',
+      endIso: e.end?.dateTime ?? e.end?.date ?? '',
+      isAllDay: e.start?.dateTime == null && e.start?.date != null,
+      location: e.location ?? null,
+      status: e.status ?? null,
+    }
+  } catch (err) {
+    log.warn({ err, deviceId, eventId }, 'calendar: events.get failed')
+    return null
+  }
 }
 
 /** Create a Google Task on the default list, optionally due at a local wall-clock ISO time. */

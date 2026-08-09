@@ -29,6 +29,7 @@ import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
 import { googleTools } from './google.js'
 import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
+import { managePlaces, placeTools } from './places.js'
 import { reminderTools } from './reminders.js'
 import { settingsTools } from './settings.js'
 
@@ -59,7 +60,15 @@ import { settingsTools } from './settings.js'
  * dispatch, not a schema annotation.
  */
 export function buildTools(): OpenAI.Responses.FunctionTool[] {
-  return [...alarmTools, ...reminderTools, ...factTools, ...googleTools, ...leaveByTools, ...settingsTools].map(
+  return [
+    ...alarmTools,
+    ...reminderTools,
+    ...factTools,
+    ...googleTools,
+    ...leaveByTools,
+    ...settingsTools,
+    ...placeTools,
+  ].map(
     (t) => ({
       type: 'function' as const,
       name: t.name,
@@ -397,6 +406,9 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         title: String(a.title),
         startIso: String(a.startLocalISO),
         endIso: String(a.endLocalISO),
+        location: a.location === undefined ? null : String(a.location),
+        // Never suppressed from this tool — see the param's doc in services/google.ts. Only the
+        // journey planner, which has already arranged its own notifications, turns them off.
       })
     }
     case 'create_task': {
@@ -416,6 +428,11 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       // setPreferences is the trust boundary that type-checks every field. Coercing here would
       // duplicate that and lose the error messages the model needs to correct itself.
       return setPreferences(device, a)
+    }
+    case 'manage_places': {
+      // Body beside the definition in ./places.js, like create_leave_by_alarm: four actions and a
+      // resolution ladder are more than the two lines every other case here is.
+      return await managePlaces(device, a)
     }
 
     default:

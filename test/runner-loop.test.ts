@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { __setModelClient } from '../src/agent/llm.js'
 import { runAgentTurn } from '../src/agent/runner.js'
+import { buildTools } from '../src/agent/tools.js'
 import { ensureSchema } from '../src/db/client.js'
 import { loadSession, saveSession } from '../src/services/sessions.js'
 import { fakeModel, fnCall, say, think } from './fakeModel.js'
@@ -39,7 +40,10 @@ describe('the request the runner builds', () => {
     expect(req.prompt_cache_key).toBe('dev_loop')
     // tool_choice is left unset until the step cap forces it.
     expect(req.tool_choice).toBeUndefined()
-    expect(req.tools).toHaveLength(18)
+    // Against buildTools(), not a literal. What this test is for is that the runner sends the WHOLE
+    // list; the exact count is pinned deliberately in tools-order.test.ts, and duplicating the
+    // number here only means a new tool reddens two files while the second one teaches nothing.
+    expect(req.tools).toHaveLength(buildTools().length)
     expect(req.tools!.map((t) => (t as { name: string }).name)).toContain('create_alarm')
     expect(typeof req.instructions).toBe('string')
   })
@@ -144,7 +148,7 @@ describe('the tool loop', () => {
     expect(requests).toHaveLength(11)
     expect(requests[9]!.tool_choice).toBeUndefined()
     expect(requests[10]!.tool_choice).toBe('none')
-    expect(requests[10]!.tools).toHaveLength(18)
+    expect(requests[10]!.tools).toHaveLength(buildTools().length)
   })
 })
 

@@ -134,6 +134,22 @@ export function ensureSchema(): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS facts_key ON facts (device_id, key);
 
+    CREATE TABLE IF NOT EXISTS saved_places (
+      place_row_id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      alias TEXT NOT NULL,
+      label TEXT NOT NULL,
+      address TEXT NOT NULL,
+      google_place_id TEXT,
+      lat INTEGER,
+      lng INTEGER,
+      use_count INTEGER NOT NULL DEFAULT 0,
+      last_used_at_millis INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS saved_places_alias ON saved_places (device_id, alias);
+
     CREATE TABLE IF NOT EXISTS outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       wa_user_id TEXT NOT NULL,

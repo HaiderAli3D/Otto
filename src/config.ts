@@ -107,7 +107,12 @@ const raw = z
     STT_BASE_URL: z.string().default('https://api.groq.com/openai/v1'),
     STT_MODEL: z.string().default('whisper-large-v3-turbo'),
 
-    // Google Maps Routes/Distance Matrix (optional) — real travel time for leave-by alarms.
+    // Google Maps (optional). ONE key for two APIs, which must BOTH be enabled on it:
+    //   Routes API  — real travel time for leave-by alarms and journeys (services/travel.ts)
+    //   Places API (New) — turning "the gym" into an address        (services/places.ts)
+    // Deliberately not two keys. They are the same Google Cloud project, the same billing account
+    // and the same restriction list, so a second variable would only add a way to configure half
+    // of a feature — the state every other integration here makes unrepresentable.
     GOOGLE_MAPS_API_KEY: z.string().optional(),
 
     // Server-wide fallbacks for the per-device settings columns (device_settings). Both are

@@ -245,6 +245,45 @@ export const facts = sqliteTable(
 )
 
 /**
+ * A place the owner has a name for. "the gym", "mum's", "the office".
+ *
+ * A table rather than more `facts` rows, and the reason is the coordinates. A fact is ONE short
+ * sentence of prose the model reads; a place is a structured tuple — alias, label, formatted
+ * address, Google place id, lat/lng — that server code joins on. Stuffing that into `facts.value`
+ * would mean parsing prose on the hot path of every journey, which is exactly the failure mode
+ * `parseBufferMinutes` in services/travel.ts exists to contain and is not worth repeating.
+ *
+ * `home.address` and `work.address` stay FACTS and are not mirrored here. They are read by name by
+ * `resolveOrigin` (services/leaveBy.ts), they predate this table, and two rows that can disagree
+ * about where the owner lives is a worse failure than one lookup that has to check two places.
+ * `resolvePlace` consults the facts for those two aliases; nothing writes them here.
+ *
+ * UNIQUE(device_id, alias) for the same reason `facts_key` is unique: saving "the gym" again after
+ * they change gym must CORRECT the row, not leave two of them for a coin flip to choose between.
+ */
+export const savedPlaces = sqliteTable(
+  'saved_places',
+  {
+    placeRowId: text('place_row_id').primaryKey(),
+    deviceId: text('device_id').notNull(),
+    // Normalised for lookup — lowercased, "the " stripped. `label` keeps what they actually said.
+    alias: text('alias').notNull(),
+    label: text('label').notNull(),
+    address: text('address').notNull(),
+    // Google's stable id. Preferred over `address` when routing: the address was geocoded once,
+    // already, and handing Routes free text again is a second chance to pick the wrong branch.
+    googlePlaceId: text('google_place_id'),
+    lat: integer('lat'), // stored ×1e6 as an integer — SQLite reals compare badly and we only
+    lng: integer('lng'), // ever need ~10cm precision for a distance lower bound
+    useCount: integer('use_count').notNull().default(0),
+    lastUsedAtMillis: integer('last_used_at_millis'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({ byAlias: uniqueIndex('saved_places_alias').on(t.deviceId, t.alias) }),
+)
+
+/**
  * Queued outbound WhatsApp messages. Everything Otto says that is NOT a direct reply goes here.
  *
  * Free-form sends are only legal inside Meta's 24h window (an approved template is optional config
