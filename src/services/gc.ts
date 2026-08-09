@@ -1,6 +1,6 @@
 import { and, eq, inArray, lt, sql } from 'drizzle-orm'
 import { db } from '../db/client.js'
-import { alarmEvents, facts, outbox, processedMessages, sessions } from '../db/schema.js'
+import { alarmEvents, deviceLocations, facts, outbox, processedMessages, sessions, travelCalls } from '../db/schema.js'
 import { log } from '../lib/log.js'
 import { FACT_SOFT_CAP } from './facts.js'
 import { PENDING_HARD_TTL_MS } from './outbox.js'
@@ -13,6 +13,19 @@ const ALARM_EVENTS_TTL = 90 * DAY
 const INFERRED_FACT_TTL = 90 * DAY
 /** A conversation untouched for a month is over. See the note in the sweep about what this loses. */
 const SESSIONS_TTL = 30 * DAY
+
+/**
+ * How long a location fix is kept before its COORDINATES are nulled out.
+ *
+ * Six hours, and this sweep nulls rather than deletes — deliberately, and the asymmetry is the
+ * point. A fix has no value at all past the journey that requested it, so the private half expires
+ * fast. The row itself stays, so "when did Otto last check where I was, and what for?" remains
+ * answerable indefinitely. Accountability outlives the data it is about.
+ */
+const LOCATION_FIX_TTL = 6 * 60 * 60 * 1000
+
+/** Billed-call counters older than this are for days nobody will ask about again. */
+const TRAVEL_CALLS_TTL = 7 * DAY
 
 /**
  * Housekeeping. Everything here grows forever otherwise, on a 1 GB Fly volume: Meta redelivery
@@ -48,6 +61,20 @@ export function collectGarbage(): void {
       .run()
 
     const events = db.delete(alarmEvents).where(lt(alarmEvents.receivedAt, now - ALARM_EVENTS_TTL)).run()
+
+    // Coordinates NULLED, row kept. A fix is worthless past the journey that asked for it, so the
+    // private half expires in hours; the row survives so "when did Otto last check where I was?"
+    // stays answerable. Deleting instead would take the accountability away with the data.
+    const expiredFixes = db
+      .update(deviceLocations)
+      .set({ lat: null, lng: null, accuracyMeters: null })
+      .where(lt(deviceLocations.receivedAtMillis, now - LOCATION_FIX_TTL))
+      .run()
+
+    const oldCallCounts = db
+      .delete(travelCalls)
+      .where(lt(travelCalls.dayKey, new Date(now - TRAVEL_CALLS_TTL).toISOString().slice(0, 10)))
+      .run()
 
     // Sessions were never swept at all — an abandoned conversation kept its whole transcript (up to
     // MAX_SESSION_BYTES of it) forever. Safe to drop because durable knowledge lives in `facts` and

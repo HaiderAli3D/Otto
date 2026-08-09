@@ -7,6 +7,8 @@
 import { log } from '../../lib/log.js'
 import { cancelAlarm, getAlarm } from '../alarms.js'
 import { getDevice } from '../devices.js'
+import { describeMiss, requestLocation, shouldPull } from '../location.js'
+import { enqueueAndTryFlush } from '../outbox.js'
 import { tryListCalendarEvents } from '../google.js'
 import type { Job } from '../jobs.js'
 import { jobPayload } from '../jobs.js'
@@ -96,10 +98,52 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
     return null
   }
 
+  // Where are they NOW?
+  //
+  // This is the only place in the system that asks, and the placement is the whole reason the answer
+  // is worth having. The tempting spot was the conversational turn — the owner says "I'm going to
+  // the dentist at 3" and Otto asks the phone. But at 09:00, where they are says nothing about where
+  // they will be at 14:20, and the pull would have blocked the reply for up to forty-five seconds to
+  // learn something irrelevant. Here, forty-five minutes before departure, "where are you" is
+  // finally predictive — and this is a job handler, so nobody is waiting on it.
+  //
+  // Only ever an IMPROVEMENT on the ladder: a miss leaves `originAddress` exactly as it was.
+  const pullFrom = payload.originAddress
+  let locationNote: string | null = null
+  let originLatLng = null as { lat: number; lng: number } | null
+  if (
+    shouldPull({
+      device,
+      leaveAtMillis: payload.eventStartMillis - payload.travelMinutes * 60_000,
+      // The payload's origin came from `resolveOrigin`, and a preceding calendar event is a BETTER
+      // answer than a live fix — it is where they will be, not where they are. We cannot tell the
+      // two apart from the payload alone, so `medium` is assumed and the gain is only ever real
+      // when the ladder had nothing better.
+      originConfidence: pullFrom === null ? null : 'medium',
+      explicitOrigin: false,
+      nowMillis: now,
+    })
+  ) {
+    const outcome = await requestLocation(device, {
+      reason: `work out when to leave for ${payload.summary}`,
+      nowMillis: now,
+    })
+    if ('fix' in outcome) {
+      originLatLng = outcome.fix.latLng
+    } else {
+      locationNote = describeMiss(outcome.miss, pullFrom === null ? 'their usual starting point' : 'their saved address')
+    }
+  }
+  if (locationNote) log.debug({ jobId: job.id, note: locationNote }, 'leave_by: planning without a live fix')
+
   const plan = await computeLeaveByPlan({
     device,
     event,
     events,
+    // A live fix wins over the ladder's guess, and enters through the SAME door the owner's own
+    // stated origin uses — `resolveOrigin` stays pure, synchronous and untouched, which is the
+    // single most important regression-avoidance decision on this side.
+    originLatLng,
     originAddress: payload.originAddress,
     // Carried so the recheck asks about the SAME journey. Without the mode a walk gets re-priced as
     // transit and the departure moves for no reason the owner could explain; without the place id
@@ -180,7 +224,41 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
   // fresh day key, so it names ids that either never existed or — worse, on the same day — name the
   // very id being re-armed here, and armLeaveByPlan would arm it and then cancel it. The pinned
   // pair IS the set of alarms this chain owns; there is no third one to retire.
+  const previousLeaveAt = payload.eventStartMillis - payload.travelMinutes * 60_000
   await armLeaveByPlan(device, { ...plan, alarmId, wakeId, staleIds: [] }, { scheduleRecheck: false, now })
   log.info({ jobId: job.id, moved, drift, modeChanged, mode: plan.mode }, 'leave_by: re-armed after a change')
+
+  // A re-arm this large is not a correction, it is different information — and until now it happened
+  // in silence. A live fix discovered at the recheck can legitimately move a departure by an hour
+  // (they are at the office, not at home), leaving the owner's mental model and the armed alarm
+  // disagreeing with nothing to reconcile them.
+  //
+  // Only for a MOVE, and only a big one. An alarm quietly shifting four minutes needs no announcement
+  // and would train them to ignore the ones that matter.
+  const shift = plan.leaveAtMillis === null ? 0 : Math.abs(plan.leaveAtMillis - previousLeaveAt)
+  if (shift > TELL_THEM_MS && device.whatsappNumber && plan.leaveAtMillis !== null) {
+    const earlier = plan.leaveAtMillis < previousLeaveAt
+    await enqueueAndTryFlush({
+      waUserId: device.whatsappNumber,
+      deviceId: device.deviceId,
+      kind: 'nudge',
+      body:
+        `Change of plan for ${payload.summary} — you now need to leave at ` +
+        `${hhmm(plan.leaveAtMillis, device.timezone)}, ${earlier ? 'earlier' : 'later'} than I said. ` +
+        `${plan.travelMinutes} minutes by ${plan.mode.toLowerCase()}. The alarm has moved.`,
+      dedupeKey: `leaveby-moved:${alarmId ?? wakeId}:${plan.leaveAtMillis}`,
+    })
+  }
   return null
 }
+
+/**
+ * How far a departure may move at the recheck before the owner is told.
+ *
+ * Fifteen minutes is the line between "traffic" and "different plan". Below it the alarm simply
+ * rings when it rings; above it they are holding a time in their head that is no longer true.
+ */
+const TELL_THEM_MS = 15 * 60_000
+
+const hhmm = (ms: number, zone: string): string =>
+  new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: zone, hour12: false }).format(ms)

@@ -13,6 +13,15 @@ export const newFactId = (): string => `fct_${ulid()}`
 export const newSavedPlaceId = (): string => `plc_${ulid()}`
 
 /**
+ * One "where are you?" question.
+ *
+ * Never reused: it is what pairs an answer arriving on a separate HTTP request — possibly in another
+ * process, after a restart — with the question still waiting for it. Two overlapping requests would
+ * otherwise be indistinguishable on the wire.
+ */
+export const newRequestId = (): string => `loc_${ulid()}`
+
+/**
  * A note. Shown to the model, because deleting one needs the id and nothing else identifies it.
  *
  * MONOTONIC, unlike every other id here, and that is load-bearing rather than tidy. Notes are an

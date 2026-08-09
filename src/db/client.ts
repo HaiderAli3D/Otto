@@ -173,6 +173,19 @@ export function ensureSchema(): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS travel_calls_day ON travel_calls (device_id, day_key);
 
+    CREATE TABLE IF NOT EXISTS device_locations (
+      device_id TEXT PRIMARY KEY,
+      request_id TEXT,
+      status TEXT NOT NULL,
+      lat INTEGER,
+      lng INTEGER,
+      accuracy_meters INTEGER,
+      is_mock INTEGER NOT NULL DEFAULT 0,
+      fix_at_millis INTEGER,
+      received_at_millis INTEGER NOT NULL,
+      reason TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       wa_user_id TEXT NOT NULL,

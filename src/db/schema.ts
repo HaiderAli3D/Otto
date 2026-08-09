@@ -349,6 +349,36 @@ export const travelCalls = sqliteTable(
 )
 
 /**
+ * The last place the phone said it was, and why it was asked. ONE ROW PER DEVICE, upserted.
+ *
+ * Not a log, and the primary key is the whole argument. An append-only table would accumulate a
+ * movement history nobody asked for and nothing reads — the exact thing this feature promises not to
+ * build. One row can answer "where are they now" and "when did Otto last look, and what for", which
+ * is everything either side needs.
+ *
+ * `gc` NULLS the coordinates after LOCATION_TTL_MS while keeping the row, so the accountability half
+ * outlives the private half. A fix has no value past the journey that requested it.
+ *
+ * `fixAtMillis` is when the PHONE took the fix, and staleness is judged on it rather than on
+ * `receivedAtMillis`. Judging on receipt would accept a fix delayed by a retry chain as current,
+ * which is precisely the failure the app avoids by never replaying one.
+ */
+export const deviceLocations = sqliteTable('device_locations', {
+  deviceId: text('device_id').primaryKey(),
+  requestId: text('request_id'),
+  /** OK | PERMISSION_DENIED | BACKGROUND_DENIED | LOCATION_DISABLED | TIMEOUT | EXPIRED | … */
+  status: text('status').notNull(),
+  lat: integer('lat'), // ×1e6, like saved_places — SQLite reals compare badly across platforms
+  lng: integer('lng'),
+  accuracyMeters: integer('accuracy_meters'),
+  isMock: integer('is_mock', { mode: 'boolean' }).notNull().default(false),
+  fixAtMillis: integer('fix_at_millis'),
+  receivedAtMillis: integer('received_at_millis').notNull(),
+  /** What Otto said it was for, kept so "when did you last check on me?" is answerable in words. */
+  reason: text('reason'),
+})
+
+/**
  * Queued outbound WhatsApp messages. Everything Otto says that is NOT a direct reply goes here.
  *
  * Free-form sends are only legal inside Meta's 24h window (an approved template is optional config
