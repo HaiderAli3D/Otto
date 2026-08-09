@@ -101,6 +101,13 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
     event,
     events,
     originAddress: payload.originAddress,
+    // Carried so the recheck asks about the SAME journey. Without the mode a walk gets re-priced as
+    // transit and the departure moves for no reason the owner could explain; without the place id
+    // the destination is re-geocoded from prose and can land on a different branch of the chain.
+    // `mode` is undefined on rows enqueued before the field existed — that reprices by the rule,
+    // which is the correct new behaviour arriving one recheck late.
+    travelMode: payload.mode ?? null,
+    destinationPlaceId: payload.destinationPlaceId ?? null,
     getReadyMinutes: payload.getReadyMinutes,
     alsoWakeMe: payload.wantWake,
     now,
@@ -158,7 +165,12 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
 
   const moved = Math.abs(plan.startMillis! - payload.eventStartMillis)
   const drift = Math.abs(plan.travelMinutes - payload.travelMinutes)
-  if (moved < MOVED_MS && drift <= TRAVEL_DRIFT_MINUTES) return null
+  // A changed MODE always re-arms, whatever the drift. A five-minute threshold is a statement about
+  // the same journey taking a little longer; it means nothing once walking has become transit, and
+  // the two can easily differ by less than five minutes while leaving at completely different times
+  // — or by a great deal while the threshold was never consulted.
+  const modeChanged = payload.mode !== undefined && plan.mode !== payload.mode
+  if (!modeChanged && moved < MOVED_MS && drift <= TRAVEL_DRIFT_MINUTES) return null
 
   // The ids come from the PAYLOAD, not from the fresh plan: an event that moved across midnight
   // derives a different day key, and re-arming under a new id would leave the old alarm armed
@@ -169,6 +181,6 @@ export async function runLeaveBy(job: Job): Promise<JobOutcome> {
   // very id being re-armed here, and armLeaveByPlan would arm it and then cancel it. The pinned
   // pair IS the set of alarms this chain owns; there is no third one to retire.
   await armLeaveByPlan(device, { ...plan, alarmId, wakeId, staleIds: [] }, { scheduleRecheck: false, now })
-  log.info({ jobId: job.id, moved, drift }, 'leave_by: re-armed after a change')
+  log.info({ jobId: job.id, moved, drift, modeChanged, mode: plan.mode }, 'leave_by: re-armed after a change')
   return null
 }

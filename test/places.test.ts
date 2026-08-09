@@ -191,7 +191,7 @@ describe('resolvePlace ladder', () => {
 
     expect(res).toEqual({
       kind: 'resolved',
-      place: { placeId: 'p9', label: 'gym', address: '1 Gym Road', latLng: null, source: 'saved' },
+      place: { placeId: 'p9', label: 'gym', address: '1 Gym Road', latLng: null, source: 'saved', confirmed: true },
     })
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -288,6 +288,32 @@ describe('resolvePlace ladder', () => {
       okJson({ places: [place('p1', 'Tesco', 'Near Road'), place('p2', 'Tesco', 'Far Road')] }),
     )
     expect((await resolvePlace(device, 'tesco')).kind).toBe('ambiguous')
+  })
+
+  it('marks a sole fuzzy hit unconfirmed, and an exact name match confirmed', async () => {
+    // The distinction that decides whether an alarm may ring. One search result is worth planning
+    // from and worth talking about; nobody has agreed it is the right place.
+    const device = makeDevice('dev_resolve_conf')
+    withMapsKey()
+
+    stubFetch(() => okJson({ places: [place('p1', 'Hartley & Co', '14 High Street')] }))
+    const fuzzy = await resolvePlace(device, 'a dentist near me')
+    expect(fuzzy.kind === 'resolved' && fuzzy.place.confirmed).toBe(false)
+
+    stubFetch(() => okJson({ places: [place('p2', 'Wembley Stadium', 'Wembley HA9 0WS')] }))
+    const exact = await resolvePlace(device, 'wembley stadium')
+    expect(exact.kind === 'resolved' && exact.place.confirmed).toBe(true)
+  })
+
+  it('treats anything the owner authored as confirmed', async () => {
+    const device = makeDevice('dev_resolve_owned')
+    rememberFact({ deviceId: device.deviceId, key: 'home.address', value: '10 Downing Street' })
+    rememberPlace({ deviceId: device.deviceId, alias: 'gym', address: '1 Gym Road' })
+
+    for (const query of ['home', 'the gym', '221B Baker Street, London']) {
+      const res = await resolvePlace(device, query)
+      expect(res.kind === 'resolved' && res.place.confirmed, query).toBe(true)
+    }
   })
 
   it('resolves straight to a place the owner already chose from an ambiguity', async () => {

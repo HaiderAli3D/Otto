@@ -37,6 +37,7 @@ import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/t
 import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
 import { googleTools } from './google.js'
+import { createJourney, journeyTools } from './journey.js'
 import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
 import { noteTools } from './notes.js'
 import { managePlaces, placeTools } from './places.js'
@@ -81,6 +82,7 @@ export function buildTools(): OpenAI.Responses.FunctionTool[] {
     // Appended at the very end, like manage_places and for the same reason: it shifts nothing
     // already in the cached prefix, and notes have no sibling group worth sitting next to.
     ...noteTools,
+    ...journeyTools,
   ].map(
     (t) => ({
       type: 'function' as const,
@@ -514,6 +516,9 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       // Body beside the definition in ./places.js, like create_leave_by_alarm: four actions and a
       // resolution ladder are more than the two lines every other case here is.
       return await managePlaces(device, a)
+    }
+    case 'plan_journey': {
+      return await createJourney(device, a)
     }
     case 'add_note': {
       const body = typeof a.body === 'string' ? a.body.trim() : ''

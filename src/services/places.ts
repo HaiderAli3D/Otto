@@ -99,7 +99,21 @@ export type PlaceCandidate = {
  */
 export type PlaceSource = 'saved' | 'fact' | 'places' | 'literal'
 
-export type ResolvedPlace = PlaceCandidate & { source: PlaceSource }
+export type ResolvedPlace = PlaceCandidate & {
+  source: PlaceSource
+  /**
+   * The owner would recognise this as the place they meant.
+   *
+   * True for anything they authored or chose — a saved place, a home/work fact, an address they
+   * typed, a candidate they picked out of an earlier ambiguity — and for a search result whose NAME
+   * is exactly what they said ("Wembley Stadium"). False only for a single fuzzy hit: Google
+   * returned one thing, it is probably right, and nobody has confirmed it.
+   *
+   * That last case is the one worth distinguishing. It is confident enough to plan from and to talk
+   * about, and NOT confident enough to ring a phone about — see `place-guessed` in leaveBy.ts.
+   */
+  confirmed: boolean
+}
 
 export type PlaceResolution =
   | { kind: 'resolved'; place: ResolvedPlace }
@@ -207,10 +221,16 @@ const sameName = (a: string, b: string): boolean => normaliseAlias(a) === normal
  * not "their dentist", and a confidently wrong destination is the failure this whole module exists
  * to prevent.
  */
-function unambiguousPick(candidates: PlaceCandidate[], query: string): PlaceCandidate | null {
-  if (candidates.length === 1) return candidates[0]!
+function unambiguousPick(
+  candidates: PlaceCandidate[],
+  query: string,
+): { place: PlaceCandidate; confirmed: boolean } | null {
   const exact = candidates.filter((c) => sameName(c.label, query))
-  return exact.length === 1 ? exact[0]! : null
+  // An exact name match is the owner's own words coming back — confirmed. A sole fuzzy hit is
+  // Google's best guess at what they meant, which is worth planning from and not worth ringing on.
+  if (exact.length === 1) return { place: exact[0]!, confirmed: true }
+  if (candidates.length === 1) return { place: candidates[0]!, confirmed: false }
+  return null
 }
 
 /**
@@ -254,6 +274,8 @@ export async function resolvePlace(
         address: chosenAddress ?? text,
         latLng: null,
         source: 'places',
+        // They picked it, or they typed it. Either way it is not our guess.
+        confirmed: true,
       },
     }
   }
@@ -270,6 +292,7 @@ export async function resolvePlace(
         address: saved.address,
         latLng: latLngOf(saved),
         source: 'saved',
+        confirmed: true,
       },
     }
   }
@@ -282,7 +305,7 @@ export async function resolvePlace(
     if (address) {
       return {
         kind: 'resolved',
-        place: { placeId: null, label: alias, address, latLng: null, source: 'fact' },
+        place: { placeId: null, label: alias, address, latLng: null, source: 'fact', confirmed: true },
       }
     }
     return {
@@ -295,7 +318,7 @@ export async function resolvePlace(
   if (looksLikeAddress(text)) {
     return {
       kind: 'resolved',
-      place: { placeId: null, label: text, address: text, latLng: null, source: 'literal' },
+      place: { placeId: null, label: text, address: text, latLng: null, source: 'literal', confirmed: true },
     }
   }
 
@@ -318,6 +341,8 @@ export async function resolvePlace(
   }
 
   const pick = unambiguousPick(found, text)
-  if (pick !== null) return { kind: 'resolved', place: { ...pick, source: 'places' } }
+  if (pick !== null) {
+    return { kind: 'resolved', place: { ...pick.place, source: 'places', confirmed: pick.confirmed } }
+  }
   return { kind: 'ambiguous', candidates: found }
 }

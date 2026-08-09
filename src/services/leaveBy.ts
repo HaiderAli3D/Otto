@@ -10,7 +10,8 @@ import type { CalendarEvent } from './google.js'
 import { cancelJobs, enqueueJob } from './jobs.js'
 import { getSettings, quietHoursFor, schedulingRoutine } from './settings.js'
 import { localDateKey } from './time.js'
-import { estimateTravelMinutes } from './travel.js'
+import { estimateJourneyMinutes, TRANSIT_SLACK_MINUTES, type TravelMode, type Waypoint } from './travel.js'
+import type { LatLng } from '../lib/geo.js'
 
 /**
  * Leave-by alarms: the one thing Otto has that nothing else does is the owner's ringer, and it has
@@ -91,6 +92,7 @@ export type LeaveByBlocked =
   | 'virtual'
   | 'too-far-out'
   | 'past'
+  | 'place-guessed'
   | 'double-booked'
   | 'quiet-hours'
   | 'estimated'
@@ -103,6 +105,13 @@ const STRUCTURAL: readonly LeaveByBlocked[] = [
   'virtual',
   'too-far-out',
   'past',
+  // Structural, not a confidence worry, and the placement is the decision rather than an oversight.
+  // Every other block in the second group is about how sure we are of a NUMBER, which asking clears
+  // — "they asked, asking is consent". This one is about not being sure of the PLACE, and consent to
+  // an alarm is not consent to an alarm for somewhere they never named. A sole fuzzy search hit is
+  // worth planning from and worth talking about; it is not worth ringing a phone about. The owner
+  // says "yes, that one" and it becomes a saved place, which is confirmed, and then it arms.
+  'place-guessed',
 ]
 
 export type OriginResolution = { address: string; confidence: 'high' | 'medium' } | null
@@ -116,6 +125,14 @@ export type LeaveByPlan = {
   origin: OriginResolution
   travelMinutes: number | null
   travelSource: 'routes' | 'fact' | 'default' | null
+  /** How they are getting there. Transit unless it is a short walk — see services/travel.ts. */
+  mode: TravelMode
+  /** Carried so the recheck routes to the same building the plan did. */
+  destinationPlaceId: string | null
+  /** What the walk would be, when we paid to find out. Lets Otto offer it as an alternative. */
+  walkMinutes: number | null
+  /** Google says this cannot be made at all — no service at that hour. Never a number to plan on. */
+  noRoute: boolean
   /** True unless the number came from live traffic. Only a live number is ever auto-armed. */
   estimated: boolean
   leaveAtMillis: number | null
@@ -154,6 +171,24 @@ export type LeaveByRequest = {
   events?: CalendarEvent[]
   /** Overrides origin resolution entirely — the owner said where they are starting from. */
   originAddress?: string | null
+  /**
+   * Coordinates for either end, when something already knows them.
+   *
+   * Only ever an OPTIMISATION here: they let `chooseTravelMode` rule a walk out from the straight
+   * line and skip a billed probe. A missing pair costs one call, never a wrong answer.
+   */
+  originLatLng?: LatLng | null
+  destinationLatLng?: LatLng | null
+  /** Google's id for the destination, preferred over re-geocoding an address Places already read. */
+  destinationPlaceId?: string | null
+  /**
+   * The owner would recognise the destination as the place they meant. Defaults to true so every
+   * existing caller — which resolves the destination from a calendar event the owner authored — is
+   * unaffected. `planJourney` passes what `resolvePlace` actually decided.
+   */
+  destinationConfirmed?: boolean
+  /** "I'll drive", "I'm cycling". Wins over the transit-unless-short-walk rule. */
+  travelMode?: TravelMode | null
   getReadyMinutes?: number
   /** undefined defers to `settings.autoWakeAlarm`; an explicit boolean wins. */
   alsoWakeMe?: boolean
@@ -169,6 +204,17 @@ export type LeaveByJobPayload = {
   destination: string
   originAddress: string | null
   travelMinutes: number
+  /**
+   * How they were getting there when this was planned.
+   *
+   * Optional because rows enqueued before this field existed are read after the deploy. `undefined`
+   * means "decide by the rule", which reprices an old row one recheck later — the same safe-default
+   * reasoning as `DEFAULT_TIMING_KIND` in lib/rungPlan.ts, applied to the only value that would
+   * otherwise silently change under an in-flight journey.
+   */
+  mode?: TravelMode
+  /** Routes the recheck to the same building rather than re-geocoding prose Places already read. */
+  destinationPlaceId?: string | null
   getReadyMinutes: number
   wantWake: boolean
   /** Null when the plan merged into the wake alarm; then `wakeId` is the alarm that exists. */
@@ -305,6 +351,10 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
     origin: null,
     travelMinutes: null,
     travelSource: null,
+    mode: req.travelMode ?? 'TRANSIT',
+    destinationPlaceId: req.destinationPlaceId ?? null,
+    walkMinutes: null,
+    noRoute: false,
     estimated: true,
     leaveAtMillis: null,
     leaveAtLocal: null,
@@ -351,10 +401,35 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
       : resolveOrigin({ device, targetKey: eventKey, targetStartMillis: startMillis, events })
 
   // Bootstrap the departure time from the configured default so Routes gets a plausible traffic
-  // window. Deliberately not iterated to a fixed point: one call, one answer.
+  // window. Deliberately not iterated to a fixed point: one call, one answer. That argument is
+  // DRIVE-specific and transit does not use this number at all — it asks the timetable by arrival
+  // time instead, which is the quantity we actually know.
   const guessDepartAt = Math.max(now, startMillis - settings.defaultTravelMinutes * 60_000)
-  const travel = await estimateTravelMinutes(device, origin?.address ?? null, destination, guessDepartAt)
-  const leaveAtMillis = startMillis - travel.minutes * 60_000
+  const originWaypoint: Waypoint | null =
+    req.originLatLng != null ? { latLng: req.originLatLng } : origin === null ? null : { address: origin.address }
+  const destinationWaypoint: Waypoint = req.destinationPlaceId
+    ? { placeId: req.destinationPlaceId }
+    : { address: destination }
+  const travel = await estimateJourneyMinutes({
+    device,
+    origin: originWaypoint,
+    destination: destinationWaypoint,
+    originLatLng: req.originLatLng ?? null,
+    destinationLatLng: req.destinationLatLng ?? null,
+    modeOverride: req.travelMode ?? null,
+    arriveByMillis: startMillis,
+    departAtMillis: guessDepartAt,
+  })
+  // Slack for a transit journey, and ONLY for one priced from a real timetable.
+  //
+  // A driving estimate is continuous in the departure time, so being a minute out costs a minute.
+  // A timetable is a step function: Routes answers with one itinerary, and missing its first leg by
+  // ninety seconds can cost a full headway. A missed connection is not the owner being late.
+  //
+  // Gated on `source === 'routes'` because the fallback ladder returns the same flat number whatever
+  // mode was asked for — padding a guess would be arithmetic on a number that means nothing.
+  const slackMinutes = travel.mode === 'TRANSIT' && travel.source === 'routes' ? TRANSIT_SLACK_MINUTES : 0
+  const leaveAtMillis = startMillis - (travel.minutes + slackMinutes) * 60_000
   const dayKey = localDateKey(startMillis, zone)
 
   // The get-up alarm is bounds-checked against `now` in its own right, not left to ride on the
@@ -383,6 +458,10 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
     origin,
     travelMinutes: travel.minutes,
     travelSource: travel.source,
+    mode: travel.mode,
+    destinationPlaceId: req.destinationPlaceId ?? null,
+    walkMinutes: travel.walkMinutes,
+    noRoute: travel.noRoute,
     estimated: travel.source !== 'routes',
     leaveAtMillis,
     leaveAtLocal: localIsoOf(leaveAtMillis, zone),
@@ -431,6 +510,15 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
   const ringAt = wakeArmable ? Math.min(wakeAtMillis, leaveAtMillis) : leaveAtMillis
   if (inQuietHours(ringAt, zone, quietHoursFor(device))) {
     return { ...priced, blocked: 'quiet-hours', note: `That would ring at ${hhmm(ringAt, zone)}, inside their quiet hours.${wakeNote}` }
+  }
+  // Judged AFTER 'past' and 'double-booked' so the owner hears the more urgent problem first, and
+  // before 'estimated' because not knowing WHERE beats not knowing how long.
+  if (req.destinationConfirmed === false) {
+    return {
+      ...priced,
+      blocked: 'place-guessed',
+      note: `"${destination}" is the one place that came back for that, but they never confirmed it — check it is the right one before anything rings.${wakeNote}`,
+    }
   }
   if (priced.estimated) {
     return {
@@ -512,6 +600,8 @@ function scheduleRecheck(device: Device, plan: LeaveByPlan, now: number): void {
     destination: plan.destination ?? '',
     originAddress: plan.origin?.address ?? null,
     travelMinutes: plan.travelMinutes,
+    mode: plan.mode,
+    destinationPlaceId: plan.destinationPlaceId,
     getReadyMinutes: plan.getReadyMinutes,
     wantWake: plan.wantWake,
     alarmId: plan.alarmId,

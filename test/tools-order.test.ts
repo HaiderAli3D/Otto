@@ -49,6 +49,7 @@ const EXPECTED = [
   'add_note',
   'read_notes',
   'delete_note',
+  'plan_journey',
 ]
 
 describe('tool list is deterministic', () => {
