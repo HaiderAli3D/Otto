@@ -11,7 +11,8 @@
  *
  * Options:
  *   --token <t>            Device FCM token (required). Copy it from the Otto app.
- *   --type <T>            ARM_ALARM (default) | CANCEL_ALARM | NUDGE | CANCEL_NUDGE | SYNC | PING.
+ *   --type <T>            ARM_ALARM (default) | CANCEL_ALARM | NUDGE | CANCEL_NUDGE |
+ *                         REQUEST_LOCATION | SYNC | PING.
  *
  * Alarm options (ARM_ALARM / CANCEL_ALARM):
  *   --alarm-id <id>      Alarm id (default: a generated "alm_test_<ts>").
@@ -31,6 +32,19 @@
  *   --snooze-minutes <n>  How long Snooze defers it (default 30).
  *   --expires-in <secs>   Self-cancel after N seconds.
  *   --ongoing <b>         true | false (default false).
+ *
+ * Location options (REQUEST_LOCATION):
+ *   --request-id <id>     Request id (default: a generated "loc_test_<ts>"). REQUIRED on the wire —
+ *                         an answer the server cannot match to its own question is no answer.
+ *   --max-age <secs>      Accept a cached fix this recent (default 120; the app clamps at 1800).
+ *   --high-accuracy <b>   true | false (default false). true asks for GPS rather than balanced.
+ *   --reason <text>       Shown to the owner on the notification the app posts while it looks.
+ *   --expires-in <secs>   Give up after N seconds; the app answers EXPIRED instead of late.
+ *
+ *   The useful test is with the SCREEN OFF and the phone Dozing:
+ *     adb shell dumpsys deviceidle force-idle
+ *   Then send, and watch for the otto_quiet notice plus a POST to /devices/{id}/location. A
+ *   phone without "Allow all the time" answers BACKGROUND_DENIED — which is a pass, not a failure.
  *
  *   --secret <hmacKey>    If set, adds the M2 `sig` (HMAC-SHA256 over the canonical payload).
  *   --key <path>          Service-account JSON. Default: $GOOGLE_APPLICATION_CREDENTIALS,
@@ -82,7 +96,7 @@ function computeSig(data, secret) {
   return createHmac('sha256', secret).update(canonical, 'utf8').digest('hex')
 }
 
-const KNOWN_TYPES = ['ARM_ALARM', 'CANCEL_ALARM', 'NUDGE', 'CANCEL_NUDGE', 'SYNC', 'PING']
+const KNOWN_TYPES = ['ARM_ALARM', 'CANCEL_ALARM', 'NUDGE', 'CANCEL_NUDGE', 'REQUEST_LOCATION', 'SYNC', 'PING']
 
 function buildData(args) {
   const type = args.type || 'ARM_ALARM'
@@ -97,6 +111,18 @@ function buildData(args) {
   }
 
   if (type === 'SYNC' || type === 'PING') return { v: '1', type }
+
+  if (type === 'REQUEST_LOCATION') {
+    // Field-for-field what otto-server's `requestLocationData` produces. Optional fields are OMITTED
+    // rather than sent empty, matching the server, so a payload from this helper and one from the
+    // real sender sign identically — which is the only reason testing with this proves anything.
+    const data = { v: '1', type, requestId: args['request-id'] || `loc_test_${Date.now()}` }
+    data.maxAgeSeconds = String(args['max-age'] ?? 120)
+    data.highAccuracy = String(args['high-accuracy'] === 'true')
+    if (args['expires-in']) data.expiresAtMillis = String(Date.now() + Number(args['expires-in']) * 1000)
+    if (args.reason) data.reason = String(args.reason).slice(0, 120)
+    return data
+  }
 
   if (type === 'NUDGE' || type === 'CANCEL_NUDGE') {
     const nudgeId = args['nudge-id'] || `rem_test_${Date.now()}`

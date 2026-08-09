@@ -33,6 +33,7 @@ object CommandParser {
             "CANCEL_ALARM" -> parseCancel(data)
             "NUDGE" -> parseNudge(data)
             "CANCEL_NUDGE" -> parseCancelNudge(data)
+            "REQUEST_LOCATION" -> parseRequestLocation(data)
             "SYNC" -> ParseResult.Parsed(FcmCommand.Sync)
             "PING" -> ParseResult.Parsed(FcmCommand.Ping)
             else -> ParseResult.Ignored("unknown type $type")
@@ -101,5 +102,36 @@ object CommandParser {
         val nudgeId = data["nudgeId"]?.takeIf { it.isNotBlank() }
             ?: return ParseResult.Invalid("CANCEL_NUDGE missing nudgeId")
         return ParseResult.Parsed(FcmCommand.CancelNudge(nudgeId))
+    }
+
+    /**
+     * Where are you, right now.
+     *
+     * Stricter than [parseNudge] on purpose, and the asymmetry is deliberate rather than
+     * inconsistent: a nudge missing a field is still worth showing, while a location report the
+     * server cannot match to its own question is worth nothing at all. So a missing `requestId` is
+     * Invalid — which goes back as a PUSH/REJECTED device event rather than vanishing.
+     *
+     * `maxAgeSeconds` is CLAMPED rather than trusted. The server asking for a six-hour-old fix would
+     * be indistinguishable, on the wire, from a current one, and "current location" would quietly
+     * stop meaning anything.
+     */
+    private fun parseRequestLocation(data: Map<String, String>): ParseResult {
+        val requestId = data["requestId"]?.takeIf { it.isNotBlank() }
+            ?: return ParseResult.Invalid("REQUEST_LOCATION missing requestId")
+        val maxAgeMillis = data["maxAgeSeconds"]?.toLongOrNull()
+            ?.coerceIn(0L, OttoConstants.MAX_LOCATION_AGE_SECONDS)
+            ?.times(1_000L)
+            ?: OttoConstants.DEFAULT_LOCATION_MAX_AGE_MILLIS
+
+        return ParseResult.Parsed(
+            FcmCommand.RequestLocation(
+                requestId = requestId,
+                maxAgeMillis = maxAgeMillis,
+                expiresAtMillis = data["expiresAtMillis"]?.toLongOrNull(),
+                highAccuracy = data["highAccuracy"]?.toBooleanStrictOrNull() ?: false,
+                reason = data["reason"]?.takeIf { it.isNotBlank() }?.take(OttoConstants.MAX_LOCATION_REASON_CHARS),
+            ),
+        )
     }
 }

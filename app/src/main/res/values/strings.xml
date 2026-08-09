@@ -30,6 +30,16 @@
     <string name="nudge_status_channel_description">The single always-on line showing what\'s still open. Silent. Turn this off without silencing anything else.</string>
 
     <!--
+      The notice shown every single time Otto looks up where the owner is.
+      Worded in the past tense and about the ACT, not the answer: it says that Otto checked and what
+      for, never where they are. The reason comes from the server so the notice can be specific,
+      which is the whole difference between this feature and a covert one.
+    -->
+    <string name="location_notice_title">Otto checked your location</string>
+    <string name="location_notice_reason">To %1$s</string>
+    <string name="location_notice_generic">To work out how long your journey takes.</string>
+
+    <!--
       Nudge actions. Worded as things the OWNER says, for the same reason the ring buttons are:
       these are read on a lockscreen mid-something-else and the choice is theirs, not Otto's.
     -->

@@ -1,15 +1,18 @@
 package com.otto.app.permissions
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlarmManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,7 +31,27 @@ class PermissionsManager @Inject constructor(
         exactAlarmGranted = exactAlarmGranted(),
         fullScreenIntentGranted = fullScreenIntentGranted(),
         batteryExemptionGranted = batteryExemptionGranted(),
+        locationGranted = locationGranted(),
+        backgroundLocationGranted = backgroundLocationGranted(),
     )
+
+    fun locationGranted(): Boolean =
+        granted(Manifest.permission.ACCESS_COARSE_LOCATION) || granted(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    /**
+     * "Allow all the time", which is the only grant that can answer a push.
+     *
+     * Below API 29 the permission does not exist and holding the foreground one IS background
+     * access — returning false there would offer an inert grant button, which is the rule the rest
+     * of this class already follows.
+     */
+    fun backgroundLocationGranted(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return locationGranted()
+        return granted(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+    }
+
+    private fun granted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
     fun notificationsGranted(): Boolean =
         NotificationManagerCompat.from(context).areNotificationsEnabled()
@@ -66,7 +89,31 @@ class PermissionsManager @Inject constructor(
 
     private fun packageUri(): Uri = Uri.fromParts("package", context.packageName, null)
 
+    /**
+     * Background location has no dialog to request from API 30 up.
+     *
+     * Verified against Android's own location-privacy guidance and load-bearing for the two-step
+     * flow in MainActivity: "On Android 11 (API level 30) and higher the system dialog doesn't
+     * include the Allow all the time option. Instead, users must enable background location on a
+     * settings page." So the second step is a deep link, not a second permission request.
+     */
+    fun locationSettingsIntent(): Intent =
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri())
+
     companion object {
         const val POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS"
+
+        /**
+         * Requested TOGETHER, and that is a platform requirement rather than a convenience.
+         *
+         * From API 31, asking for ACCESS_FINE_LOCATION on its own is ignored — the system expects
+         * both so it can offer the precise/approximate choice, and a lone fine request grants
+         * neither. Background is deliberately absent: requesting a foreground and the background
+         * permission in one call makes the system ignore the request and grant nothing at all.
+         */
+        val FOREGROUND_LOCATION = arrayOf(
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        )
     }
 }

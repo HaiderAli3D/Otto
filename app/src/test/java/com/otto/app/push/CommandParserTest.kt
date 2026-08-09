@@ -41,6 +41,66 @@ class CommandParserTest {
     }
 
     @Test
+    fun validRequestLocation_parses() {
+        val result = CommandParser.parse(
+            mapOf(
+                "v" to "1",
+                "type" to "REQUEST_LOCATION",
+                "requestId" to "loc_9f",
+                "maxAgeSeconds" to "120",
+                "expiresAtMillis" to "1751200000000",
+                "highAccuracy" to "true",
+                "reason" to "work out when to leave for the dentist",
+            ),
+        )
+        val command = (result as ParseResult.Parsed).command as FcmCommand.RequestLocation
+        assertEquals("loc_9f", command.requestId)
+        assertEquals(120_000L, command.maxAgeMillis)
+        assertEquals(1751200000000L, command.expiresAtMillis)
+        assertTrue(command.highAccuracy)
+        assertEquals("work out when to leave for the dentist", command.reason)
+    }
+
+    @Test
+    fun requestLocation_withoutRequestId_isInvalid() {
+        // Stricter than a nudge on purpose. A nudge missing a field is still worth showing; an
+        // answer the server cannot match to its own question is worth nothing at all — and Invalid
+        // goes back as a PUSH/REJECTED device event rather than vanishing.
+        val result = CommandParser.parse(mapOf("type" to "REQUEST_LOCATION"))
+        assertTrue(result is ParseResult.Invalid)
+    }
+
+    @Test
+    fun requestLocation_clampsAnAbsurdMaxAge() {
+        // A server asking for a six-hour-old fix would be indistinguishable, on the wire, from one
+        // asking for a current one, and "current location" would quietly stop meaning anything.
+        val result = CommandParser.parse(
+            mapOf("type" to "REQUEST_LOCATION", "requestId" to "loc_1", "maxAgeSeconds" to "999999"),
+        )
+        val command = (result as ParseResult.Parsed).command as FcmCommand.RequestLocation
+        assertEquals(OttoConstants.MAX_LOCATION_AGE_SECONDS * 1_000L, command.maxAgeMillis)
+    }
+
+    @Test
+    fun requestLocation_defaultsEverythingOptional() {
+        val result = CommandParser.parse(mapOf("type" to "REQUEST_LOCATION", "requestId" to "loc_1"))
+        val command = (result as ParseResult.Parsed).command as FcmCommand.RequestLocation
+        assertEquals(OttoConstants.DEFAULT_LOCATION_MAX_AGE_MILLIS, command.maxAgeMillis)
+        assertNull(command.expiresAtMillis)
+        assertFalse(command.highAccuracy)
+        assertNull(command.reason)
+    }
+
+    @Test
+    fun requestLocation_clampsAnOversizedReason() {
+        val result = CommandParser.parse(
+            mapOf("type" to "REQUEST_LOCATION", "requestId" to "loc_1", "reason" to "x".repeat(500)),
+        )
+        val command = (result as ParseResult.Parsed).command as FcmCommand.RequestLocation
+        assertEquals(OttoConstants.MAX_LOCATION_REASON_CHARS, command.reason!!.length)
+    }
+
+    @Test
     fun validCancel_parses() {
         val result = CommandParser.parse(mapOf("type" to "CANCEL_ALARM", "alarmId" to "alm_1"))
         assertEquals(FcmCommand.CancelAlarm("alm_1"), (result as ParseResult.Parsed).command)

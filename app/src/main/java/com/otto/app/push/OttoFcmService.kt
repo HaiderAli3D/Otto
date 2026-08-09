@@ -7,6 +7,7 @@ import com.otto.app.core.OttoLog
 import com.otto.app.data.NudgeRepository
 import com.otto.app.data.prefs.OttoPreferences
 import com.otto.app.data.prefs.SecretStore
+import com.otto.app.location.LocationDispatcher
 import com.otto.app.nudge.NudgeController
 import com.otto.app.net.HeartbeatWorker
 import com.otto.app.net.RegistrationWorker
@@ -27,6 +28,7 @@ class OttoFcmService : FirebaseMessagingService() {
     @Inject lateinit var nudgeRepository: NudgeRepository
     @Inject lateinit var preferences: OttoPreferences
     @Inject lateinit var secretStore: SecretStore
+    @Inject lateinit var locationDispatcher: LocationDispatcher
 
     /**
      * Done synchronously and on purpose: `onMessageReceived` holds the FCM wakelock only until it
@@ -37,6 +39,13 @@ class OttoFcmService : FirebaseMessagingService() {
      */
     override fun onMessageReceived(message: RemoteMessage) = runBlocking {
         OttoLog.d("FCM data message received: keys=${message.data.keys}")
+
+        // Captured HERE rather than inside execute(): the foreground-service background-start
+        // exemption is keyed to the message's DELIVERED priority, and FCM can downgrade a
+        // high-priority message it judges is not being used for time-sensitive user-facing content.
+        // A REQUEST_LOCATION posts no notification of its own, which is exactly that profile, and
+        // attempting the start after a downgrade throws ForegroundServiceStartNotAllowedException.
+        val highPriority = message.priority == RemoteMessage.PRIORITY_HIGH
 
         // VERIFY BEFORE PARSE. Deliberate, and a security requirement rather than a tidy-up: the
         // rejection path below emits an authenticated HTTPS request to the server, so parsing an
@@ -63,7 +72,7 @@ class OttoFcmService : FirebaseMessagingService() {
         }
 
         when (val result = CommandParser.parse(data)) {
-            is ParseResult.Parsed -> execute(result.command)
+            is ParseResult.Parsed -> execute(result.command, highPriority)
             // Reported, not merely logged. A contract mismatch is otherwise invisible on BOTH
             // sides — the server records a successful send, the phone records a drop, and nobody
             // correlates them. With six command types and a dozen fields that is the likeliest
@@ -80,7 +89,7 @@ class OttoFcmService : FirebaseMessagingService() {
         }
     }
 
-    private suspend fun execute(command: FcmCommand) {
+    private suspend fun execute(command: FcmCommand, highPriority: Boolean) {
         try {
             when (command) {
                 is FcmCommand.ArmAlarm -> controller.arm(
@@ -92,6 +101,10 @@ class OttoFcmService : FirebaseMessagingService() {
                 is FcmCommand.CancelAlarm -> controller.cancel(command.alarmId)
                 is FcmCommand.Nudge -> nudgeController.show(command)
                 is FcmCommand.CancelNudge -> nudgeController.cancel(command.nudgeId)
+                // Handed off rather than awaited: a GPS lock easily outlasts the FCM wakelock this
+                // callback holds. The dispatcher decides between a foreground service and a worker.
+                is FcmCommand.RequestLocation ->
+                    locationDispatcher.dispatch(command, canStartForegroundService = highPriority)
                 // Network-bound; hand to workers that outlive the FCM wakelock and retry.
                 FcmCommand.Sync -> SyncWorker.enqueue(applicationContext)
                 FcmCommand.Ping -> HeartbeatWorker.enqueue(applicationContext)

@@ -47,6 +47,7 @@ fun OttoScreen(
     onGrantExactAlarm: () -> Unit,
     onGrantFullScreenIntent: () -> Unit,
     onGrantBattery: () -> Unit,
+    onGrantLocation: () -> Unit,
     onArmTest: () -> Unit,
     onCancelAlarm: (String) -> Unit,
     onOpenSettings: () -> Unit,
@@ -132,6 +133,23 @@ fun OttoScreen(
                 PermissionRow("Exact alarms", state.permissions.exactAlarmGranted, onGrantExactAlarm)
                 PermissionRow("Full-screen intent", state.permissions.fullScreenIntentGranted, onGrantFullScreenIntent)
                 PermissionRow("Battery exemption", state.permissions.batteryExemptionGranted, onGrantBattery)
+                // Optional, and last: nothing above it depends on location and every other feature
+                // works while it is denied. "Allow all the time" rather than plain "Location",
+                // because foreground-only looks granted and cannot answer a single request.
+                PermissionRow(
+                    "Location (allow all the time)",
+                    state.permissions.backgroundLocationGranted,
+                    onGrantLocation,
+                )
+                if (state.permissions.locationForegroundOnly) {
+                    Text(
+                        "Location is set to \"while using the app\". Otto is asked where you are " +
+                            "while your phone is in your pocket, so it needs \"Allow all the time\" " +
+                            "to answer. Until then it works journeys out from your home address.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             SectionCard("Reliability") {
