@@ -17,11 +17,18 @@ import type { LatLng } from '../lib/geo.js'
  * Leave-by alarms: the one thing Otto has that nothing else does is the owner's ringer, and it has
  * never been pointed at "you need to leave now".
  *
- * The app accepts exactly four commands and the only per-alarm things this server controls are
- * `label` and `triggerAtMillis` — no ringtone, no priority, no channel. So a leave-by alarm is an
- * ordinary `armAlarm` whose LABEL carries all of the meaning, and every decision (where they are,
- * how long the journey takes, whether this is even a journey) is made here, server-side. The phone
- * reports no location and holds no location permission, ever.
+ * The only per-alarm things this server controls are `label` and `triggerAtMillis` — no ringtone, no
+ * priority, no channel. So a leave-by alarm is an ordinary `armAlarm` whose LABEL carries all of the
+ * meaning, and every decision (how long the journey takes, whether this is even a journey) is made
+ * here, server-side.
+ *
+ * ⚠️ This used to say "the phone reports no location and holds no location permission, ever", and
+ * that was true until app 1.2.0. It is now false in one narrow, deliberate way: the phone answers
+ * ONE question when asked, and only ever when asked. It registers no update stream and stores no
+ * coordinate. `resolveOrigin` below is unchanged and still never guesses — a fix reaches this module
+ * through `originLatLng`, the same door the owner's own stated origin uses, and only after
+ * `services/location.ts` has judged it fresh and precise enough to be worth more than the ladder.
+ * See `shouldPull` there for the rule about WHEN asking is worth anything at all.
  */
 
 /** How far ahead a leave-by alarm is worth arming at all. */
