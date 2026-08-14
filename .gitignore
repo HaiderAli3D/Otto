@@ -9,5 +9,12 @@ dist/
 service-account.json
 *.sqlite
 *.sqlite-journal
+# WAL mode writes these two alongside the .sqlite, and neither matches `*.sqlite`. Without them a
+# backup directory shows up as untracked — the whole DB, real owner data included, one `git add -A`
+# from being committed. The WAL is not a scratch file either: it routinely holds megabytes of rows
+# not yet checkpointed into the main file.
+*.sqlite-wal
+*.sqlite-shm
 *.db
 data/
+backups/

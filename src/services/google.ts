@@ -86,6 +86,19 @@ export function googleAuthUrl(deviceId: string): string {
   })
 }
 
+/**
+ * The link to SEND the owner when they need to connect or reconnect Google.
+ *
+ * Deliberately points at this server's own `/oauth/google/start` rather than at `googleAuthUrl`'s
+ * Google URL. That one embeds a single-use state nonce with a short life, so a message sitting
+ * unread in WhatsApp — which is exactly what the revoked-grant warning is — would carry a dead
+ * link by the time it was tapped. `/start` mints a fresh nonce on every visit, so this URL keeps
+ * working however long the owner takes.
+ */
+export function googleLinkUrl(deviceId: string): string {
+  return `${config.publicOrigin}/oauth/google/start?deviceId=${encodeURIComponent(deviceId)}`
+}
+
 /** Exchange an OAuth authorization code for a refresh token and persist it for the device. */
 export async function exchangeCode(deviceId: string, code: string): Promise<void> {
   const client = oauthClient()
@@ -201,7 +214,13 @@ export async function tryListCalendarEvents(
           waUserId: device.whatsappNumber,
           deviceId,
           kind: 'system_warning',
-          body: "⚠️ My access to your Google Calendar has been revoked, so I can't see what's on or work out when you need to leave. Send me \"link google\" to reconnect it.",
+          // The URL goes in the body, rather than an instruction to ask for it. The instruction
+          // this replaced ("send me \"link google\"") named something no agent tool implemented,
+          // so the one self-healing path the server has was a dead end: the warning fired, the
+          // owner did as told, and nothing happened. A tappable link cannot be misrouted.
+          body:
+            "⚠️ My access to your Google Calendar has been revoked, so I can't see what's on or " +
+            `work out when you need to leave. Tap to reconnect: ${googleLinkUrl(deviceId)}`,
           dedupeKey: `google-relink:${deviceId}:${localDateKey(Date.now(), device.timezone)}`,
         })
       }

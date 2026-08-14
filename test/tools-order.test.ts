@@ -50,6 +50,9 @@ const EXPECTED = [
   'read_notes',
   'delete_note',
   'plan_journey',
+  // Appended last for the same cached-prefix reason as manage_places and the note tools, rather
+  // than sat beside the three Google tools it belongs with conceptually.
+  'link_google',
 ]
 
 describe('tool list is deterministic', () => {

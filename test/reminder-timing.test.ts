@@ -221,7 +221,21 @@ describe('updateReminder', () => {
     // warning is already behind us and correctly dropped, which would make the count below a
     // statement about the clock rather than about clearing the plan.
     const device = makeDevice('dev_u8')
-    const r = await createReminder(device, { title: 'the form', dueAtMillis: inHours(24 * 10), timing: 'deadline' })
+    // Pinned to midday local rather than `inHours(24 * 10)`, which inherited the wall clock's time
+    // of day and made this test true only during waking hours. The 60-minute lead landed at
+    // due−1h, so whenever the suite ran between roughly 23:00 and 08:00 that instant fell inside
+    // the default 22:00–07:00 quiet window, was deferred past the due time and correctly dropped —
+    // giving 1 lead instead of 2. The table assertion below had the same latent fault: at 05:00 the
+    // 4h, 1h and 20min rungs all deferred past due too. Production was right both times.
+    //
+    // Midday is the safe anchor because quiet hours defer FORWARD to 07:00: any rung pushed out of
+    // the window still lands before a midday due time, so nothing is dropped for the wrong reason.
+    const due = DateTime.now()
+      .setZone(device.timezone)
+      .plus({ days: 10 })
+      .set({ hour: 12, minute: 0, second: 0, millisecond: 0 })
+      .toMillis()
+    const r = await createReminder(device, { title: 'the form', dueAtMillis: due, timing: 'deadline' })
     await updateReminder(device, r.reminderId, { nagPlan: { leadMinutes: [1440, 60] } })
     expect(leadCountFor(device, getReminder(r.reminderId)!)).toBe(2)
 

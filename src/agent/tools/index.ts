@@ -6,7 +6,7 @@ import { DEFAULT_TIMING_KIND, normaliseOffsets, type NagPlanSpec } from '../../l
 import { armAlarm, cancelAlarm, getAlarm, listArmed } from '../../services/alarms.js'
 import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
-import { createCalendarEvent, createTask, hasGoogle, listCalendarEvents, type CalendarEvent } from '../../services/google.js'
+import { createCalendarEvent, createTask, googleLinkUrl, hasGoogle, listCalendarEvents, type CalendarEvent } from '../../services/google.js'
 import { eventKeyOf } from '../../services/leaveBy.js'
 import {
   addNote,
@@ -36,7 +36,7 @@ import { nagQuietHours } from '../../services/settings.js'
 import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/time.js'
 import { alarmTools } from './alarms.js'
 import { factTools } from './facts.js'
-import { googleTools } from './google.js'
+import { googleLinkTools, googleTools } from './google.js'
 import { createJourney, journeyTools } from './journey.js'
 import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
 import { noteTools } from './notes.js'
@@ -83,6 +83,9 @@ export function buildTools(): OpenAI.Responses.FunctionTool[] {
     // already in the cached prefix, and notes have no sibling group worth sitting next to.
     ...noteTools,
     ...journeyTools,
+    // Last, for the cached-prefix reason spelled out beside its definition in ./google.js — NOT
+    // beside the other three Google tools, where it would shift everything after them.
+    ...googleLinkTools,
   ].map(
     (t) => ({
       type: 'function' as const,
@@ -500,6 +503,16 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         title: String(a.title),
         dueIso: a.dueLocalISO ? String(a.dueLocalISO) : undefined,
       })
+    }
+    // Sits with its siblings here even though its DEFINITION is appended last; the switch is
+    // dispatch, not prompt bytes, so nothing about the cached prefix depends on this position.
+    //
+    // `connected` reports whether a refresh token is on file, which is NOT the same as the
+    // calendar working — a revoked grant still leaves the row in place, and only an API call
+    // finds that out. So it answers "have they ever linked", to stop the model telling someone
+    // mid-relink that they have never connected Google. The link is returned either way.
+    case 'link_google': {
+      return { url: googleLinkUrl(device.deviceId), connected: hasGoogle(device.deviceId) }
     }
     case 'create_leave_by_alarm': {
       // The whole body lives beside the definition in ./leaveBy.js: event resolution, the guardrail

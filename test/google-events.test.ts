@@ -163,6 +163,50 @@ describe('tryListCalendarEvents never throws at a scheduler job', () => {
     expect(queued[0]!.kind).toBe('system_warning')
     expect(queued[0]!.body).toContain('revoked')
   })
+
+  /**
+   * The warning has to carry the way OUT, not an instruction to ask for one.
+   *
+   * It used to read 'Send me "link google" to reconnect it', naming a command no agent tool
+   * implemented — so the only path that can un-break a revoked grant dead-ended, and the calendar
+   * stayed dark for days with the owner having done exactly as they were told. Asserting only
+   * `toContain('revoked')`, as the test above does, passed happily throughout.
+   */
+  it('puts a working reconnect link in the warning, not an instruction', async () => {
+    const device = makeDevice('dev_ce8')
+    linkGoogle(device.deviceId)
+    linkWhatsapp(device.deviceId, '447700900002')
+    listEvents.mockRejectedValue(new Error('invalid_grant: Token has been expired or revoked.'))
+
+    await tryListCalendarEvents(device.deviceId, '2026-08-04T00:00:00', '2026-08-05T00:00:00')
+
+    // By deviceId, not `[0]` — the outbox is not reset between tests in this file, so the first
+    // row belongs to whichever test queued first.
+    const body = db.select().from(outbox).all().find((o) => o.deviceId === device.deviceId)!.body
+    expect(body).toContain(`${config.publicOrigin}/oauth/google/start?deviceId=${device.deviceId}`)
+    // Points at this server, never straight at Google: a consent URL carries a single-use state
+    // nonce that would be dead by the time an unread WhatsApp message was tapped.
+    expect(body).not.toContain('accounts.google.com')
+    expect(body).not.toMatch(/link google/i)
+  })
+})
+
+describe('link_google gives the owner the way back', () => {
+  it('returns the reconnect url whether or not Google is currently linked', async () => {
+    const unlinked = makeDevice('dev_lg1')
+    const linked = makeDevice('dev_lg2')
+    linkGoogle(linked.deviceId)
+
+    const a = (await runTool(unlinked, 'link_google', {})) as { url: string; connected: boolean }
+    const b = (await runTool(linked, 'link_google', {})) as { url: string; connected: boolean }
+
+    expect(a.url).toBe(`${config.publicOrigin}/oauth/google/start?deviceId=${unlinked.deviceId}`)
+    expect(a.connected).toBe(false)
+    // Still answers when a token IS on file: `connected` cannot tell a live grant from a revoked
+    // one, so the tool that exists to fix a revoked grant must not gate itself on it.
+    expect(b.url).toBe(`${config.publicOrigin}/oauth/google/start?deviceId=${linked.deviceId}`)
+    expect(b.connected).toBe(true)
+  })
 })
 
 describe('list_calendar_events hands the model a view, not the row', () => {
