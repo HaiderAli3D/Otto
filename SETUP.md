@@ -300,8 +300,27 @@ Lets Otto read/write your calendar and tasks. Set both `GOOGLE_*` vars.
 1. In [Google Cloud Console](https://console.cloud.google.com/) (use the project behind
    `your-firebase-project`, or any project) → **APIs & Services → Library** → enable the **Google Calendar
    API** and the **Google Tasks API**.
-2. **OAuth consent screen:** User type **External**, publishing status **Testing**. Add **yourself
-   as a test user**. Add scopes **`.../auth/calendar.events`** and **`.../auth/tasks`**.
+2. **OAuth consent screen:** User type **External**. Add **yourself as a test user**. Add scopes
+   **`.../auth/calendar.events`** and **`.../auth/tasks`**.
+
+   ⚠️ **Then press "Publish app" so the publishing status is "In production", not "Testing".**
+   This is not optional polish. Google expires every refresh token issued by a **Testing**-status
+   app after **exactly 7 days**, so the calendar silently dies about once a week — Otto stops
+   seeing what is on and stops working out when you need to leave, until you re-link by hand.
+   This bit us in production on 2026-08-11, seven days after linking.
+
+   You will see a "Google hasn't verified this app" interstitial when you link (Advanced → Go to
+   …). That is expected and harmless for a single-owner app: verification is only needed to drop
+   that screen, not to stop the tokens expiring.
+
+   **Order matters.** Publishing does NOT extend an already-issued token — publish first, then do
+   step 4, or the old 7-day token just keeps counting down.
+
+   **How to check it worked:** call `POST https://oauth2.googleapis.com/token` with the stored
+   refresh token. If the response contains `refresh_token_expires_in`, you are still on Testing.
+   A published app omits the field entirely. That is faster and more certain than reading the
+   Console, and there is no API for the setting itself — the IAP OAuth Admin APIs were shut down
+   in March 2026 with no successor, so this really is a two-click manual step.
 3. **Credentials → Create credentials → OAuth client ID → Web application.** Add the authorized
    redirect URI **exactly**:
 
