@@ -52,3 +52,22 @@ export const googleTools: ToolDef[] = [
     },
   },
 ]
+
+/**
+ * Connecting Google, kept OUT of `googleTools` above and spread last in `buildTools`.
+ *
+ * Not a taste call: `googleTools` is spread fourth, so adding a fifth entry there would push every
+ * tool after it down the cached prompt prefix and bill every user a full-price turn at deploy. The
+ * end of the list shifts nothing — the same trade `manage_places` and the note tools took.
+ */
+export const googleLinkTools: ToolDef[] = [
+  {
+    name: 'link_google',
+    description:
+      'Get the link the owner taps to connect or reconnect their Google Calendar and Tasks. Use ' +
+      'it whenever they ask to link, connect or reconnect Google, and whenever a calendar or ' +
+      'task tool answers "not connected" — their access can be revoked at any time, and this is ' +
+      'the only way back. Send them the returned url exactly as given.',
+    parameters: { type: 'object', properties: {} },
+  },
+]

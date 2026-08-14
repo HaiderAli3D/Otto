@@ -76,7 +76,8 @@ function byDue(a: Reminder, b: Reminder): number {
  *
  * Through `tryListCalendarEvents` — the leave-by branch's wrapper — rather than a private try/catch
  * around `listCalendarEvents`, and that matters twice over. It is the thing that queues the
- * one-per-day "your Google access has been revoked, send me link google" warning on `invalid_grant`,
+ * one-per-day "your Google access has been revoked, here is the link to reconnect" warning on
+ * `invalid_grant`,
  * so a private catch here meant the daily path, the ONE path guaranteed to hit a dead token every
  * morning, was also the one path that never told the owner: the calendar stayed silently dead until
  * they happened to ask for a leave-by alarm.
@@ -151,7 +152,7 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
     .map((a) => ({ label: a.label, firesAtLocal: DateTime.fromMillis(a.triggerAtMillis, { zone }).toFormat('HH:mm') }))
 
   // An unreachable calendar on its own is NOT worth a message: `tryListCalendarEvents` has already
-  // queued the "send me link google" warning for the one cause that never heals by itself, and a
+  // queued the reconnect-link warning for the one cause that never heals by itself, and a
   // 07:00 "I couldn't read your calendar" next to nothing else is the empty proactive message this
   // whole module is built to avoid. Silence stays the rule; honesty only applies to a brief that
   // was going out anyway.

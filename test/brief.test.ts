@@ -292,7 +292,7 @@ describe('what goes in it', () => {
     // the phone down on the strength of it and misses the 09:30 they never heard about.
     //
     // The mock is on `tryListCalendarEvents` for a second reason: routing through that wrapper is
-    // also what queues the one-per-day "send me link google" warning (pinned in
+    // also what queues the one-per-day reconnect-link warning (pinned in
     // test/google-events.test.ts), and a private try/catch in the brief meant the daily path — the
     // one guaranteed to hit a dead token every morning — was the one path that never told them.
     const device = owner('dev_b25', '447700900025')
