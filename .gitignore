@@ -1,38 +1,53 @@
-# Built application files
+# Root-level ignores. `android/` and `server/` each carry their own, more specific rules —
+# this file covers the repo root and adds a defence-in-depth net that applies at every depth.
+
+# Build caches. The Gradle project moved into android/, so anything left here is stale.
 /build
-/app/build
-*.apk
-*.aab
-*.ap_
-*.dex
+/.gradle
+/.kotlin
 
-# Gradle
-.gradle/
-build/
-/captures
-.externalNativeBuild
-.cxx
-
-# Local config (machine-specific)
-local.properties
-
-# Firebase config — provided per-environment, never committed
-/app/google-services.json
-
-# Signing material
-*.jks
-*.keystore
-keystore.properties
-
-# Loki Mode scratch state (autonomous-run bookkeeping)
+# AI session scratch state (.remember/ also self-ignores via its own .gitignore)
 .loki/
+.remember/
 
-# Node tooling
-node_modules/
-
-# IDE
+# Editors / OS
 .idea/
 *.iml
 .DS_Store
+Thumbs.db
 
-# Note: gradle/wrapper/gradle-wrapper.jar IS committed (do not ignore it).
+# ─── Defence in depth ─────────────────────────────────────────────────────────
+# None of these should ever be committed. They are listed without a leading slash
+# so they match at ANY depth, including inside android/ and server/. This is
+# deliberately redundant with the per-directory .gitignore files: a public repo is
+# unforgiving, and the cost of a duplicated rule is nothing next to the cost of a
+# leaked key.
+.env
+.env.*
+!.env.example
+service-account.json
+*-service-account.json
+*.key.json
+google-services.json
+keystore.properties
+local.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# SQLite holds real conversation history, device tokens and pairing secrets.
+# The -wal and -shm sidecars do NOT match *.sqlite and routinely carry megabytes
+# of rows not yet checkpointed into the main file.
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Anchored to the server, NOT matched at every depth: the Android app has a source
+# package at android/app/src/main/java/com/otto/app/data/, and a bare `data/` rule
+# would silently swallow every new file added to it.
+/server/data/
+/server/backups/

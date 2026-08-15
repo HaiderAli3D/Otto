@@ -1,0 +1,38 @@
+# Built application files
+/build
+/app/build
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Gradle
+.gradle/
+build/
+/captures
+.externalNativeBuild
+.cxx
+
+# Local config (machine-specific)
+local.properties
+
+# Firebase config — provided per-environment, never committed
+/app/google-services.json
+
+# Signing material
+*.jks
+*.keystore
+keystore.properties
+
+# Loki Mode scratch state (autonomous-run bookkeeping)
+.loki/
+
+# Node tooling
+node_modules/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Note: gradle/wrapper/gradle-wrapper.jar IS committed (do not ignore it).
