@@ -76,8 +76,9 @@ uploads the R8 mapping file." **That is false and it shipped a 100%-reproducible
 plugin *also* injects a build-ID resource that `CrashlyticsCore.onPreExecute()` hard-asserts on; without
 it, `FirebaseInitProvider` throws
 `IllegalStateException: The Crashlytics build ID is missing` during application bind, killing the
-process before `OttoApp` or any Otto code runs (observed on-device 2026-08-02, Samsung SM-XXXXX /
-Android 16). Two things hid it: it needs a real `app/google-services.json` to reach Firebase init, so
+process before `OttoApp` or any Otto code runs (observed on-device 2026-08-02, on a current Samsung
+flagship running Android 16). Two things hid it: it needs a real `app/google-services.json` to reach
+Firebase init, so
 it is structurally unreachable headlessly (all 67 unit tests pass regardless); and `OttoLog`'s
 `runCatching` guard only wraps Otto's *own* calls into Crashlytics — it cannot protect auto-init, which
 runs earlier and outside that guard.
