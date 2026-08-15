@@ -5,8 +5,9 @@ captures the decisions and conventions a future session needs before touching co
 
 ## What this repo is
 
-The **Android companion app only** for Otto, a personal WhatsApp-based AI scheduling
-agent. The agent/server live in other repos. This app's single job: receive a
+The **Android companion app** for Otto, a personal WhatsApp-based AI scheduling
+agent. The agent/server live in `../server` in this same repository (they used to be a separate
+repo, and some notes below still read that way). This app's single job: receive a
 high-priority FCM **data** message from the server and arm a **real device alarm** that
 rings reliably even when backgrounded, in Doze, or after reboot.
 
@@ -58,7 +59,7 @@ register/report/sync/heartbeat endpoints) — see the approved plan referenced i
 the debug key so `assembleRelease` still builds); release `SERVER_BASE_URL` is compiled from
 `otto.serverBaseUrl` in `local.properties`/`-P`; `usesCleartextTraffic="false"`; the Settings URL
 override is HTTPS-only; `versionName = 1.0.0`. Both `assembleDebug` and `assembleRelease` are green.
-The **Otto server** now exists as a sibling repo at `../otto-server` (Node/TS, SQLite, Fastify) — its
+The **Otto server** lives at `../server` (Node/TS, SQLite, Fastify) — its
 `SETUP.md` is the turnkey owner walkthrough (Meta/Firebase/OpenAI/Google/hosting/pairing). As of
 2026-08-08 the server's agent runs on the **OpenAI Responses API** with `gpt-5.6-luna`
 (`OPENAI_API_KEY` / `OPENAI_MODEL`); it was previously Anthropic Claude Sonnet 5.

@@ -1,7 +1,7 @@
 {
   "name": "otto-server",
   "version": "1.0.0",
-  "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Otto server — turns WhatsApp messages into device alarm pushes via an OpenAI agent + FCM.",
   "engines": {

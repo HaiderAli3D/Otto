@@ -5,8 +5,12 @@ receives WhatsApp messages, runs an OpenAI agent to understand them, and pushes 
 messages** to the Otto Android app, which arms a **real device alarm** that rings even when
 the phone is backgrounded, in Doze, or locked.
 
-> The Android app is a **separate repo**. Its only job is to receive a push and ring a real
-> alarm — it never decides *when* to ring. This server sends the absolute instructions.
+> The Android app lives alongside this directory, in [`../android`](../android). Its only job is
+> to receive a push and ring a real alarm — it never decides *when* to ring. This server sends the
+> absolute instructions.
+>
+> **New here?** Start at the [repository README](../README.md), then
+> [SETUP.md](./SETUP.md).
 
 ## Architecture (one line)
 

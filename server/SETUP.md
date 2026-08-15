@@ -17,18 +17,19 @@ Commands below use `bash`/`curl` (macOS/Linux, Git Bash, or WSL on Windows). Rep
 ## 1. Prerequisites
 
 - **Node.js 20 or newer** — check with `node --version`.
-- **The Otto Android app installed on your phone, with permissions granted.** The app is a
-  separate repo; its debug build installs from Android Studio (open the app project → Run). On
-  first launch grant: notifications, exact alarm, full-screen intent, and — importantly — the
+- **The Otto Android app installed on your phone, with permissions granted.** The app lives in
+  [`../android`](../android) — see **[docs/BUILDING-THE-APP.md](../docs/BUILDING-THE-APP.md)** for
+  the full walkthrough. In short: open `android/` in Android Studio and press Run. On first launch
+  grant notifications, exact alarm, full-screen intent, and — importantly — the
   **battery-optimization exemption** (needed for reliable ringing in Doze).
 - A phone and computer that can reach the internet. For WhatsApp you'll also need a Meta
   (Facebook) account and a phone number for the business number (§7).
 
-Get the code and dependencies (clone from wherever this repo lives for you — a Git host fork or
-a local path):
+Get the code and dependencies. The app and the server live in one repository, and every command
+in this guide runs from the `server/` directory:
 
 ```bash
-git clone <url-or-path-of-this-repo> otto-server && cd otto-server
+git clone <url-of-this-repo> otto && cd otto/server
 npm install
 cp .env.example .env      # you'll fill this in as you go
 ```
@@ -38,11 +39,16 @@ cp .env.example .env      # you'll fill this in as you go
 ## 2. Firebase Cloud Messaging (REQUIRED)
 
 This is the pipe that pushes alarms to the phone. It must be the **same Firebase project as the
-Android app's `google-services.json`** — project **`your-firebase-project`**, package **`com.otto.app`**.
-If the server used a different project, its pushes would never reach the app.
+Android app's `google-services.json`** — the one you create below, with an Android app registered
+under package **`com.otto.app`**. If the server used a different project, its pushes would never
+reach the app.
 
-1. Open the [Firebase console](https://console.firebase.google.com/) → select the **your-firebase-project**
-   project.
+> **You need your own Firebase project.** There is no shared one, and there cannot be: the project
+> is what binds *your* server to *your* phone. It is free (Spark tier is ample) and takes about ten
+> minutes. See [docs/BUILDING-THE-APP.md](../docs/BUILDING-THE-APP.md) for the app side.
+
+1. Open the [Firebase console](https://console.firebase.google.com/) → **Add project** (or select
+   an existing one of yours). Any project name will do — this guide calls it `<your-project>`.
 2. Gear icon → **Project settings** → **Service accounts** tab.
 3. Click **Generate new private key** → **Generate key**. A JSON file downloads.
 4. Save it into the repo as `service-account.json` (it's already gitignored — never commit it).
@@ -297,8 +303,8 @@ WhatsApp number to a device yet — make sure you completed §5–6 on the same 
 
 Lets Otto read/write your calendar and tasks. Set both `GOOGLE_*` vars.
 
-1. In [Google Cloud Console](https://console.cloud.google.com/) (use the project behind
-   `your-firebase-project`, or any project) → **APIs & Services → Library** → enable the **Google Calendar
+1. In [Google Cloud Console](https://console.cloud.google.com/) (the project behind your Firebase
+   project works, or any project) → **APIs & Services → Library** → enable the **Google Calendar
    API** and the **Google Tasks API**.
 2. **OAuth consent screen:** User type **External**. Add **yourself as a test user**. Add scopes
    **`.../auth/calendar.events`** and **`.../auth/tasks`**.

@@ -15,7 +15,9 @@
 # min_machines_running = 1 and auto_stop_machines = false keep it up. DO NOT run
 # `fly scale count 0` or enable scale-to-zero — a stopped machine misses alarms.
 
-app = "your-otto-server"  # created 2026-08-02; "otto-server" was taken globally
+# Fly app names are globally unique, so pick your own here — "otto-server" is long gone.
+# `fly launch --no-deploy` will offer to write one for you.
+app = "your-otto-server"
 primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https://fly.io/docs/reference/regions/
 
 [build]
@@ -31,6 +33,7 @@ primary_region = "lhr"     # pick a region near you (lhr, iad, sjc, ...): https:
   # line silently falls back to the zod default in src/config.ts. Keep the two strings identical.
   OPENAI_MODEL = "gpt-5.6-luna"
   # Not a secret, so it lives here rather than in `fly secrets`.
+  # Must match the app name above: https://<app>.fly.dev
   PUBLIC_ORIGIN = "https://your-otto-server.fly.dev"
 
 [http_service]

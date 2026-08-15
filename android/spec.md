@@ -18,14 +18,15 @@ spec covers the whole project so later milestones inherit consistent decisions.
 ## 1. Purpose and scope
 
 Otto is a personal WhatsApp-based AI scheduling agent. The agent and its backend
-run on a server outside this repo. This repo is only the Android companion app.
+run on a server, which lives in `../server`. This document covers only the Android
+companion app.
 
 The companion exists for one reason: a server cannot ring a phone. Calendar
 events and reminders sync or arrive over WhatsApp without any app on the device.
 A true alarm (loud, full-screen, dismiss to stop) must be scheduled by code
 running on the phone. The companion is that code.
 
-### In scope (this repo)
+### In scope (`android/`)
 - Receiving commands from the Otto server via Firebase Cloud Messaging.
 - Arming, cancelling, and ringing real device alarms that survive Doze, screen
   lock, and reboot.
@@ -33,7 +34,7 @@ running on the phone. The companion is that code.
 - Reporting alarm outcomes and the device push token back to the server.
 - A minimal UI to pair the device, manage permissions, and test the alarm path.
 
-### Out of scope (other repos, do not build here)
+### Out of scope (lives in `server/`, do not build here)
 - The Otto server, agent loop, and tool calling.
 - The WhatsApp Cloud API integration and the reminder follow-up loop.
 - Google Calendar and Google Tasks access.
