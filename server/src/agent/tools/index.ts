@@ -35,6 +35,12 @@ import {
 import { nagQuietHours } from '../../services/settings.js'
 import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/time.js'
 import { alarmTools } from './alarms.js'
+import {
+  calendarEditTools,
+  deleteCalendarEventTool,
+  planDay,
+  updateCalendarEventTool,
+} from './calendarEdits.js'
 import { factTools } from './facts.js'
 import { googleLinkTools, googleTools } from './google.js'
 import { createJourney, journeyTools } from './journey.js'
@@ -59,7 +65,7 @@ import { settingsTools } from './settings.js'
  * `buildTools(device)`. Order is part of the cached prefix, so append rather than reshuffle;
  * test/tools-order.test.ts pins the names and the order as the regression net.
  *
- * The `.map` is where the provider's wire envelope is added, and it exists so the 18 definitions
+ * The `.map` is where the provider's wire envelope is added, and it exists so the 27 definitions
  * stay pure prompt content: swapping providers edits this function, not every literal.
  *
  * `strict: false` is deliberate and should NOT be flipped casually. Strict mode requires every
@@ -86,6 +92,10 @@ export function buildTools(): OpenAI.Responses.FunctionTool[] {
     // Last, for the cached-prefix reason spelled out beside its definition in ./google.js — NOT
     // beside the other three Google tools, where it would shift everything after them.
     ...googleLinkTools,
+    // After even link_google, for that same reason: nothing already in the cached prefix moves. All
+    // three are one feature — Otto changing a calendar rather than only adding to it — so they sit
+    // together rather than each being wedged next to a conceptual sibling further up.
+    ...calendarEditTools,
   ].map(
     (t) => ({
       type: 'function' as const,
@@ -496,6 +506,19 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
         // Never suppressed from this tool — see the param's doc in services/google.ts. Only the
         // journey planner, which has already arranged its own notifications, turns them off.
       })
+    }
+    // Bodies beside their definitions in ./calendarEdits.js, like create_leave_by_alarm and
+    // manage_places: resolving an event the owner named in words, and refusing a block that would
+    // land on a real meeting, are pages of logic rather than the two lines every other case is.
+    // Position here is dispatch, not prompt bytes — see the note beside link_google.
+    case 'delete_calendar_event': {
+      return await deleteCalendarEventTool(device, a)
+    }
+    case 'update_calendar_event': {
+      return await updateCalendarEventTool(device, a)
+    }
+    case 'plan_day': {
+      return await planDay(device, a)
     }
     case 'create_task': {
       if (!hasGoogle(device.deviceId)) return { error: 'tasks not connected' }

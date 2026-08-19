@@ -13,7 +13,7 @@ import { MODEL, isTransient, modelClient, outputText } from './llm.js'
 import { systemPrompt } from './prompt.js'
 import { buildTools, runTool } from './tools.js'
 
-// 18 tools and multi-step reminder work (list → complete → reply) need headroom. The fallback call
+// 27 tools and multi-step reminder work (list → complete → reply) need headroom. The fallback call
 // below burns one step of the budget.
 const MAX_STEPS = 10
 
@@ -150,7 +150,7 @@ async function runLoop(device: Device, history: Item[]): Promise<string> {
     instructions,
     tools,
     max_output_tokens: MAX_OUTPUT_TOKENS,
-    // Low, not none: this is a cost-tier model choosing between 18 tools, and that choice is
+    // Low, not none: this is a cost-tier model choosing between 27 tools, and that choice is
     // exactly what reasoning buys. The four one-shot writers use 'none' — they have 200-300 token
     // budgets, where any reasoning at all would empty the completion.
     reasoning: { effort: 'low' as const },

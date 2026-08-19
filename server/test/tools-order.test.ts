@@ -5,7 +5,7 @@ vi.mock('../src/fcm/sender.js', () => ({
   sendData: vi.fn(async () => ({ ok: true as const })),
 }))
 
-import { ACCOUNTABILITY, PREFERENCES } from '../src/agent/promptSections.js'
+import { ACCOUNTABILITY, CALENDAR, JOURNEYS, PREFERENCES, REPLYING } from '../src/agent/promptSections.js'
 import { buildTools, runTool } from '../src/agent/tools.js'
 
 /**
@@ -53,6 +53,13 @@ const EXPECTED = [
   // Appended last for the same cached-prefix reason as manage_places and the note tools, rather
   // than sat beside the three Google tools it belongs with conceptually.
   'link_google',
+  // Appended after link_google for the same cached-prefix reason it was appended: nothing already
+  // in the prefix moves. The three are grouped because they are one feature — Otto changing a
+  // calendar rather than only adding to it — rather than each sitting beside a sibling further up,
+  // which would have shifted every tool after it and billed one full-price turn per user at deploy.
+  'delete_calendar_event',
+  'update_calendar_event',
+  'plan_day',
 ]
 
 describe('tool list is deterministic', () => {
@@ -89,7 +96,7 @@ describe('tool list is deterministic', () => {
   it('has a dispatch case for every declared tool', () => {
     // Definitions and dispatch live in different files and nothing type-checks one against the
     // other, so a tool the model can see but nothing can run would only show up as a confused reply
-    // in production. Read the switch rather than calling the tools: invoking all eighteen with junk
+    // in production. Read the switch rather than calling the tools: invoking all twenty-seven with junk
     // input would arm alarms and write rows to prove a routing fact.
     const dispatch = readFileSync(new URL('../src/agent/tools/index.ts', import.meta.url), 'utf8')
     for (const name of EXPECTED) expect(dispatch).toContain(`case '${name}':`)
@@ -126,6 +133,49 @@ describe('the cached prefix does not contradict itself', () => {
     expect(quietHours).toMatch(/wake-check/i)
     expect(quietHours).toMatch(/alarm/i)
     expect(ACCOUNTABILITY).toContain('Four things go through regardless')
+  })
+
+  it('no longer tells the owner to go and delete their own calendar entries', () => {
+    // JOURNEYS predates the editing tools and said a duplicate was something "they have to delete
+    // themselves", and that the calendar entry was "theirs to delete". Both were true when written
+    // and are now false. A prompt that talks the owner into doing by hand what Otto can do in one
+    // call is the most expensive kind of stale line, because nothing ever errors and nobody ever
+    // finds out — it just quietly stays useless.
+    expect(JOURNEYS).not.toMatch(/theirs to delete/i)
+    expect(JOURNEYS).not.toMatch(/delete that themselves/i)
+    expect(JOURNEYS).toContain('delete_calendar_event')
+  })
+
+  it('settles the argument REPLYING would otherwise win about a clear cancellation', () => {
+    // REPLYING ends the whole prompt with "Still ask before anything destructive", and it is read
+    // LAST. Deleting a calendar event is destructive and irreversible, so on recency alone the model
+    // would ask "shall I cancel it?" on every single "cancel my 3pm" — which is exactly the
+    // behaviour this feature exists to remove. The exception has to be stated in words the model
+    // cannot read past, and this pins that it still is.
+    // Matched loosely because the section is hard-wrapped: the sentence spans two lines.
+    expect(REPLYING).toMatch(/Still ask before anything\s+destructive/)
+    expect(CALENDAR).toContain('Do not ask permission first.')
+    expect(CALENDAR).toMatch(/one exception to\s+asking before something destructive/)
+  })
+
+  it('states the never-pick rule in the tool block as well as the prompt', () => {
+    // The two halves sit ~7,000 tokens apart in the same cached prefix and the model reads both. If
+    // they disagree about whether to ask, the tool description wins at the moment of acting — which
+    // is the worst possible moment for it to be the half that says "pick one".
+    const desc = buildTools().find((t) => t.name === 'delete_calendar_event')!.description
+    expect(desc).toMatch(/ambiguous/i)
+    expect(desc).toMatch(/never pick/i)
+    expect(CALENDAR).toContain('Never pick.')
+  })
+
+  it('never lets a half-written day be described as a planned one', () => {
+    // plan_day's result has no truthy success field while anything was skipped or failed, and this
+    // is the prose half of that guarantee. Together they are what stops "4 of 6 landed" being
+    // reported as "all sorted".
+    const desc = buildTools().find((t) => t.name === 'plan_day')!.description
+    expect(desc).toMatch(/allWritten comes back false/)
+    expect(desc).toMatch(/none of these blocks ring/i)
+    expect(CALENDAR).toContain('do\n  not describe the day as planned')
   })
 
   it('does not promise proactive leave-by arming that nothing implements', () => {

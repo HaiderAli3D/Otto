@@ -78,7 +78,7 @@ something has to actually happen.
 
 So Otto is two halves that only work together:
 
-- **`server/`** — the brain. Receives your WhatsApp messages, runs an AI agent with 24 tools,
+- **`server/`** — the brain. Receives your WhatsApp messages, runs an AI agent with 27 tools,
   decides what should happen and when, and pushes absolute instructions to the phone.
 - **`android/`** — the hands. Never decides anything. It receives *"arm alarm X at epoch T"*
   and makes the phone ring, reliably, even in Doze, locked, or after a reboot.
@@ -95,7 +95,7 @@ without shipping a new APK.
 | **Nudges you can action from the lockscreen** | Three graded notification tiers, with **Done** and **Snooze** buttons that work without unlocking the phone. Plus one persistent, silent "3 things open" line in your shade. |
 | **Leave-by alarms** | *"I'm going to Mum's Saturday lunchtime"* → looks the place up, prices the journey with live traffic, creates the calendar event, and rings you at **leaving** time, not event time. It re-checks 45 minutes before departure in case traffic moved. |
 | **Knows your places** | "the gym", "mum's", "the dentist" — saved silently the first time, never asked about again. |
-| **Google Calendar & Tasks** | Reads your day for the morning brief, creates events and tasks. |
+| **Google Calendar & Tasks** | Reads your day for the morning brief, and creates, moves and cancels events. *"Plan my day"* lays a whole set of blocks around what is already on it, in one call, never over a real meeting. |
 | **Voice notes and photos** | Voice notes are transcribed and acted on. A photo is something to act on, not to narrate back at you. |
 | **Briefs and a weekly review** | A morning brief that has to earn the interruption, an optional evening one, and a Sunday review that leads with what actually happened. |
 | **Location, only when it predicts something** | Otto can ask your phone where it is — **once, when asked**, never continuously — to price a journey properly. Every single fix posts a visible notification saying it happened and what for. |
@@ -109,7 +109,7 @@ sequenceDiagram
     participant You as You (WhatsApp)
     participant Meta as Meta Cloud API
     participant Srv as server/ (Fastify + SQLite)
-    participant AI as OpenAI agent (24 tools)
+    participant AI as OpenAI agent (27 tools)
     participant FCM as Firebase Cloud Messaging
     participant App as android/ (Kotlin)
     participant OS as Android AlarmManager
@@ -241,7 +241,7 @@ ring or corrupting the new alarm"*, *"Make alarms actually loud"*.
 │   ├── spec.md       the full technical spec (§1–17)
 │   └── CLAUDE.md     architecture notes and hard-won platform gotchas
 ├── server/           TypeScript · Fastify · SQLite/Drizzle · OpenAI Responses API
-│   ├── src/agent/    persona, prompt assembly, 24 tools
+│   ├── src/agent/    persona, prompt assembly, 27 tools
 │   ├── src/fcm/      command builders + HMAC signer
 │   ├── SETUP.md      the end-to-end setup walkthrough
 │   └── .env.example  every environment variable, documented
@@ -257,7 +257,7 @@ the nudge tier → location on demand.
 - **Android:** Kotlin/Compose, `minSdk 26`, `compileSdk`/`targetSdk 36`, Room schema v3.
   **121 unit tests** plus migration tests that run on a real device.
 - **Server:** Node 20+, TypeScript, Fastify 5, SQLite via Drizzle, OpenAI Responses API.
-  **834 tests across 51 files.** The suite is hermetic — it deliberately runs with no API key, so
+  **874 tests across 53 files.** The suite is hermetic — it deliberately runs with no API key, so
   every model-backed surface exercises its deterministic fallback on every run.
 - **Seven FCM command types**, one versioned contract, pinned end-to-end by a contract test that
   holds payloads the server actually produced — signature included — because nothing at build time

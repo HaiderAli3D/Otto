@@ -1,13 +1,13 @@
 /**
  * What a tool AUTHOR writes.
  *
- * Deliberately has ZERO imports. The six tool-definition modules import from here, so none of them
+ * Deliberately has ZERO imports. The ten tool-definition modules import from here, so none of them
  * depends — even type-only — on the module that constructs an API client, and none of them has to
  * know the wire shape of the provider currently in use.
  *
  * The wire envelope (`type: 'function'`, `strict`) is assembled in exactly one place, `buildTools()`
  * in ./index.ts. Keeping it out of the 18 literals is what lets a provider change be a one-function
- * edit rather than an eighteen-object one.
+ * edit rather than a twenty-seven-object one.
  */
 
 /** The subset of JSON Schema the tool definitions actually use. No $ref, no oneOf, no format. */
