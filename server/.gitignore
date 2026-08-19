@@ -18,3 +18,10 @@ service-account.json
 *.db
 data/
 backups/
+
+# Your real Fly config. `fly.toml` in this repo is deliberately full of placeholders
+# (`your-otto-server`) because the repo is public, and deploying with it would set
+# PUBLIC_ORIGIN to a hostname that does not exist — which silently breaks every
+# Google reconnect link, since those are built from it. Keep your real app name and
+# origin here and deploy with `fly deploy -c fly.production.toml`.
+fly.production.toml
