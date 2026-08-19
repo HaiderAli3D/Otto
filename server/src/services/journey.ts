@@ -118,9 +118,28 @@ export function journeyLeadMinutes(p: {
     .sort((a, b) => b - a)
 }
 
-/** A CalendarEvent shape for an entry we could not write to Google. */
+/**
+ * A CalendarEvent shape for an entry we could not write to Google.
+ *
+ * Every field Google would have supplied is at its "we know nothing" value, `id` included — which
+ * is the honest answer and also the one the rest of the system reads correctly: an empty id makes
+ * `eventKeyOf` fall back to the summary, and the calendar-editing tools refuse outright to act on
+ * an event whose id never came from Google.
+ */
 function syntheticEvent(p: { title: string; startIso: string; endIso: string; location: string }): CalendarEvent {
-  return { id: '', summary: p.title, startIso: p.startIso, endIso: p.endIso, isAllDay: false, location: p.location, status: null }
+  return {
+    id: '',
+    summary: p.title,
+    startIso: p.startIso,
+    endIso: p.endIso,
+    isAllDay: false,
+    location: p.location,
+    status: null,
+    recurringEventId: null,
+    organizerSelf: false,
+    attendeeCount: 0,
+    eventType: null,
+  }
 }
 
 /**

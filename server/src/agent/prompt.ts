@@ -11,6 +11,7 @@ import { PERSONA, WRITING } from './persona.js'
 import {
   ACCOUNTABILITY,
   ALARMS_VS_REMINDERS,
+  CALENDAR,
   CAPABILITIES,
   IDENTITY,
   JOURNEYS,
@@ -50,6 +51,10 @@ const CORE = [
   // Immediately after LEAVE_BY, because the only thing the model has to get right about either is
   // which one it is looking at — and that decision is easiest to make with both rules adjacent.
   JOURNEYS,
+  // Straight after JOURNEYS, which is where Otto is told a duplicate has to be deleted and that
+  // undoing a journey takes three calls. Both of those lines now point at a tool, and the section
+  // explaining how that tool behaves should be the next thing read.
+  CALENDAR,
   REMINDER_TIMING,
   REMINDER_LOOP,
   MEMORY,

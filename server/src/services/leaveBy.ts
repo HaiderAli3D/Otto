@@ -270,6 +270,34 @@ export const eventKeyOf = (e: CalendarEvent): string => e.id || e.summary
 export const eventStartMillis = (e: CalendarEvent, zone: string): number | null => isoToMillis(e.startIso, zone)
 
 /**
+ * Does this event occupy any part of the half-open window [fromMillis, toMillis)?
+ *
+ * Extracted from `computeLeaveByPlan`'s overrun check, which was the only overlap test in the
+ * system, so that a second caller cannot grow a second answer to the same question. The two
+ * exclusions are the whole reason it is a function rather than an inlined comparison.
+ *
+ * An all-day entry never counts. It spans midnight to midnight, so any caller that forgot would
+ * conclude the owner is busy for twenty-four hours — which for the leave-by planner means every
+ * departure that day reads as double-booked, and for a day plan means that a single "Annual leave"
+ * makes the day off the one day nothing can be planned on.
+ *
+ * Half-open at both ends, so 10:00-11:00 and 11:00-12:00 do NOT overlap. Back-to-back is what a
+ * planned day is supposed to look like, and a closed comparison would refuse to write the second
+ * block of every pair.
+ */
+export function overlapsWindow(
+  e: CalendarEvent,
+  fromMillis: number,
+  toMillis: number,
+  zone: string,
+): boolean {
+  if (e.isAllDay || e.status === 'cancelled') return false
+  const start = isoToMillis(e.startIso, zone)
+  const end = isoToMillis(e.endIso, zone)
+  return start !== null && end !== null && start < toMillis && end > fromMillis
+}
+
+/**
  * Where the journey starts. NEVER a guess — an unknown origin returns null and the caller degrades
  * to the estimate ladder, which can never auto-arm.
  *
@@ -498,12 +526,9 @@ export async function computeLeaveByPlan(req: LeaveByRequest): Promise<LeaveByPl
 
   // Someone is still in the room with them when they should be walking out. Worth offering, never
   // worth arming unasked: the honest answer is a conversation, not a ringer.
-  const overrun = events.some((e) => {
-    if (eventKeyOf(e) === eventKey || e.isAllDay || e.status === 'cancelled') return false
-    const start = isoToMillis(e.startIso, zone)
-    const end = isoToMillis(e.endIso, zone)
-    return start !== null && end !== null && start < startMillis && end > leaveAtMillis
-  })
+  const overrun = events.some(
+    (e) => eventKeyOf(e) !== eventKey && overlapsWindow(e, leaveAtMillis, startMillis, zone),
+  )
   if (overrun) {
     return {
       ...priced,
@@ -585,6 +610,53 @@ export async function armLeaveByPlan(
     scheduleRecheck(device, plan, now)
   }
   return { ...plan, armed: true }
+}
+
+/**
+ * Retire any leave-by machinery hanging off an event that has just been removed or moved.
+ *
+ * The recheck already does this when it runs (`handlers/leaveBy.ts` cancels both alarms when the
+ * event has vanished), but it runs exactly ONCE, at departure minus forty-five minutes. Delete the
+ * event after that moment and nothing else ever looks: the alarm stays armed and the phone rings,
+ * at full volume, over the lockscreen, to send the owner somewhere they are no longer going. That
+ * is the single worst outcome this feature can produce, and it is the one the ringer is loudest
+ * about.
+ *
+ * No lookup table is needed because the ids are DERIVED - `leaveByAlarmId`/`wakeAlarmId` are a
+ * hash of (kind, deviceId, eventKey, dayKey), so the alarm for an event can be recomputed from the
+ * event. That property was built to make duplicate alarms unrepresentable; it pays for itself a
+ * second time here.
+ *
+ * Three days are checked rather than one. An event that MOVED is re-armed by the recheck under the
+ * ids it was originally armed with (`handlers/leaveBy.ts` pins them deliberately), so the live
+ * alarm can be filed under the day the event used to be on rather than the day it is on now.
+ *
+ * Only rows that exist and are still ARMED are touched, so this never pushes a pointless CANCEL to
+ * the phone. `cancelAlarm` also drops the recheck job anchored on the id, which is what stops a
+ * deleted event leaving a job behind to wake up and find nothing.
+ */
+export async function releaseLeaveByFor(
+  device: Device,
+  eventKey: string,
+  eventStartMillis: number,
+): Promise<string[]> {
+  const cancelled: string[] = []
+  const day = DateTime.fromMillis(eventStartMillis, { zone: device.timezone })
+  for (const offset of [-1, 0, 1]) {
+    const dayKey = localDateKey(day.plus({ days: offset }).toMillis(), device.timezone)
+    for (const id of [
+      leaveByAlarmId(device.deviceId, eventKey, dayKey),
+      wakeAlarmId(device.deviceId, eventKey, dayKey),
+    ]) {
+      if (getAlarm(id)?.state !== 'ARMED') continue
+      await cancelAlarm(device, id)
+      cancelled.push(id)
+    }
+  }
+  if (cancelled.length > 0) {
+    log.info({ deviceId: device.deviceId, eventKey, cancelled }, 'leave-by: released for a removed or moved event')
+  }
+  return cancelled
 }
 
 /**
