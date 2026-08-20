@@ -5,6 +5,7 @@ import { newAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
 import { MAX_WAKE_ROUNDS, wakeCheckAt, wakeText } from '../lib/wakeLadder.js'
 import { armAlarm, getAlarm, recordServerEvent } from './alarms.js'
+import { commitmentAt } from './commitments.js'
 import { getDevice, type Device } from './devices.js'
 import { cancelJobs, cancelJobsForDevice, enqueueJob, jobPayload, type Job } from './jobs.js'
 import { enqueueAndTryFlush, windowOpen } from './outbox.js'
@@ -151,6 +152,25 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
   // they were up.
   if (device.lastActivityAt !== null && device.lastActivityAt >= startedAt) {
     log.info({ alarmId: job.alarmId, round }, 'wake-check answered by owner activity; standing down')
+    return null
+  }
+
+  // Stood down, not deferred, and placed here rather than at the sends below so it covers the
+  // backup alarm in the same breath.
+  //
+  // The question this ladder asks is "are you awake?", and sitting in a meeting with other people
+  // answers it at least as well as a tapped Done does — which is precisely the argument the
+  // lastActivityAt check above already makes. Deferring instead would ask "you up?" at 11:00.
+  //
+  // Deliberately NO recordServerEvent. WAKE_CHECK_FAILED is read straight back to the owner as
+  // evidence, and the reasoning written over `escalate` below is that the record must never accuse
+  // someone of sleeping through a question nobody was in a position to ask them.
+  //
+  // This is also why the outbox gate needs no wake_check exemption: without this, every round would
+  // be silently dropped there, the ladder would run out, and `escalate` would arm a backup alarm
+  // that the commitment rule then holds — the owner asleep, and every safety net quietly removed.
+  if ((await commitmentAt(device, Date.now())) !== null) {
+    log.info({ alarmId: job.alarmId, round }, 'wake-check: the owner is in a timed commitment, so they are up; standing down')
     return null
   }
 

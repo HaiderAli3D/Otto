@@ -139,7 +139,17 @@ export async function createReminder(
   const now = Date.now()
   const reminderId = newReminderId()
   const dueAtMillis = params.dueAtMillis ?? null
-  const timingKind = params.timing ?? DEFAULT_TIMING_KIND
+  // A time the owner gave and did not explain means "have it done BY then", not "start telling me
+  // then". `trigger` has zero lead rungs at every intensity, so defaulting a dated reminder to it
+  // meant the first word Otto ever said about it arrived once the moment had already gone.
+  //
+  // Set HERE and not on the column. `db/schema.ts` must keep defaulting to `trigger`, because that
+  // is what every row written before the column existed actually behaves like, and moving it would
+  // silently rewrite their ladders. This only decides what a NEW reminder gets when the model did
+  // not say — and `trigger` is still exactly one word away, which is what "remind me at 4" picks.
+  //
+  // Undated "someday" reminders keep DEFAULT_TIMING_KIND: with no due time there is nothing to lead.
+  const timingKind = params.timing ?? (dueAtMillis === null ? DEFAULT_TIMING_KIND : 'deadline')
   // `persistent` rather than `gentle`: the owner asked to be chased properly by default, and rung 0
   // is the due instant either way, so nothing about the first message changes.
   const nagPolicy = params.nagPolicy ?? 'persistent'
@@ -178,6 +188,7 @@ export async function createReminder(
     escalateWithAlarm,
     alarmId,
     completedAtMillis: null,
+    assumedAttendedAtMillis: null,
     completedCount: 0,
     createdAt: now,
     updatedAt: now,
@@ -449,7 +460,16 @@ export function reopenReminder(device: Device, reminderId: string): boolean {
   const now = Date.now()
   const nag = nextNagAt(ladderParams(device, r, r.nagCount, now))
   db.update(reminders)
-    .set({ state: 'OPEN', completedAtMillis: null, nextNagAtMillis: nag, updatedAt: now })
+    // `assumedAttendedAtMillis` is cleared too. Reopening is most often the owner answering "no, I
+    // wasn't there" to the assumed-attendance check-in, and leaving the stamp behind would mark
+    // the eventual real completion as an assumption.
+    .set({
+      state: 'OPEN',
+      completedAtMillis: null,
+      assumedAttendedAtMillis: null,
+      nextNagAtMillis: nag,
+      updatedAt: now,
+    })
     .where(eq(reminders.reminderId, reminderId))
     .run()
   if (nag !== null) enqueueJob('nudge', nag, { reminderId, deviceId: r.deviceId })

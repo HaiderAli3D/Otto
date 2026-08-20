@@ -225,6 +225,7 @@ export function ensureSchema(): void {
   ensureColumn('reminders', 'planned_at_millis', 'planned_at_millis INTEGER')
   ensureColumn('reminders', 'nag_plan', 'nag_plan TEXT')
   ensureColumn('reminders', 'last_escalated_at_millis', 'last_escalated_at_millis INTEGER')
+  ensureColumn('reminders', 'assumed_attended_at_millis', 'assumed_attended_at_millis INTEGER')
 
   // device_settings: the entire column set, matching `deviceSettings` in schema.ts. SQLite accepts
   // ADD COLUMN ... NOT NULL only with a constant DEFAULT, which every non-null column here supplies.

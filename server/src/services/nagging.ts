@@ -8,10 +8,11 @@ import { log } from '../lib/log.js'
 import { deferPastQuietHours } from '../lib/quietHours.js'
 import { armAlarm } from './alarms.js'
 import { budgetAllows, budgetResetsAt } from './budget.js'
+import { assumedAttendedText, commitmentAt } from './commitments.js'
 import { getDevice } from './devices.js'
 import { enqueueJob } from './jobs.js'
-import { enqueueAndTryFlush } from './outbox.js'
-import { getReminder, ladderParams, resolvedPlanFor } from './reminders.js'
+import { enqueueAndTryFlush, supersedePending } from './outbox.js'
+import { completeReminder, getReminder, ladderParams, leadCountFor, resolvedPlanFor } from './reminders.js'
 import { nagQuietHours } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
 
@@ -53,6 +54,11 @@ export async function runNudge(reminderId: string): Promise<void> {
 
   const device = getDevice(before.deviceId)
   if (!device) return
+
+  // Hoisted above the gates below: the assumed-attendance check-in needs to know there is somewhere
+  // to send it BEFORE it closes anything. Silently closing a reminder nobody can be told about
+  // would lose it.
+  const waUserId = before.waUserId ?? device.whatsappNumber
 
   const now = Date.now()
   if (now - scheduledAt > STALE_NUDGE_MS) {
@@ -135,6 +141,102 @@ export async function runNudge(reminderId: string): Promise<void> {
     return
   }
 
+  // Inside a timed commitment. Deferred BEFORE the claim, exactly like the two gates above, so a
+  // held rung costs no rung and cannot inflate the "chased N×" counter the persona cites as its
+  // whole evidence. Third of the three on purpose: quiet hours is arithmetic, the budget is one
+  // SQL count, this is a network read — so a rung already stopped by either never pays for it.
+  //
+  // TWO EXEMPTIONS DELIBERATELY DO NOT CARRY OVER FROM THE GATES ABOVE:
+  //
+  // - `ownersOwnDueTime`. Quiet hours never move the instant the owner picked themselves. This
+  //   does, because a reminder due at 19:00 during a 19:00 dinner is the exact case the rule was
+  //   asked for — the owner named that time before the dinner existed, and honouring it now means
+  //   interrupting the thing they named it for.
+  // - `escalateWithAlarm`. `nagQuietHours` exempts those wholesale, ringing included. Here it is
+  //   held, because the alarm it would raise is one OTTO raises: their own alarms and their
+  //   leave-by alarms still ring, and neither passes through this module.
+  //
+  // Composed through `deferPastQuietHours` so a meeting ending at 23:30 cannot smuggle a rung past
+  // the window the owner set.
+  const commitment = await commitmentAt(device, now)
+  if (commitment !== null) {
+    const resumeAt = deferPastQuietHours(commitment.endMillis, device.timezone, quiet)
+    const moved = db
+      .update(reminders)
+      .set({ nextNagAtMillis: resumeAt, updatedAt: now })
+      .where(and(eq(reminders.reminderId, reminderId), eq(reminders.nextNagAtMillis, scheduledAt)))
+      .run()
+    if (moved.changes === 0) {
+      log.debug({ reminderId }, 'commitment deferral lost the claim; another path handled it')
+      return
+    }
+    enqueueJob('nudge', resumeAt, { reminderId, deviceId: device.deviceId })
+    // Back-to-back meetings terminate on their own: the first one's end is covered by the second
+    // (the overlap test is closed at the start), so the next run simply defers again.
+    log.info(
+      { reminderId, resumeAt, commitment: commitment.summary },
+      'nudge fell inside a timed commitment; moved to its end without burning a rung',
+    )
+    return
+  }
+
+  // The rung that was due while they were booked, now that the booking is over. Assume it happened.
+  //
+  // This is the whole point of the feature: the owner should never have to interrupt a meeting to
+  // tell Otto they are in it. So the reminder closes itself and says so ONCE, and "no" is the only
+  // thing that reopens it — silence means it went fine.
+  //
+  // Two free conditions bound this to at most one extra calendar read per reminder for its whole
+  // life. `nagCount === leadCount` is the rung sitting on the due instant (see `rungPhaseFor`), and
+  // `scheduledAt > dueAtMillis` means something pushed it — which for a due rung only the block
+  // above ever does, since `nextNagAt` exempts the owner's own instant from quiet hours.
+  //
+  // The calendar is asked AGAIN rather than remembered from above, on the leave-by recheck's
+  // argument: the dinner may have been moved or cancelled in the meantime, and then nothing was
+  // attended and the ordinary nudge below is the right answer.
+  if (waUserId !== null && before.dueAtMillis !== null && scheduledAt > before.dueAtMillis) {
+    const during =
+      before.nagCount === leadCountFor(device, before) ? await commitmentAt(device, before.dueAtMillis) : null
+    // The rung must be one THIS gate moved, not merely one that happens to sit after a due time
+    // that had a meeting on it. `snoozeReminder` — the agent tool and the lock-screen SNOOZE button
+    // — also pushes a due rung later without touching nagCount, and closing a task the owner has
+    // just explicitly said "later" to would lose it silently. So the deferral instant has to match
+    // exactly what the block above would have written. A changed quiet-hours window makes it miss,
+    // which falls through to an ordinary nudge: the safe direction to be wrong in.
+    const wasHeldByThisGate =
+      during !== null && deferPastQuietHours(during.endMillis, device.timezone, quiet) === scheduledAt
+    if (during !== null && wasHeldByThisGate && during.endMillis <= now) {
+      supersedePending(reminderId)
+      // completeReminder, NOT a hand-rolled close. It releases the rented alarm so a ring:true
+      // reminder does not still go off, cancels the queued nudge jobs, withdraws the lock-screen
+      // notification, and rolls a recurring reminder forward instead of ending the series.
+      await completeReminder(device, reminderId)
+      // Stamped to the completion's OWN instant, read back rather than recomputed, so the two are
+      // exactly equal. `services/signals.ts` counts the record on `completedAtMillis`, and an
+      // assumption is not an achievement — THE_RECORD says never to round it up.
+      const closed = getReminder(reminderId)
+      if (closed?.completedAtMillis != null) {
+        db.update(reminders)
+          .set({ assumedAttendedAtMillis: closed.completedAtMillis, updatedAt: Date.now() })
+          .where(eq(reminders.reminderId, reminderId))
+          .run()
+      }
+      await enqueueAndTryFlush({
+        waUserId,
+        deviceId: device.deviceId,
+        kind: 'nudge',
+        body: assumedAttendedText(before.title, during.summary),
+        reminderId,
+        dedupeKey: `attended:${reminderId}:${during.startMillis}`,
+      })
+      log.info(
+        { reminderId, commitment: during.summary },
+        'reminder was due inside a commitment; closed as assumed-attended',
+      )
+      return
+    }
+  }
+
   const nextRung = nextNagAt(ladderParams(device, before, before.nagCount + 1, now))
 
   const claimed = db
@@ -158,7 +260,6 @@ export async function runNudge(reminderId: string): Promise<void> {
     return
   }
 
-  const waUserId = before.waUserId ?? device.whatsappNumber
   if (!waUserId) {
     log.warn({ reminderId }, 'no WhatsApp number linked; cannot nudge')
   } else {

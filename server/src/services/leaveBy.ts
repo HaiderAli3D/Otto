@@ -270,6 +270,15 @@ export const eventKeyOf = (e: CalendarEvent): string => e.id || e.summary
 export const eventStartMillis = (e: CalendarEvent, zone: string): number | null => isoToMillis(e.startIso, zone)
 
 /**
+ * Epoch millis of an event's end, or null when it has no usable one.
+ *
+ * The twin of `eventStartMillis`, and the reason both exist: `isoToMillis` is private to this
+ * module, and `toCalendarEvent` falls back to '' when Google returned no end at all, so every
+ * caller outside here would otherwise have to reinvent the same null check.
+ */
+export const eventEndMillis = (e: CalendarEvent, zone: string): number | null => isoToMillis(e.endIso, zone)
+
+/**
  * Does this event occupy any part of the half-open window [fromMillis, toMillis)?
  *
  * Extracted from `computeLeaveByPlan`'s overrun check, which was the only overlap test in the

@@ -99,7 +99,8 @@ without shipping a new APK.
 | **Voice notes and photos** | Voice notes are transcribed and acted on. A photo is something to act on, not to narrate back at you. |
 | **Briefs and a weekly review** | A morning brief that has to earn the interruption, an optional evening one, and a Sunday review that leads with what actually happened. |
 | **Location, only when it predicts something** | Otto can ask your phone where it is — **once, when asked**, never continuously — to price a journey properly. Every single fix posts a visible notification saying it happened and what for. |
-| **Quiet hours** | Nothing proactive between 22:00–07:00 by default, with exactly four documented exemptions. It also learns the hours you actually keep — *"'first thing' for someone up at two in the afternoon means two in the afternoon"*. |
+| **Quiet hours** | Nothing proactive between 22:00–07:00 by default, with four documented exemptions — all of which the calendar rule below then overrides. It also learns the hours you actually keep — *"'first thing' for someone up at two in the afternoon means two in the afternoon"*. |
+| **Silent while you're booked** | Otto does not speak first while you are in a meeting, a dinner or an appointment. What he would have said is dropped, not saved up for the moment you walk out. Anything due while you were booked is assumed to have happened and closed — you never have to interrupt a meeting to tell Otto you're in it. Your alarms and leave-by alarms still ring. |
 
 ## How it works
 
@@ -224,6 +225,11 @@ from that. A few worth a look:
 - **Structural rules beat instructions.** The weekly review filters its "still sitting there" list
   on `state = 'OPEN'` in SQL rather than asking the model not to mention finished work. *Being
   unable to say it is stronger than being told not to.*
+- **"Don't interrupt a meeting" is three gates, not a paragraph in the prompt.** The rung is held in
+  `runNudge` before the claim so it costs no rung, the row is retired in `flushOutbox`, and the
+  wake-check stands down at its source. The prompt only *describes* what the code already
+  guarantees. It fails **open** on purpose: an unreachable calendar means Otto speaks, because an
+  assistant that goes permanently silent the day a refresh token expires is the worse failure.
 - **Everything fails soft to a template.** No API key, a timeout, a 429 — every surface degrades to
   a deterministic string. Nudges fire at 3am on a machine that may have no working credentials, and
   a nudge that doesn't send is worse than one that reads like a template.

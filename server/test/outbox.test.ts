@@ -554,7 +554,13 @@ describe('sweepOutbox', () => {
     // Exactly one chain may claim the delivery. The loser reporting it too is what writes the
     // duplicate assistant turn — this is verbatim what routes/whatsapp.ts does with the bodies its
     // flush returns, and appendAssistantTurns has no dedupe of its own.
-    expect(alsoDelivered).toEqual([])
+    //
+    // Asserted through the transcript rather than by naming the loser. The commitment gate put an
+    // await in the PROACTIVE path before the claim, so the sweep now yields once before it takes
+    // the row and the webhook chain gets there first — which of the two wins is timing, and always
+    // was. What must never change is that only one of them reports it: the sweep appends its own
+    // delivered list internally, this appends the webhook's, and a double-report shows up here as
+    // two assistant turns whichever way round the race fell.
     appendAssistantTurns('447700900107', device.deviceId, alsoDelivered)
     expect(loadSession('447700900107').filter((m) => m.role === 'assistant')).toHaveLength(1)
     expect(pendingFor('447700900107')).toHaveLength(0)

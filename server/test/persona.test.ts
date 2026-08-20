@@ -114,6 +114,19 @@ describe('the quiet-hours section describes what the code actually does', () => 
     expect(text).toContain('You never follow up on it')
     expect(text).toContain('This is the one exception to "it rings once, you never follow up on it"')
   })
+
+  it('tells the owner the calendar rule is enforced, not a promise Otto is keeping', () => {
+    // The distinction is the whole feature. "I'll try not to bother you in meetings" is worth
+    // nothing; the gates in outbox.ts, nagging.ts and wakeCheck.ts mean Otto CANNOT, and the model
+    // has to be able to say so without hedging when the owner asks.
+    const text = core('dev_pe11')
+    expect(text).toContain('# When they are booked')
+    expect(text).toContain('This is enforced in code, not left to you')
+    // The one thing that still rings, and the reason: it is what gets them out of the room on time.
+    expect(text).toMatch(/so does a leave-by\s+alarm/)
+    // And the way back out of a wrong assumption.
+    expect(text).toContain('reopen_reminder')
+  })
 })
 
 describe('nudge writer falls back', () => {
