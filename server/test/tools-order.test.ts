@@ -5,7 +5,14 @@ vi.mock('../src/fcm/sender.js', () => ({
   sendData: vi.fn(async () => ({ ok: true as const })),
 }))
 
-import { ACCOUNTABILITY, CALENDAR, JOURNEYS, PREFERENCES, REPLYING } from '../src/agent/promptSections.js'
+import {
+  ACCOUNTABILITY,
+  CALENDAR,
+  JOURNEYS,
+  PREFERENCES,
+  REMINDER_TIMING,
+  REPLYING,
+} from '../src/agent/promptSections.js'
 import { buildTools, runTool } from '../src/agent/tools.js'
 
 /**
@@ -188,5 +195,43 @@ describe('the cached prefix does not contradict itself', () => {
     expect(autoLeaveBy).toMatch(/nothing currently plans journeys on its own/i)
     expect(PREFERENCES).toContain('You never plan a journey they did not ask you to plan.')
     expect(PREFERENCES).not.toContain('whether you arm wake-up\n  and leave-by alarms on your own')
+  })
+
+  it('settles which of quiet hours and the calendar wins, in the one section that states both', () => {
+    // ACCOUNTABILITY promises four exemptions from quiet hours, and pins the promise so precisely
+    // that the case above asserts the exact sentence. The commitment rule takes all four back, and
+    // it sits in the SAME const forty lines further down — so without this the cached prefix would
+    // carry two exception lists that flatly disagree, which is the failure this whole suite exists
+    // for. Named the way # Wake-checks names its own override, rather than left to be inferred.
+    expect(ACCOUNTABILITY).toContain('# When they are booked')
+    expect(ACCOUNTABILITY).toMatch(/All four are about the CLOCK/)
+    expect(ACCOUNTABILITY).toMatch(/one exception to "four things go through\s+regardless"/)
+    // The code drops these rows; it does not hold them. A prompt that promises a backlog would have
+    // Otto apologising for messages that no longer exist.
+    expect(ACCOUNTABILITY).toMatch(/DROPPED, not saved up/)
+    expect(ACCOUNTABILITY).toMatch(/never tell them you queued something/i)
+    // The way back, and the one tool that does it. `reopen_reminder` is real — pinned above.
+    expect(ACCOUNTABILITY).toContain('reopen_reminder')
+  })
+
+  it('does not offer to switch off a rule that has no switch', () => {
+    // Same class as the autoLeaveByAlarm case above. PREFERENCES teaches the model that
+    // set_preferences is what changes "when you must stay silent", so "message me during meetings,
+    // I don't mind" would get a confident yes and then nothing, forever — the commitment gate is in
+    // code with no setting behind it.
+    expect(ACCOUNTABILITY).toMatch(/This is not a setting\. set_preferences cannot turn it off/)
+    expect(Object.keys(schemaOf('set_preferences'))).not.toContain('commitments')
+  })
+
+  it('agrees with the tool block about what an unexplained due time means', () => {
+    // `create_reminder`'s description and REMINDER_TIMING sit ~7,000 tokens apart in the same cached
+    // prefix, and the model reads both. `trigger` has no lead rungs at any intensity, so while it
+    // was the default an unclassified "by four" said nothing until four had gone. The default now
+    // lives in createReminder, and BOTH halves of the prefix have to say so or the model will keep
+    // passing the old one by hand.
+    const timing = schemaOf('create_reminder').timing!.description!
+    expect(timing).not.toMatch(/Defaults to trigger\./)
+    expect(timing).toMatch(/Defaults to deadline whenever dueLocalISO is given/)
+    expect(REMINDER_TIMING).toMatch(/A time with no shape stated is a DEADLINE/)
   })
 })

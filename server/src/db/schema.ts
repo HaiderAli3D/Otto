@@ -209,6 +209,15 @@ export const reminders = sqliteTable(
     escalateWithAlarm: integer('escalate_with_alarm', { mode: 'boolean' }).notNull().default(false),
     alarmId: text('alarm_id'),
     completedAtMillis: integer('completed_at_millis'),
+    // Set to the SAME instant as completedAtMillis when a reminder was closed because its due time
+    // fell inside a calendar commitment and Otto assumed the owner was there. Equality is what the
+    // record filters on, so a later genuine completion — which writes a new completedAtMillis and
+    // leaves this one behind — stops matching and counts again.
+    //
+    // It exists because services/signals.ts counts "finished" off completedAtMillis, and an
+    // assumption is not an achievement. THE_RECORD tells the model those numbers are the whole of
+    // its evidence and to never round them up; this is that rule in code rather than in prose.
+    assumedAttendedAtMillis: integer('assumed_attended_at_millis'),
     completedCount: integer('completed_count').notNull().default(0),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),

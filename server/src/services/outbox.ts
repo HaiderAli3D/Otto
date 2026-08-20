@@ -5,6 +5,7 @@ import { outbox } from '../db/schema.js'
 import { log } from '../lib/log.js'
 import { inQuietHours, type QuietHours } from '../lib/quietHours.js'
 import { budgetAllows } from './budget.js'
+import { commitmentAt } from './commitments.js'
 import { clearInboundWindow, getDevice, listDevices, markTemplateSent, type Device } from './devices.js'
 import { pushOutboxRow } from './push.js'
 import { appendAssistantTurns } from './sessions.js'
@@ -251,6 +252,10 @@ function releaseStaleClaims(waUserId: string, now: number): void {
  * it just queued) and turns on the quiet-hours gate for the kinds that are not exempt. The inbound
  * path passes nothing: the owner is right there, and holding their own queue back from them is not
  * what quiet hours mean.
+ *
+ * The commitment gate rides on the same flag, and is the one place in this function that RETIRES a
+ * row rather than holding it. See its comment in the loop for why that verb, and why it has no
+ * exempt-kind list.
  */
 export async function flushOutbox(
   waUserId: string,
@@ -262,6 +267,11 @@ export async function flushOutbox(
   const rows = pendingFor(waUserId)
   if (rows.length === 0) return []
   const delivered: string[] = []
+
+  // ONE calendar read per proactive pass, hoisted out of the loop and taken only once there is
+  // something to deliver. `releaseStaleClaims` has already run — it must precede the first await —
+  // and every row below is still taken with a guarded UPDATE, so this yield cannot cost a row.
+  const commitment = opts.proactiveFor ? await commitmentAt(opts.proactiveFor, now) : null
 
   for (const row of rows) {
     if (row.expiresAtMillis !== null && row.expiresAtMillis < now) {
@@ -288,6 +298,30 @@ export async function flushOutbox(
     // weekly review, the digest. Held, not retired — the row keeps its TTL and goes out tomorrow.
     if (opts.proactiveFor && row.kind !== 'nudge' && !budgetAllows(opts.proactiveFor, row.kind as OutboxKind, {}, now)) {
       log.info({ waUserId, id: row.id, kind: row.kind }, 'outbox: daily message budget spent; holding')
+      continue
+    }
+    // DROPPED, not held — the one place in this file where that is the right verb.
+    //
+    // The position is the decision. A row the two gates above are HOLDING was never going out in
+    // this pass anyway, so it keeps its TTL and its place; only a row that would genuinely have
+    // interrupted the owner mid-meeting is retired. Saving them up would deliver the same
+    // interruption late, as a burst, on the way out of the room.
+    //
+    // SUPERSEDED rather than a new state: it already means "retired without ever being read", gc
+    // already sweeps it, `budget.ts` does not count it, and `nudgeHistory` excludes it — so the
+    // nudge writer will not think it already said this.
+    //
+    // NO EXEMPT-KIND LIST, deliberately. A second list beside QUIET_EXEMPT_KINDS reintroduces the
+    // "which one governs this?" ambiguity a hard rule exists to remove. The one genuinely dangerous
+    // case — a dropped wake_check leaving someone asleep — is answered at its source in
+    // services/wakeCheck.ts, which stands the whole ladder down rather than letting it be silently
+    // swallowed here.
+    if (commitment !== null) {
+      markSuperseded([row.id])
+      log.info(
+        { waUserId, id: row.id, kind: row.kind, until: commitment.endMillis },
+        'outbox: dropped a proactive message; the owner is inside a timed commitment',
+      )
       continue
     }
     // Enough for one pass; the rest keep their place in the queue for the next one.
@@ -449,11 +483,18 @@ export function shouldKnock(params: {
   template: { name: string; lang: string } | null | undefined
   now: number
   quietHours?: QuietHours
+  /** Passed IN for the same reason `quietHours` is: this function is pure, the answer is a read. */
+  inCommitment?: boolean
 }): boolean {
   const { rows, device, template, now } = params
   if (!template) return false
   // A knock is for a window that is SHUT. While it is open the real queue goes out as itself.
   if (windowOpen(device, now)) return false
+
+  // A knock is a push on the lock screen, so it is a message by any honest reading of the rule.
+  // Same argument as the quiet-hours line below, and a stronger one: the queue will still be there
+  // when the meeting ends.
+  if (params.inCommitment === true) return false
 
   const worthKnocking = rows.some(
     (r) =>
@@ -516,7 +557,10 @@ export async function sweepOutbox(now: number = Date.now()): Promise<void> {
       continue
     }
 
-    if (!shouldKnock({ rows: live, device, template, now })) continue
+    // Computed only on this branch, and only with a template configured, so the default install
+    // pays nothing: the sweep reaches here just when the WhatsApp window is already shut.
+    const inCommitment = template !== null && (await commitmentAt(device, now)) !== null
+    if (!shouldKnock({ rows: live, device, template, now, inCommitment })) continue
     // Start the cooldown on the ATTEMPT, before the send, not on its outcome.
     //
     // `sendTemplate` classifies an abort/timeout and a 5xx as transient, and a template Meta

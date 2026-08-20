@@ -32,10 +32,36 @@ beforeEach(() => ensureSchema())
 const inHours = (h: number): number => Date.now() + h * 3_600_000
 
 describe('timing kinds', () => {
-  it('defaults to trigger, which is what keeps every pre-timing reminder on its old ladder', async () => {
+  it('defaults a DATED reminder to deadline, so the first word arrives before the time, not after', async () => {
+    // The owner's complaint, pinned. `trigger` has no lead rungs at any intensity, so while it was
+    // the default an unclassified "by four" said nothing at all until four had already gone — the
+    // one moment at which a reminder to finish something is worthless.
+    //
+    // 48 hours out, like the explicit-deadline test below it, and for the same reason that file's
+    // header warns about: the suite runs at whatever the wall clock says, and a run-up measured in
+    // hours can be entirely inside the default 22:00-07:00 window, where every lead is pruned for
+    // landing past its own deadline. Two days out always leaves one standing.
     const device = makeDevice('dev_t1')
-    const due = inHours(4)
+    const due = inHours(48)
     const r = await createReminder(device, { title: 'call Teal', dueAtMillis: due })
+    expect(r.timingKind).toBe('deadline')
+    expect(leadCountFor(device, r)).toBeGreaterThan(0)
+    expect(r.nextNagAtMillis).toBeLessThan(due)
+  })
+
+  it('still defaults an UNDATED reminder to trigger, because there is nothing to lead', async () => {
+    const device = makeDevice('dev_t1b')
+    const r = await createReminder(device, { title: 'sort the loft out' })
+    expect(r.timingKind).toBe('trigger')
+    expect(r.nextNagAtMillis).toBeNull()
+  })
+
+  it('keeps trigger exactly as it was when it is asked for by name', async () => {
+    // "remind me AT four" is still one word away, and still says nothing beforehand. The default
+    // moved; the kind did not.
+    const device = makeDevice('dev_t1c')
+    const due = inHours(4)
+    const r = await createReminder(device, { title: 'call Teal', dueAtMillis: due, timing: 'trigger' })
     expect(r.timingKind).toBe('trigger')
     // Rung 0 IS the due instant: a trigger says nothing beforehand.
     expect(r.nextNagAtMillis).toBe(due)
@@ -177,7 +203,9 @@ describe('updateReminder', () => {
 
   it('switches a trigger into a deadline and grows a run-up', async () => {
     const device = makeDevice('dev_u4')
-    const r = await createReminder(device, { title: 'the essay', dueAtMillis: inHours(48) })
+    // Explicitly a trigger: this test is about the SWITCH, and a dated reminder now defaults to
+    // deadline, which would start it with the run-up it is meant to be growing.
+    const r = await createReminder(device, { title: 'the essay', dueAtMillis: inHours(48), timing: 'trigger' })
     expect(leadCountFor(device, r)).toBe(0)
 
     await updateReminder(device, r.reminderId, { timing: 'deadline', resetChase: true })

@@ -114,6 +114,43 @@ describe('owner record — reminders', () => {
     expect(r.remindersOpen).toBe(2)
   })
 
+  it('does not count a reminder Otto only ASSUMED was done', () => {
+    // The commitment rule closes a reminder whose due time fell inside a meeting, without ever
+    // hearing from the owner. Counting that as finished would have Otto reading "you finished four
+    // things" back as evidence when he witnessed one — and THE_RECORD tells the model these numbers
+    // are the whole of its evidence and to never round them up.
+    //
+    // Equality of the two stamps is the test, which is why nagging.ts reads the completion back
+    // rather than recomputing the instant.
+    const d = 'dev_s5b'
+    reminder(d, { reminderId: 'rem_real', title: 'actually done', state: 'DONE', completedAtMillis: NOW - DAY })
+    reminder(d, {
+      reminderId: 'rem_assumed',
+      title: 'assumed done',
+      state: 'DONE',
+      completedAtMillis: NOW - DAY,
+      assumedAttendedAtMillis: NOW - DAY,
+    })
+
+    expect(ownerRecord(d, NOW).remindersFinished).toBe(1)
+  })
+
+  it('counts it again once the owner says they missed it and later really finishes it', () => {
+    // reopenReminder clears the stamp, so a genuine completion afterwards is a genuine completion.
+    // Belt and braces: even a stale stamp left behind would stop matching, because the new
+    // completion writes a different instant.
+    const d = 'dev_s5c'
+    reminder(d, {
+      reminderId: 'rem_redone',
+      title: 'went back and did it',
+      state: 'DONE',
+      completedAtMillis: NOW - DAY,
+      assumedAttendedAtMillis: NOW - 3 * DAY,
+    })
+
+    expect(ownerRecord(d, NOW).remindersFinished).toBe(1)
+  })
+
   it('reports the oldest open item with its counters', () => {
     const d = 'dev_s6'
     reminder(d, { reminderId: 'rem_new', title: 'recent', createdAt: NOW - DAY })

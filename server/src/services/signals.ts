@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, gte, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { alarmEvents, reminders } from '../db/schema.js'
 import { epochMillisToLocalHuman } from './time.js'
@@ -35,6 +35,25 @@ export type OwnerRecord = {
   remindersDropped: number
   remindersOpen: number
   longestOpen: { title: string; days: number; chased: number; moved: number } | null
+}
+
+/**
+ * Completions Otto actually witnessed, as opposed to ones he assumed.
+ *
+ * A reminder closed by the assumed-attendance check-in (services/nagging.ts) writes
+ * `assumedAttendedAtMillis` to the SAME instant as `completedAtMillis`, so equality is the test.
+ * A later genuine completion — after the owner said "no, I wasn't there" and it was reopened —
+ * writes a new `completedAtMillis` and stops matching, so it counts again.
+ *
+ * This is here rather than in the caller because THE_RECORD tells the model these numbers are the
+ * whole of its evidence and to never round them up. "You finished twelve things this week" when
+ * five of them were guesses is exactly the bluff the persona forbids.
+ */
+function notAssumed() {
+  return or(
+    isNull(reminders.assumedAttendedAtMillis),
+    ne(reminders.assumedAttendedAtMillis, reminders.completedAtMillis),
+  )
 }
 
 function scalar(query: { get: () => { n: number } | undefined }): number {
@@ -74,7 +93,7 @@ export function ownerRecord(deviceId: string, nowMillis: number = Date.now()): O
     db
       .select({ n: sql<number>`count(*)` })
       .from(reminders)
-      .where(and(eq(reminders.deviceId, deviceId), gte(reminders.completedAtMillis, since))),
+      .where(and(eq(reminders.deviceId, deviceId), gte(reminders.completedAtMillis, since), notAssumed())),
   )
 
   const remindersDropped = scalar(
@@ -201,6 +220,7 @@ export function weeklyRecord(deviceId: string, nowMillis: number = Date.now()): 
         eq(reminders.deviceId, deviceId),
         gte(reminders.completedAtMillis, since),
         lt(reminders.completedAtMillis, until),
+        notAssumed(),
       ),
     )
     .orderBy(desc(reminders.completedAtMillis))

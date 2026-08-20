@@ -42,7 +42,10 @@ export const reminderTools: ToolDef[] = [
             'shortly after, then stop. ' +
             'trigger — the time is when they want to be TOLD, not when the thing happens ("remind ' +
             'me at 4", "give me a shout at half six"). You say nothing beforehand and start chasing ' +
-            'from that moment. Defaults to trigger.',
+            'from that moment. ' +
+            'Defaults to deadline whenever dueLocalISO is given, because a time someone states and ' +
+            'does not explain is almost always the moment a thing has to be done BY. An undated ' +
+            'reminder defaults to trigger, since there is nothing to lead.',
         },
         recurrence: {
           type: 'string',

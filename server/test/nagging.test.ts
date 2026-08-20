@@ -184,7 +184,14 @@ describe('runNudge across a quiet window that swallows several rungs', () => {
     const device = reachableDevice('dev_ng7')
     updateSettings(device.deviceId, { quietHours: '22:00-07:00' })
     const due = utc('2026-08-03T23:00:00')
-    const r = await createReminder(device, { title: 'take the pills', dueAtMillis: due, nagPolicy: 'persistent' })
+    // Pinned to `trigger` by name: the rung times this test is about (23:30, 01:00, 05:00) are
+    // trigger x persistent, and a dated reminder now defaults to deadline, whose chase list differs.
+    const r = await createReminder(device, {
+      title: 'take the pills',
+      dueAtMillis: due,
+      timing: 'trigger',
+      nagPolicy: 'persistent',
+    })
     // Rung 0 is the owner's own due time, so it fires inside the window by design.
     expect(getReminder(r.reminderId)!.nextNagAtMillis).toBe(due)
 
