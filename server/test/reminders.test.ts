@@ -32,7 +32,13 @@ describe('reminder lifecycle', () => {
     const r = await createReminder(device, { title: 'take the bins out', dueAtMillis: due })
 
     expect(r.state).toBe('OPEN')
-    expect(r.nextNagAtMillis).toBe(due)
+    // A rung exists and lands no later than the due time. Deliberately NOT `toBe(due)`: a dated
+    // reminder defaults to `deadline` now, so the first rung is normally a run-up warning — and
+    // how many of those survive depends on where `due` falls against the device's quiet window,
+    // which moves with the wall clock this file runs on. Pinning the exact instant made this pass
+    // or fail by the hour of day.
+    expect(r.nextNagAtMillis).not.toBeNull()
+    expect(r.nextNagAtMillis!).toBeLessThanOrEqual(due)
     // A nudge job exists for it — this is what the scheduler will pick up.
     const jobs = dueJobs(due + 1000).filter((j) => j.kind === 'nudge' && j.reminderId === r.reminderId)
     expect(jobs.length).toBe(1)
