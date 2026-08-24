@@ -237,6 +237,30 @@ describe('the cached prefix does not contradict itself', () => {
     expect(REMINDER_TIMING).toMatch(/A time with no shape stated is a DEADLINE/)
   })
 
+  it('will not let Otto reach for the silent kind on its own', () => {
+    // `trigger` says nothing before the moment, which is the exact complaint this whole change
+    // answers. It stays reachable — "don't say a word until four" is a real thing to want — but the
+    // tool block used to present it as one of three equal options, described in the same neutral
+    // voice as the other two, next to the example "remind me at 4". So the model picked it for the
+    // most common phrasing there is.
+    const timing = schemaOf('create_reminder').timing!.description!
+    expect(timing).toMatch(/never the tidy choice and never the safe one/)
+    expect(timing).toMatch(/"remind me at 4"/)
+    expect(REMINDER_TIMING).toMatch(/trigger is the one you never reach for/)
+    expect(REMINDER_TIMING).toMatch(/"Remind me at four" is a deadline too/)
+  })
+
+  it('does not offer a reminder that is written down and never mentioned again', () => {
+    // dueLocalISO used to invite omission in as many words — "an undated 'someday' reminder that
+    // only appears in lists and digests" — and that was an accurate description of the code, which
+    // scheduled nothing at all for one. Both halves changed together.
+    const due = schemaOf('create_reminder').dueLocalISO!.description!
+    expect(due).not.toMatch(/only appears in lists and digests/)
+    expect(due).toMatch(/Work one out even when they did not give you a time/)
+    expect(schemaOf('update_reminder').clearDue!.description!).toMatch(/still\s+chase an undated reminder/)
+    expect(REMINDER_TIMING).toMatch(/No time at all is still a reminder you chase/)
+  })
+
   it('states one default intensity, in the code and in both halves of the prefix', () => {
     // Interpolated rather than written out, which is the whole point: the constant is the only
     // place `hard` is decided, so prose that disagrees with it cannot compile past this line. The

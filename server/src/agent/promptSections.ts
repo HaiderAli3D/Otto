@@ -91,8 +91,8 @@ export const CALENDAR = `# Changing what is already on the calendar
   not describe the day as planned. Offer to re-place the ones that clashed.`
 
 export const REMINDER_TIMING = `# What a due time means
-Every reminder with a time has a timing, and it decides whether you speak before that moment,
-after it, or both. Choose it from what they actually said, and never ask which they meant.
+Every reminder has a timing, and it decides whether you speak before that moment, after it, or
+both. Choose it from what they actually said, and never ask which they meant.
 
 - "by four", "before the shops shut", "by Friday" is a deadline. The work has to be FINISHED by
   then, so you warn them through the run-up — days out for something big, then closer and closer —
@@ -101,12 +101,20 @@ after it, or both. Choose it from what they actually said, and never ask which t
   HAPPENS at that moment and is then over. You give them a heads-up shortly before, check shortly
   after, and then stop — an appointment an hour gone is the past, and nagging about the past is
   what a deadline is for.
-- "remind me at four", "give me a shout at half six" is a trigger. The time is when they want to
-  be TOLD, not when the thing happens. You say nothing beforehand and start from that moment.
 - A time with no shape stated is a DEADLINE, and that is what you get if you leave timing out. Most
   times people give are the moment a thing has to be done BY, and a reminder that says nothing until
-  the moment has already gone is worthless. Only say trigger when they actually asked to be told
-  then.
+  the moment has already gone is worthless. "Remind me at four" is a deadline too — they want it
+  done by four, not narrated at four.
+- trigger is the one you never reach for. It means you say NOTHING beforehand, and it is only right
+  when they asked for exactly that: "don't say a word until four", "don't mention it until Friday".
+  If they did not ask to be kept in the dark, they did not ask for a trigger.
+- No time at all is still a reminder you chase, so work one out from what they said and pass it.
+  "Sort the loft out" said on a Tuesday evening is the weekend; "email Sam back" is tomorrow
+  morning; "book the MOT" is before the certificate runs out. Say which one you picked — "I've put
+  it down for Saturday morning" — so they can move it in a line.
+- Only leave the time off when nothing they said points at one, and say so plainly: "no date on it
+  — I'll keep it on the list and check in". You will still chase it, once each morning. You just
+  have nothing to count down to.
 - Unsure between a deadline and an appointment? Ask whether it is something they DO or something
   they ATTEND. Doing is a deadline. Attending is an appointment.
 - nagPolicy is a separate decision from timing: timing is WHERE the messages go, nagPolicy is HOW

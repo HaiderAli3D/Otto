@@ -26,7 +26,13 @@ export const reminderTools: ToolDef[] = [
         dueLocalISO: {
           type: 'string',
           description:
-            'Local ISO 8601 with NO offset, in the device timezone, e.g. 2026-08-03T18:00:00. Omit for an undated "someday" reminder that only appears in lists and digests.',
+            'Local ISO 8601 with NO offset, in the device timezone, e.g. 2026-08-03T18:00:00. ' +
+            'Work one out even when they did not give you a time — "sort the loft out" said on a ' +
+            'Tuesday evening is the weekend, "email Sam back" is tomorrow morning, "book the MOT" ' +
+            'is before the certificate runs out. Pass it here, and say which time you picked when ' +
+            'you confirm, so they can move it in a line. Leave it out only when nothing they said ' +
+            'points at a time at all — an undated reminder is still chased, once each morning; it ' +
+            'just has no run-up to warn them through.',
         },
         timing: {
           type: 'string',
@@ -35,17 +41,19 @@ export const reminderTools: ToolDef[] = [
             'What the due time MEANS. Always set this when you pass dueLocalISO — it decides ' +
             'whether you speak before that moment, after it, or both. ' +
             'deadline — the task must be FINISHED BY then ("get it done by 4", "before the shops ' +
-            'shut", "by Friday"). You warn them several times in the run-up, then chase hard once ' +
-            'it is past. ' +
+            'shut", "by Friday", "remind me at 4"). You warn them several times in the run-up, then ' +
+            'chase hard once it is past. ' +
             'appointment — the task HAPPENS AT that moment and is then over ("the dentist is at 4", ' +
             '"call mum at 6", "the meeting starts at 9"). You prompt shortly before and check ' +
             'shortly after, then stop. ' +
-            'trigger — the time is when they want to be TOLD, not when the thing happens ("remind ' +
-            'me at 4", "give me a shout at half six"). You say nothing beforehand and start chasing ' +
-            'from that moment. ' +
-            'Defaults to deadline whenever dueLocalISO is given, because a time someone states and ' +
-            'does not explain is almost always the moment a thing has to be done BY. An undated ' +
-            'reminder defaults to trigger, since there is nothing to lead.',
+            'trigger — you say NOTHING beforehand. Pass it only when the owner has asked for exactly ' +
+            'that ("don\'t say a word until 4", "don\'t mention it until Friday"). It is never the ' +
+            'tidy choice and never the safe one: a reminder whose first word arrives after the ' +
+            'moment has gone is worthless, so if they did not ask to be kept in the dark, they did ' +
+            'not ask for a trigger. ' +
+            'Defaults to deadline whenever dueLocalISO is given, and an undated reminder is a ' +
+            'deadline waiting for a time, because a time someone states and does not explain is ' +
+            'almost always the moment a thing has to be done BY.',
         },
         recurrence: {
           type: 'string',
@@ -173,7 +181,16 @@ export const reminderTools: ToolDef[] = [
         title: { type: 'string' },
         detail: { type: 'string' },
         dueLocalISO: { type: 'string', description: 'New due time, local ISO 8601 with NO offset.' },
-        clearDue: { type: 'boolean', description: 'Drop the due time entirely, making it an undated "someday".' },
+        clearDue: {
+          type: 'boolean',
+          description:
+            'Drop the due time entirely. For when the date genuinely no longer applies ("there\'s ' +
+            'no deadline on that any more") — never to quieten something down, because you still ' +
+            'chase an undated reminder, just without a run-up. If they want a different time, pass ' +
+            'dueLocalISO instead; if they want you to stop, that is nagPolicy off or ' +
+            'cancel_reminder. A repeating reminder needs its due time to roll forward from, so pass ' +
+            'clearRecurrence alongside this to end the series.',
+        },
         timing: { type: 'string', enum: ['deadline', 'appointment', 'trigger'], description: 'As on create_reminder.' },
         nagPolicy: {
           type: 'string',
