@@ -102,6 +102,54 @@ describe('create_reminder through runTool', () => {
     expect(res.nextChasesLocal.length).toBeGreaterThan(0)
   })
 
+  it('refuses to strip the due time off a repeating reminder', async () => {
+    // create_reminder already refuses a recurrence with no due time, because `nextOccurrence` needs
+    // an anchor to roll forward from. update_reminder had no such guard, so clearDue got round it —
+    // and the next completion took the "nothing to roll to" branch and wrote DONE. The whole series
+    // ended silently, and the tool result said completed:true with no next occurrence, so Otto
+    // confirmed it cheerfully.
+    const device = nextDevice()
+    const res = await create(device, {
+      title: 'take the bins out',
+      dueLocalISO: localIso(inHours(24), device.timezone),
+      recurrence: 'FREQ=WEEKLY',
+    })
+
+    const cleared = (await runTool(device, 'update_reminder', {
+      reminderId: res.reminderId,
+      clearDue: true,
+    })) as { error?: string }
+
+    expect(cleared.error).toMatch(/repeats/)
+    const row = getReminder(res.reminderId)!
+    expect(row.dueAtMillis).not.toBeNull()
+    expect(row.recurrence).toBe('FREQ=WEEKLY')
+  })
+
+  it('lets the owner end the series and drop the date in one call', async () => {
+    // The refusal above must not be a dead end: "there's no deadline on that any more" is a real
+    // thing to want, and clearRecurrence is the answer.
+    const device = nextDevice()
+    const res = await create(device, {
+      title: 'take the bins out',
+      dueLocalISO: localIso(inHours(24), device.timezone),
+      recurrence: 'FREQ=WEEKLY',
+    })
+
+    const cleared = (await runTool(device, 'update_reminder', {
+      reminderId: res.reminderId,
+      clearDue: true,
+      clearRecurrence: true,
+    })) as { error?: string }
+
+    expect(cleared.error).toBeUndefined()
+    const row = getReminder(res.reminderId)!
+    expect(row.dueAtMillis).toBeNull()
+    expect(row.recurrence).toBeNull()
+    // And it is still chased, on the undated ladder.
+    expect(row.nextNagAtMillis).not.toBeNull()
+  })
+
   it('honours an explicit nagPolicy rather than overriding it', async () => {
     const device = nextDevice()
     const res = await create(device, {

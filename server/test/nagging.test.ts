@@ -88,6 +88,48 @@ describe('runNudge outside quiet hours', () => {
   })
 })
 
+describe('runNudge on an undated reminder', () => {
+  it('chases something with no date at all, and advances its ladder', async () => {
+    const device = reachableDevice('dev_ng_u1')
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    const r = await createReminder(device, { title: 'sort the loft out' })
+    // The rung queued at creation is for tomorrow morning; drop it so the only job left is the
+    // one this nudge produces.
+    db.delete(jobs).run()
+    setRung(r.reminderId, Date.now() - 1_000)
+
+    await runNudge(r.reminderId)
+
+    expect(sends).toHaveLength(1)
+    const after = getReminder(r.reminderId)!
+    expect(after.nagCount).toBe(1)
+    // And it comes back tomorrow rather than stopping here.
+    expect(after.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    expect(nudgeJobs(r.reminderId)).toHaveLength(1)
+  })
+
+  it('is still held by quiet hours, unlike a due time the owner picked themselves', async () => {
+    // The one exemption an undated reminder can never claim. `ownersOwnDueTime` is keyed on the rung
+    // landing ON a due instant, and there is no due instant — the anchor is a time WE chose.
+    const device = reachableDevice('dev_ng_u2')
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    const r = await createReminder(device, { title: 'sort the loft out' })
+
+    updateSettings(device.deviceId, { quietHours: windowAround(Date.now()) })
+    // The rung queued at creation is for tomorrow morning; drop it so the only job left is the one
+    // the deferral produces.
+    db.delete(jobs).run()
+    setRung(r.reminderId, Date.now() - 1_000)
+
+    await runNudge(r.reminderId)
+
+    expect(sends).toHaveLength(0)
+    // Held, not spent: deferring before the claim is what keeps the "chased N×" count honest.
+    expect(getReminder(r.reminderId)!.nagCount).toBe(0)
+    expect(nudgeJobs(r.reminderId)).toHaveLength(1)
+  })
+})
+
 describe('runNudge inside quiet hours', () => {
   it('sends nothing, burns no rung, and re-queues itself at the window end', async () => {
     // THE headline case. Deferring BEFORE the atomic claim is what makes it cost no rung — burning
@@ -131,7 +173,7 @@ describe('runNudge inside quiet hours', () => {
     expect(getReminder(r.reminderId)!.nagCount).toBe(1)
   })
 
-  it('still lets the staleness gate win — a six-hour-old rung is retired, not deferred', async () => {
+  it('still lets the staleness gate win — a six-hour-old rung is not sent, and not deferred either', async () => {
     const device = reachableDevice('dev_ng4')
     updateSettings(device.deviceId, { quietHours: 'off' })
     const r = await createReminder(device, { title: 'the recycling', dueAtMillis: Date.now() - 1_000 })
@@ -142,10 +184,20 @@ describe('runNudge inside quiet hours', () => {
 
     await runNudge(r.reminderId)
 
+    // Not sent, which is the whole point of the gate: firing this and the dozen behind it the
+    // moment the machine comes back up is the worst failure mode a queue has.
     expect(sends).toHaveLength(0)
-    // Retired for the digest to pick up, rather than moved to the window end.
-    expect(getReminder(r.reminderId)!.nextNagAtMillis).toBeNull()
-    expect(nudgeJobs(r.reminderId)).toHaveLength(0)
+    // But the chase CONTINUES. This used to write null, and nothing anywhere revives a reminder
+    // whose rung is null — no job, and the digest it claimed to hand off to reads outbox rows,
+    // which a rung retired here never produces. One restart spanning a day-start ended a reminder
+    // for good, and the owner's only clue was Otto going quiet about it.
+    const after = getReminder(r.reminderId)!
+    expect(after.nextNagAtMillis).not.toBeNull()
+    expect(after.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    expect(nudgeJobs(r.reminderId)).toHaveLength(1)
+    // The rung it could not send is spent, not replayed — it was a real interruption the owner
+    // never got, and a long outage must not queue up a whole ladder to fire on boot.
+    expect(after.nagCount).toBe(r.nagCount + 1)
   })
 
   it('does not defer rung 0 at the due time the owner chose themselves', async () => {

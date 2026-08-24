@@ -62,12 +62,32 @@ export async function runNudge(reminderId: string): Promise<void> {
 
   const now = Date.now()
   if (now - scheduledAt > STALE_NUDGE_MS) {
-    // Retire the rung without sending; the digest will surface it.
-    db.update(reminders)
-      .set({ nextNagAtMillis: null, updatedAt: now })
+    // Do not SEND this rung — that is the whole point of the gate, and firing it plus the dozen
+    // behind it the moment we boot is the worst failure mode of a queue. But move to the next rung
+    // rather than writing null.
+    //
+    // Null ENDED the chase. Nothing revives a reminder whose `nextNagAtMillis` is null: no job is
+    // enqueued, and the digest this comment used to promise reads OUTBOX rows, of which a rung
+    // retired here produces none. So one restart spanning a day-start silently retired a reminder
+    // for good, and the owner's only clue was Otto never mentioning it again.
+    //
+    // Advancing costs the rung it could not send, which is correct — it was a real interruption the
+    // owner did not get, and pretending otherwise would let a long outage replay a whole ladder.
+    const resumeAt = nextNagAt(ladderParams(device, before, before.nagCount + 1, now))
+    const moved = db
+      .update(reminders)
+      .set({ nagCount: before.nagCount + 1, nextNagAtMillis: resumeAt, updatedAt: now })
       .where(and(eq(reminders.reminderId, reminderId), eq(reminders.nextNagAtMillis, scheduledAt)))
       .run()
-    log.info({ reminderId, lateBy: now - scheduledAt }, 'skipping stale nudge; leaving it for the digest')
+    if (moved.changes === 0) {
+      log.debug({ reminderId }, 'stale-rung advance lost the claim; another path handled it')
+      return
+    }
+    if (resumeAt !== null) enqueueJob('nudge', resumeAt, { reminderId, deviceId: device.deviceId })
+    log.info(
+      { reminderId, lateBy: now - scheduledAt, resumeAt },
+      'skipping stale nudge without sending it; advanced to the next rung',
+    )
     return
   }
 
@@ -100,7 +120,15 @@ export async function runNudge(reminderId: string): Promise<void> {
   // many warnings went out — checking for 0 would quietly withdraw the exemption from exactly the
   // reminders that warn hardest.
   const ownersOwnDueTime = before.dueAtMillis !== null && scheduledAt === before.dueAtMillis
-  const quiet = nagQuietHours(device, before.escalateWithAlarm)
+  // `escalateWithAlarm` buys three things: no quiet hours, no daily budget, and a ringing alarm once
+  // badly overdue. All three are justified by the same sentence — "this is time-critical, wake them"
+  // — and all three are indefensible without a due time, because the ring is gated on being an hour
+  // past a deadline that does not exist. Left as the raw flag, an undated escalating reminder would
+  // chase at 3am, uncounted against the budget, and could never actually ring: every safety valve
+  // off, and the one thing the flag was for unreachable. So the flag only counts when there is
+  // something to be late for.
+  const escalating = before.escalateWithAlarm && before.dueAtMillis !== null
+  const quiet = nagQuietHours(device, escalating)
   const deferredTo = ownersOwnDueTime ? now : deferPastQuietHours(now, device.timezone, quiet)
   if (deferredTo !== now) {
     // Same guarded-UPDATE shape as the staleness gate above: `changes === 0` means another path
@@ -125,7 +153,7 @@ export async function runNudge(reminderId: string): Promise<void> {
   //
   // Pushed to the next local midnight rather than dropped — the reminder is still open and still
   // needs chasing, it just does not get another interruption today.
-  if (!budgetAllows(device, 'nudge', { escalating: before.escalateWithAlarm }, now)) {
+  if (!budgetAllows(device, 'nudge', { escalating }, now)) {
     const refill = budgetResetsAt(device.timezone, now)
     const moved = db
       .update(reminders)
@@ -270,12 +298,10 @@ export async function runNudge(reminderId: string): Promise<void> {
     // Composed after the claim, so only the winner pays for the call. `before` is the pre-increment
     // snapshot, which is what both the writer and its templated fallback expect.
     const plan = resolvedPlanFor(device, before)
-    const body = await writeNudge(
-      before,
-      device.timezone,
-      overdue,
-      plan ? { leadCount: plan.leadAt.length, totalRungs: plan.leadAt.length + plan.maxChases } : undefined,
-    )
+    const body = await writeNudge(before, device.timezone, overdue, {
+      leadCount: plan.leadAt.length,
+      totalRungs: plan.leadAt.length + plan.maxChases,
+    })
     const sent = await enqueueAndTryFlush({
       waUserId,
       deviceId: device.deviceId,
@@ -287,10 +313,14 @@ export async function runNudge(reminderId: string): Promise<void> {
 
     // Out of window and genuinely overdue: FCM is the only channel with no 24h limit, and the app
     // can only be told to ring. Deliberately opt-in per reminder — this wakes them.
+    // `0` for an undated reminder, so the gate below can never open for one. Deliberate, not a gap:
+    // it reads "an hour past the deadline", and a reminder with no due time has missed nothing. It
+    // is still chased over WhatsApp; it just never rings a phone at full volume for something nobody
+    // is late for. `escalating` says the same thing a second time, structurally.
     const overdueBy = before.dueAtMillis === null ? 0 : now - before.dueAtMillis
     const cooling =
       before.lastEscalatedAtMillis !== null && now - before.lastEscalatedAtMillis < ESCALATE_COOLDOWN_MS
-    if (!sent && before.escalateWithAlarm && overdueBy > ESCALATE_AFTER_MS && !cooling) {
+    if (!sent && escalating && overdueBy > ESCALATE_AFTER_MS && !cooling) {
       const alarmId = newAlarmId()
       await armAlarm(device, {
         alarmId,
@@ -303,7 +333,7 @@ export async function runNudge(reminderId: string): Promise<void> {
         .where(eq(reminders.reminderId, reminderId))
         .run()
       log.warn({ reminderId, alarmId }, 'window shut and overdue; escalating to a ringing alarm')
-    } else if (!sent && before.escalateWithAlarm && cooling) {
+    } else if (!sent && escalating && cooling) {
       log.info({ reminderId, since: before.lastEscalatedAtMillis }, 'escalation suppressed; still inside the ring cooldown')
     }
   }

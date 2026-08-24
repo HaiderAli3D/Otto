@@ -154,12 +154,20 @@ describe('reminder lifecycle', () => {
     expect(overdue[0]!.title).toBe('past')
   })
 
-  it('an undated reminder is created but never scheduled to nag', async () => {
+  it('an undated reminder is created AND chased', async () => {
+    // It used to be created and then never spoken of again — no rung, no job, nothing but a row in
+    // a list nobody opens. Now it has a ladder of its own, anchored on when it was asked for.
     const device = makeDevice('dev_r11')
     const r = await createReminder(device, { title: 'someday: fix the shed' })
     expect(r.state).toBe('OPEN')
     expect(r.dueAtMillis).toBeNull()
-    expect(r.nextNagAtMillis).toBeNull()
+    expect(r.nextNagAtMillis).not.toBeNull()
+    expect(r.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    // And the job that actually makes it happen exists, which is the half the row alone cannot show.
+    const jobs = dueJobs(r.nextNagAtMillis! + 1000).filter(
+      (j) => j.kind === 'nudge' && j.reminderId === r.reminderId,
+    )
+    expect(jobs).toHaveLength(1)
   })
 })
 

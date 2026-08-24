@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { MAX_NAGS, nextNagAt, nudgeText, nudgeTextFor } from '../src/lib/nagLadder.js'
 import { deferPastQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
 import { parseRoutine } from '../src/lib/routine.js'
-import { planRungs, tableFor, type NagPolicy, type TimingKind } from '../src/lib/rungPlan.js'
+import { planRungs, tableFor, undatedTableFor, type NagPolicy, type TimingKind } from '../src/lib/rungPlan.js'
 
 const ZONE = 'Europe/London'
 const at = (iso: string): number => DateTime.fromISO(iso, { zone: ZONE }).toMillis()
@@ -19,8 +19,78 @@ describe('nextNagAt', () => {
     expect(nextNagAt({ policy: 'off', nagCount: 0, dueAtMillis: due, zone: ZONE, nowMillis: now })).toBeNull()
   })
 
-  it('never nags an undated reminder — it only surfaces in lists and digests', () => {
-    expect(nextNagAt({ policy: 'persistent', nagCount: 0, dueAtMillis: null, zone: ZONE, nowMillis: now })).toBeNull()
+  it('chases an undated reminder from when it was planned, not from a due time it has not got', () => {
+    // This used to return null, and that is what made "sort the loft out" a write-only note: Otto
+    // took it, never mentioned it again, and the owner found out weeks later. With no due time the
+    // ladder hangs off the planning moment instead and asks once each morning.
+    const first = nextNagAt({
+      policy: 'persistent',
+      nagCount: 0,
+      dueAtMillis: null,
+      zone: ZONE,
+      nowMillis: now,
+      plannedAtMillis: now,
+    })
+    expect(local(first!)).toBe('2026-08-04 09:00')
+  })
+
+  it('never fires an undated reminder at the moment the owner asked for it', () => {
+    // The undated anchor is an instant WE chose, so it has no claim on the "never move the time
+    // they picked" exemption — which is the one branch in here that skips quiet hours entirely.
+    // A rung ON the anchor would mean a nudge seconds after they finished typing, at any hour.
+    const at3am = at('2026-08-03T03:00:00')
+    const first = nextNagAt({
+      policy: 'relentless',
+      nagCount: 0,
+      dueAtMillis: null,
+      zone: ZONE,
+      nowMillis: at3am,
+      plannedAtMillis: at3am,
+      quiet: NIGHT,
+    })
+    expect(first).not.toBe(at3am)
+    expect(local(first!)).toBe('2026-08-03 09:00')
+  })
+
+  it('still says nothing about an undated reminder when the policy is off', () => {
+    expect(
+      nextNagAt({ policy: 'off', nagCount: 0, dueAtMillis: null, zone: ZONE, nowMillis: now, plannedAtMillis: now }),
+    ).toBeNull()
+  })
+
+  it('walks an undated ladder to exactly its ceiling and then stops', () => {
+    // Walked the way runNudge walks it — each result fed back as the next `nowMillis` — because
+    // that is what production does. A ladder that never terminated would chase someone daily about
+    // the loft for the rest of their life.
+    const policy: NagPolicy = 'hard'
+    const rungs: number[] = []
+    let nowMillis = now
+    for (let i = 0; i < 40; i++) {
+      const next = nextNagAt({ policy, nagCount: i, dueAtMillis: null, zone: ZONE, nowMillis, plannedAtMillis: now })
+      if (next === null) break
+      expect(next).toBeGreaterThan(nowMillis)
+      rungs.push(next)
+      nowMillis = next
+    }
+    expect(rungs).toHaveLength(undatedTableFor(policy).maxChases)
+    // One a day, so the last one is that many mornings out.
+    expect(local(rungs.at(-1)!)).toBe('2026-08-17 09:00')
+  })
+
+  it('ignores an explicit chase list on an undated reminder', () => {
+    // leadMinutes and chaseMinutes are documented to the model as offsets from the due time, and
+    // there is no due time to offset from. Honouring `[0]` here would fire the instant the owner
+    // finished speaking — which is the exact thing the empty undated chase list exists to prevent.
+    const first = nextNagAt({
+      policy: 'hard',
+      nagCount: 0,
+      dueAtMillis: null,
+      zone: ZONE,
+      nowMillis: now,
+      plannedAtMillis: now,
+      plan: { chaseMinutes: [0] },
+    })
+    expect(local(first!)).toBe('2026-08-04 09:00')
   })
 
   it('fires the first rung at the due time', () => {

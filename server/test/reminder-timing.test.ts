@@ -8,12 +8,14 @@ import { eq } from 'drizzle-orm'
 import { DateTime } from 'luxon'
 import { db, ensureSchema } from '../src/db/client.js'
 import { reminders } from '../src/db/schema.js'
+import { nextNagAt } from '../src/lib/nagLadder.js'
 import { DEFAULT_NAG_POLICY, tableFor } from '../src/lib/rungPlan.js'
 import { dueJobs } from '../src/services/jobs.js'
 import {
   completeReminder,
   createReminder,
   getReminder,
+  ladderParams,
   leadCountFor,
   onReminderAlarmEvent,
   resolvedPlanFor,
@@ -47,6 +49,47 @@ describe('timing kinds', () => {
     expect(r.timingKind).toBe('deadline')
     expect(leadCountFor(device, r)).toBeGreaterThan(0)
     expect(r.nextNagAtMillis).toBeLessThan(due)
+  })
+
+  it('chases an undated reminder rather than filing it and forgetting it', async () => {
+    const device = makeDevice('dev_t1d')
+    const r = await createReminder(device, { title: 'sort the loft out' })
+    expect(r.dueAtMillis).toBeNull()
+    expect(r.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    // No run-up, because there is nothing to count down to — it is asked about, not warned about.
+    expect(leadCountFor(device, r)).toBe(0)
+    expect(dueJobs(r.nextNagAtMillis! + 1000).filter((j) => j.reminderId === r.reminderId)).toHaveLength(1)
+  })
+
+  it('keeps chasing when the owner takes the due date off something', async () => {
+    // clearDue used to be a silent off switch: the row kept its OPEN state and its place in the
+    // lists, and Otto simply stopped mentioning it. "There's no deadline on that any more" is not
+    // "stop reminding me" — that is nagPolicy off, or cancel_reminder.
+    const device = makeDevice('dev_t1e')
+    const r = await createReminder(device, { title: 'the loft', dueAtMillis: inHours(48) })
+    const res = await updateReminder(device, r.reminderId, { dueAtMillis: null })
+    expect(res.ok).toBe(true)
+
+    const after = getReminder(r.reminderId)!
+    expect(after.dueAtMillis).toBeNull()
+    expect(after.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    // The job moved with the row. A rung the queue does not know about never fires.
+    const queued = dueJobs(after.nextNagAtMillis! + 1000).filter((j) => j.reminderId === r.reminderId)
+    expect(queued).toHaveLength(1)
+    expect(queued[0]!.runAtMillis).toBe(after.nextNagAtMillis)
+  })
+
+  it('never ends an undated ladder in answer to being told to push harder', async () => {
+    // The replan clamp, which used to exclude undated rows and so did the opposite of its job: an
+    // undated reminder whose ladder was spent answered "push me harder on the loft" by going
+    // permanently silent.
+    const device = makeDevice('dev_t1f')
+    const r = await createReminder(device, { title: 'the loft' })
+    db.update(reminders).set({ nagCount: 99 }).where(eq(reminders.reminderId, r.reminderId)).run()
+    expect(nextNagAt(ladderParams(device, getReminder(r.reminderId)!, 99, Date.now()))).toBeNull()
+
+    await updateReminder(device, r.reminderId, { nagPolicy: 'relentless' })
+    expect(getReminder(r.reminderId)!.nextNagAtMillis).not.toBeNull()
   })
 
   it('files an UNDATED reminder as a deadline waiting for a time', async () => {

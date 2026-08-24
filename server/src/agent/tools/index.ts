@@ -445,6 +445,22 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
             ? undefined
             : localIsoToEpochMillis(String(a.dueLocalISO), device.timezone)
 
+      // The same refusal `create_reminder` makes, on the path that could get round it. A recurrence
+      // needs an anchor instant to roll forward from, so `completeReminder` requires a due time —
+      // and stripping one from a series left the next completion taking the "nothing to roll to"
+      // branch and writing DONE. The whole series ended, silently, and the tool result said
+      // `completed: true` with no next occurrence, so Otto confirmed it cheerfully.
+      const before = getReminder(reminderId)
+      // `recurrence` is three-state here, so `??` is wrong: `clearRecurrence` sets it to null, and
+      // `null ?? before.recurrence` reads that as "leave it alone" — refusing the one call that
+      // legitimately drops both at once.
+      const willRepeat = recurrence === undefined ? (before?.recurrence ?? null) : recurrence
+      if (dueAtMillis === null && before && willRepeat !== null) {
+        return {
+          error: `"${before.title}" repeats, and a repeating reminder needs a due time to roll forward from. Pass clearRecurrence to end the series, or dueLocalISO to move it.`,
+        }
+      }
+
       // `useDefaultSchedule` clears any stored plan; otherwise an absent pair of arrays leaves
       // whatever was there alone. The two are mutually exclusive in effect, and clearing wins —
       // "go back to normal, but warn me an hour before" is a contradiction, and the half that keeps

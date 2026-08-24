@@ -12,9 +12,11 @@ import {
   normaliseOffsets,
   parseNagPlan,
   planRungs,
+  planUndatedRungs,
   serializeNagPlan,
   tableFor,
   tightestGap,
+  undatedTableFor,
   type NagPolicy,
   type TimingKind,
 } from '../src/lib/rungPlan.js'
@@ -77,6 +79,56 @@ describe('the tables themselves', () => {
       zone: ZONE,
     })
     expect(tightestGap(plan, due)).toBeGreaterThan(0)
+  })
+
+  it('never gives an undated reminder a run-up, at any intensity', () => {
+    // There is nothing to lead. A lead offset here would be measured from the moment the owner
+    // spoke, which is not a deadline and warning them about it means nothing.
+    for (const policy of INTENSITIES) expect(undatedTableFor(policy).lead).toEqual([])
+  })
+
+  it('never fires an undated reminder at the moment it was asked for', () => {
+    // Every one of the twelve dated rows opens `chase: [0, …]` — a rung ON the anchor. For an
+    // undated reminder the anchor is the moment the owner finished typing, and a `0` here would
+    // mean a nudge seconds later, at any hour, through the one branch of nextNagAt that skips quiet
+    // hours. This is the assertion that stops someone "harmonising" this table with that one.
+    for (const policy of INTENSITIES) expect(undatedTableFor(policy).chase).toEqual([])
+  })
+
+  it('gives up on an undated reminder rather than asking forever', () => {
+    // The ceiling IS the whole ladder here — no lead rungs and an empty chase list means every rung
+    // is a daily one, so `maxChases` counts mornings. Something with no date and no progress after
+    // a few weeks is not a thing a daily message is going to fix; the reminder stays OPEN and keeps
+    // its place in the lists, the brief and the digest, exactly like any spent ladder.
+    for (const policy of INTENSITIES) {
+      const days = undatedTableFor(policy).maxChases
+      expect(days, `undated/${policy} must ask more than once`).toBeGreaterThan(1)
+      expect(days, `undated/${policy} must not ask for more than a month`).toBeLessThanOrEqual(31)
+    }
+  })
+
+  it('gets louder as the intensity rises, for undated ladders too', () => {
+    const totals = INTENSITIES.map((p) => undatedTableFor(p).maxChases)
+    for (let i = 1; i < totals.length; i++) {
+      expect(totals[i], `undated: ${INTENSITIES[i]} must not be quieter than ${INTENSITIES[i - 1]}`).toBeGreaterThan(
+        totals[i - 1]!,
+      )
+    }
+  })
+
+  it('resolves an undated ladder with no lead rungs and nothing dropped', () => {
+    const plan = planUndatedRungs('hard')
+    expect(plan.leadAt).toEqual([])
+    expect(plan.chase).toEqual([])
+    expect(plan.tail).toBe('daily')
+    expect(plan.droppedAsTooLate).toBe(0)
+    expect(plan.maxChases).toBe(undatedTableFor('hard').maxChases)
+  })
+
+  it('falls an undated ladder back to gentle for a policy of off, exactly like planRungs', () => {
+    // `off` is handled before this is ever reached, but the two resolvers must not disagree about
+    // what a policy they should never see means.
+    expect(planUndatedRungs('off')).toEqual(planUndatedRungs('gentle'))
   })
 
   it('stops rather than going daily for every appointment intensity', () => {

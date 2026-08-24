@@ -10,6 +10,7 @@ import {
   isTimingKind,
   parseNagPlan,
   planRungs,
+  planUndatedRungs,
   serializeNagPlan,
   type NagPlanSpec,
   type ResolvedPlan,
@@ -57,9 +58,17 @@ export function ladderParams(
   }
 }
 
-/** This reminder's resolved ladder — used for the lead/chase split in evidence and wording. */
-export function resolvedPlanFor(device: Device, r: Reminder): ResolvedPlan | null {
-  if (r.dueAtMillis === null) return null
+/**
+ * This reminder's resolved ladder — used for the lead/chase split in evidence and wording.
+ *
+ * Never null. An undated reminder has a ladder too, and returning null for one used to mean the one
+ * reminder with nothing to count down to was also the one Otto could say least about: `runNudge`
+ * passed no ladder to the writer, so an undated chase silently lost the "rung N of M" line every
+ * other chase gets. Its `leadAt` is empty, so `leadCountFor` still answers 0 and every consumer
+ * downstream behaves exactly as before.
+ */
+export function resolvedPlanFor(device: Device, r: Reminder): ResolvedPlan {
+  if (r.dueAtMillis === null) return planUndatedRungs(r.nagPolicy as NagPolicy)
   return planRungs({
     kind: timingKindOf(r),
     policy: r.nagPolicy as NagPolicy,
@@ -75,7 +84,7 @@ export function resolvedPlanFor(device: Device, r: Reminder): ResolvedPlan | nul
 
 /** How many of this reminder's rungs land BEFORE its due time. Zero for triggers and undated rows. */
 export function leadCountFor(device: Device, r: Reminder): number {
-  return resolvedPlanFor(device, r)?.leadAt.length ?? 0
+  return resolvedPlanFor(device, r).leadAt.length
 }
 
 export function getReminder(reminderId: string): Reminder | undefined {
@@ -453,7 +462,11 @@ export async function updateReminder(
 function replan(device: Device, r: Reminder, now: number): number | null {
   const direct = nextNagAt(ladderParams(device, r, r.nagCount, now))
   if (direct !== null) return direct
-  if (r.dueAtMillis === null || r.nagPolicy === 'off') return null
+  // Undated rows fall through to the same clamp as dated ones. They used to be excluded here, which
+  // turned this from a safety net into the bug it exists to prevent: an undated reminder whose
+  // ladder was spent answered "push me harder on the loft" by going permanently silent, in direct
+  // response to being asked to chase harder. Its `leadCount` is 0, so it simply re-enters at rung 0.
+  if (r.nagPolicy === 'off') return null
   const leadCount = leadCountFor(device, r)
   if (r.nagCount <= leadCount) return null
   return nextNagAt(ladderParams(device, r, leadCount, now))
