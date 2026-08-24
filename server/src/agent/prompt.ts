@@ -5,7 +5,8 @@ import type { Device } from '../services/devices.js'
 import { renderFacts } from '../services/facts.js'
 import { leadCountFor, listReminders } from '../services/reminders.js'
 import { quietHoursFor, quietNow, routineFor } from '../services/settings.js'
-import { nowIsoInZone } from '../services/time.js'
+import { epochMillisToLocalHuman, nowIsoInZone } from '../services/time.js'
+import { tackOnCandidate } from '../services/tackOn.js'
 import { reminderEvidence, renderRecord } from '../services/signals.js'
 import { PERSONA, WRITING } from './persona.js'
 import {
@@ -24,6 +25,7 @@ import {
   REMINDER_TIMING,
   REPLYING,
   ROUTINE,
+  TACK_ON,
   THE_RECORD,
   TIME,
   VOICE_AND_PHOTOS,
@@ -69,6 +71,10 @@ const CORE = [
   TIME,
   VOICE_AND_PHOTOS,
   REPLYING,
+  // Immediately after REPLYING, which forbids exactly this. An exception read BEFORE the rule it
+  // qualifies is not an exception — it is a contradiction the model settles by recency, and
+  // REPLYING is otherwise the last instruction it reads before # Writing.
+  TACK_ON,
   WRITING,
 ].join('\n\n')
 
@@ -102,6 +108,10 @@ export function systemPrompt(device: Device): string {
     renderOpenReminders(device),
     renderRecord(device.deviceId),
     describeBudget(device),
+    // LAST, and for two reasons worth keeping together. It is the most volatile line in the whole
+    // prompt — it can change on every single reply — and it is the licence to add a sentence, so it
+    // should be the last thing read before one is written. Appending also shifts nothing above it.
+    renderTackOn(device),
   ]
     .filter((s): s is string => s !== null)
     .join('\n\n')
@@ -149,4 +159,27 @@ function renderOpenReminders(device: Device): string {
     (r) => `- ${r.title} [${r.reminderId}] (${reminderEvidence(r, device.timezone, now, leadCountFor(device, r))})`,
   )
   return `Open reminders you are chasing:\n${lines.join('\n')}`
+}
+
+/**
+ * The one thing Otto may tack onto this reply, or an explicit statement that there is nothing.
+ *
+ * NEVER null, and never silently absent. `renderOpenReminders` says "You are not currently chasing
+ * the owner about anything" rather than rendering nothing for the same reason: an omission is
+ * indistinguishable from a feature that is switched off, and a model that cannot tell the difference
+ * starts inventing candidates out of the chase-list directly above it.
+ *
+ * The RULE lives in the cached `TACK_ON` section; only the per-turn values are here. Putting any of
+ * this any further up would move the first differing byte to the front of the request and throw away
+ * the prefix for the whole call, tools included — see the note on `systemPrompt` above.
+ */
+function renderTackOn(device: Device): string {
+  const candidate = tackOnCandidate(device)
+  if (candidate === null) return 'Nothing to tack on this turn — answer them and stop.'
+  const { reminder, evidence, scheduledAtMillis } = candidate
+  return [
+    `One thing you may tack on: "${reminder.title}" [${reminder.reminderId}] — ${evidence}.`,
+    `Left alone, you chase this on its own at ${epochMillisToLocalHuman(scheduledAtMillis, device.timezone)}.`,
+    'Call chase_in_reply with that id before you write, and only if you are going to mention it.',
+  ].join('\n')
 }

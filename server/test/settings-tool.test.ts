@@ -311,3 +311,115 @@ describe('the weekly review chain follows the setting too', () => {
     expect(after[0]!.id).toBe(before.id)
   })
 })
+
+/**
+ * Stating when you sleep, and what it moves.
+ *
+ * There was NO test anywhere exercising bedWindow/wakeWindow through set_preferences before this —
+ * the brief auto-move had been shipped untested — so these cover the whole path, not just the part
+ * that is new.
+ */
+describe('stating a routine moves everything that hangs off their morning', () => {
+  it('settles the day start, the brief and the quiet window in one call', async () => {
+    // The single sentence the owner actually types: "I'm up at noon and I go to bed around two."
+    const device = makeDevice('dev_r1')
+    scheduleBriefChain(device, Date.now())
+    const before = briefJob(device.deviceId)[0]!
+
+    const out = await setPrefs(device, { bedWindow: '01:00-02:00', wakeWindow: '11:00-12:00' })
+
+    // The brief follows their morning — the END of the wake range, the point they are certainly up.
+    expect(out.briefAt).toBe('12:00')
+    // And quiet hours follow it too: latest bedtime through to that same point.
+    expect(out.quietHours).toBe('02:00–12:00')
+    expect(getSettings(device.deviceId).quietHours).toBe('02:00-12:00')
+    // The pending job row held an instant computed from the OLD 07:00, and ensureSingletonJob
+    // deliberately leaves an existing row alone — so without the reschedule this would silently do
+    // nothing tomorrow and only take effect the day after.
+    expect(briefJob(device.deviceId)[0]!.runAtMillis).not.toBe(before.runAtMillis)
+  })
+
+  it('re-derives the window when they change their hours again', async () => {
+    // The naive "only when the column is null" gate breaks here: after the first call the column
+    // holds a real string, so a second routine change would move the brief and leave quiet hours
+    // anchored to the hours they no longer keep.
+    const device = makeDevice('dev_r2')
+    await setPrefs(device, { bedWindow: '01:00-02:00', wakeWindow: '11:00-12:00' })
+    expect(getSettings(device.deviceId).quietHours).toBe('02:00-12:00')
+
+    const out = await setPrefs(device, { wakeWindow: '09:00-10:00' })
+
+    expect(out.quietHours).toBe('02:00–10:00')
+    expect(out.briefAt).toBe('10:00')
+  })
+
+  it('never overwrites a window the owner typed themselves', async () => {
+    // "Leave me alone until one" must survive every later change to their sleeping hours. The
+    // stored value no longer matches what we would have derived, so we know we did not write it.
+    const device = makeDevice('dev_r3')
+    await setPrefs(device, { quietHours: '02:00-13:00' })
+
+    const out = await setPrefs(device, { bedWindow: '01:00-02:00', wakeWindow: '11:00-12:00' })
+
+    expect(out.quietHours).toBe('02:00–13:00')
+    // The brief still moves: that is a different setting and they never named it.
+    expect(out.briefAt).toBe('12:00')
+  })
+
+  it('leaves quiet hours off for good once they have been turned off', async () => {
+    // Literal "off" can never equal a derivation, so this is permanent by construction rather than
+    // by a special case — the same property quietHoursFor is careful to preserve at the other end.
+    const device = makeDevice('dev_r4')
+    await setPrefs(device, { quietHours: 'off' })
+
+    const out = await setPrefs(device, { bedWindow: '01:00-02:00', wakeWindow: '11:00-12:00' })
+
+    expect(out.quietHours).toBe('off')
+  })
+
+  it('lets a window stated in the same breath win', async () => {
+    const device = makeDevice('dev_r5')
+    const out = await setPrefs(device, {
+      bedWindow: '01:00-02:00',
+      wakeWindow: '11:00-12:00',
+      quietHours: '03:00-11:00',
+    })
+
+    expect(out.quietHours).toBe('03:00–11:00')
+  })
+
+  it('lets a brief time stated in the same breath win, and still sets the window', async () => {
+    const device = makeDevice('dev_r6')
+    const out = await setPrefs(device, {
+      bedWindow: '01:00-02:00',
+      wakeWindow: '11:00-12:00',
+      briefHour: 13,
+      briefMinute: 30,
+    })
+
+    expect(out.briefAt).toBe('13:30')
+    expect(out.quietHours).toBe('02:00–12:00')
+  })
+
+  it('derives nothing from half a routine', async () => {
+    // parseRoutine is all-or-nothing: a bed window on its own says nothing about when their day
+    // starts, which is the only thing anything downstream reads out of it.
+    const device = makeDevice('dev_r7')
+
+    const out = await setPrefs(device, { bedWindow: '01:00-02:00' })
+
+    expect(out.quietHours).toBe(config.quietHoursDefault.replace('-', '–'))
+    expect(getSettings(device.deviceId).quietHours).toBeNull()
+  })
+
+  it('derives nothing when the window would be degenerate', async () => {
+    // bed.end === wake.end is ambiguous between a zero-length window and a 24-hour one, and nobody
+    // means either — so no string is written rather than one every read site would reject.
+    const device = makeDevice('dev_r8')
+
+    const out = await setPrefs(device, { bedWindow: '01:00-02:00', wakeWindow: '00:00-02:00' })
+
+    expect(getSettings(device.deviceId).quietHours).toBeNull()
+    expect(out.briefAt).toBe('02:00')
+  })
+})

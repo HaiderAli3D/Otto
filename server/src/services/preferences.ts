@@ -1,7 +1,7 @@
 import { config, parseWeeklyReview } from '../config.js'
 import { nextBriefRunAt } from '../lib/briefSchedule.js'
 import { formatQuietHours, parseQuietHours } from '../lib/quietHours.js'
-import { dayStartHour, dayStartMinute, parseRoutine } from '../lib/routine.js'
+import { dayStartHour, dayStartMinute, impliedQuietHours, parseRoutine } from '../lib/routine.js'
 import { log } from '../lib/log.js'
 import { rescheduleBriefChain } from './brief.js'
 import type { Device } from './devices.js'
@@ -210,6 +210,33 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
   if (routineNow !== null && routineChanged && !briefTimeStated) {
     patch.briefHour = dayStartHour(routineNow)
     patch.briefMinute = dayStartMinute(routineNow)
+  }
+
+  // Stating a routine ALSO seeds the quiet window, once, at write time — so "I'm up at noon and I go
+  // to bed around two" is the single sentence that moves all three anchors: the hour Otto picks for
+  // itself, the brief, and the hours it is allowed to speak first in. Without it the owner has to
+  // know to make three separate changes, and the one they forget is the one that wakes them.
+  //
+  // A concrete string goes into the column and the routine plays no further part. `quietHoursFor`
+  // still reads the column and only the column, so `lib/routine.ts`'s rule holds exactly as written:
+  // nothing consults the routine to decide whether to SUPPRESS anything. This is the same move the
+  // brief auto-move above makes with briefHour, one field further along.
+  //
+  // Never overwrites a window the OWNER typed. Re-derived only when the stored value is still
+  // exactly what we derived from their PREVIOUS routine, so "I'm up at ten now" moves the window
+  // while "leave me alone until one" survives every later routine change. Literal "off" can never
+  // equal a derivation, which makes switching quiet hours off permanent by construction — the
+  // property `quietHoursFor` is careful to preserve at the other end.
+  const quietStated = input.quietHours !== undefined
+  if (routineNow !== null && routineChanged && !quietStated) {
+    const derived = impliedQuietHours(routineNow)
+    const oursBefore = (() => {
+      const routineBefore = parseRoutine(before.bedWindow, before.wakeWindow)
+      return routineBefore === null ? null : impliedQuietHours(routineBefore)
+    })()
+    if (derived !== null && (before.quietHours === null || before.quietHours === oursBefore)) {
+      patch.quietHours = derived
+    }
   }
 
   // Two enabled slots at the same minute is a brief the owner is promised and never gets.

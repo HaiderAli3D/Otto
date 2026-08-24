@@ -42,7 +42,9 @@ export const settingsTools: ToolDef[] = [
             'Do-not-disturb window as "HH:MM-HH:MM" local, or "off". Spans midnight, e.g. ' +
             '"22:00-07:00". Briefs, reviews and follow-up chases wait for it to end. It does NOT ' +
             'hold back the four things listed under "Quiet hours" — a real alarm, an escalating ' +
-            'reminder, a wake-check, or the first chase at a due time they picked themselves.',
+            'reminder, a wake-check, or the first chase at a due time they picked themselves. ' +
+            'Setting this explicitly also PINS it: once they have named a window themselves, telling ' +
+            'you their sleeping hours later will not move it again.',
         },
         weeklyReview: {
           type: 'string',
@@ -62,8 +64,11 @@ export const settingsTools: ToolDef[] = [
             'When the owner GETS UP, as a range "HH:MM-HH:MM" local, or "off". e.g. ' +
             '"10:00-14:00". The END of this range is what "morning" means for them: it is the hour ' +
             'any daily chase you schedule lands on, and setting it moves their brief there too ' +
-            'unless you set a brief time in the same call. Save BOTH windows together — one on its ' +
-            'own tells you nothing about when their day starts and is ignored.',
+            'unless you set a brief time in the same call. It also sets their quiet hours — latest ' +
+            'bedtime to the point they are certainly up — unless they have named a window ' +
+            'themselves, which always wins. So "I am up at noon and in bed by two" is one call and ' +
+            'settles all of it. Save BOTH windows together — one on its own tells you nothing about ' +
+            'when their day starts and is ignored.',
         },
         dailyMessageBudget: {
           type: 'number',
