@@ -8,7 +8,7 @@ import { eq } from 'drizzle-orm'
 import { DateTime } from 'luxon'
 import { db, ensureSchema } from '../src/db/client.js'
 import { reminders } from '../src/db/schema.js'
-import { tableFor } from '../src/lib/rungPlan.js'
+import { DEFAULT_NAG_POLICY, tableFor } from '../src/lib/rungPlan.js'
 import { dueJobs } from '../src/services/jobs.js'
 import {
   completeReminder,
@@ -49,11 +49,14 @@ describe('timing kinds', () => {
     expect(r.nextNagAtMillis).toBeLessThan(due)
   })
 
-  it('still defaults an UNDATED reminder to trigger, because there is nothing to lead', async () => {
+  it('files an UNDATED reminder as a deadline waiting for a time', async () => {
+    // The kind is inert while there is no due time — nothing to lead, nothing to be late for — so
+    // this is about what happens the DAY IT GETS ONE. "Sort the loft out, actually by Sunday" should
+    // start warning through the run-up, not go silent until Sunday has been and gone.
     const device = makeDevice('dev_t1b')
     const r = await createReminder(device, { title: 'sort the loft out' })
-    expect(r.timingKind).toBe('trigger')
-    expect(r.nextNagAtMillis).toBeNull()
+    expect(r.timingKind).toBe('deadline')
+    expect(r.dueAtMillis).toBeNull()
   })
 
   it('keeps trigger exactly as it was when it is asked for by name', async () => {
@@ -118,10 +121,13 @@ describe('timing kinds', () => {
     expect(r.nextNagAtMillis).toBe(due)
   })
 
-  it('defaults to persistent rather than gentle — the owner asked to be chased properly', async () => {
+  it('defaults to hard — the owner asked to be warned several times, not twice', async () => {
     const device = makeDevice('dev_t5')
     const r = await createReminder(device, { title: 'x', dueAtMillis: inHours(1) })
-    expect(r.nagPolicy).toBe('persistent')
+    expect(r.nagPolicy).toBe('hard')
+    // Pinned to the constant as well as to the literal: the literal is what the owner asked for,
+    // and the constant is what stops the code and the prompt drifting apart about it.
+    expect(r.nagPolicy).toBe(DEFAULT_NAG_POLICY)
   })
 
   it('re-anchors a recurring deadline so the new occurrence gets real warnings', async () => {
@@ -269,6 +275,6 @@ describe('updateReminder', () => {
 
     await updateReminder(device, r.reminderId, { nagPlan: null })
     expect(getReminder(r.reminderId)!.nagPlan).toBeNull()
-    expect(leadCountFor(device, getReminder(r.reminderId)!)).toBe(tableFor('deadline', 'persistent').lead.length)
+    expect(leadCountFor(device, getReminder(r.reminderId)!)).toBe(tableFor('deadline', DEFAULT_NAG_POLICY).lead.length)
   })
 })

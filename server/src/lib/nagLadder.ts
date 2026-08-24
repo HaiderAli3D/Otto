@@ -19,6 +19,7 @@ export {
   isTimingKind,
   NAG_POLICIES,
   TIMING_KINDS,
+  DEFAULT_NAG_POLICY,
   DEFAULT_TIMING_KIND,
   type NagPlanSpec,
   type NagPolicy,

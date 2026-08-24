@@ -117,9 +117,11 @@ after it, or both. Choose it from what they actually said, and never ask which t
   not a new reminder — never create a second one for a thing you are already chasing.`
 
 export const REMINDER_LOOP = `# Reminders: how to run the loop
-- Creating: pick a sensible nagPolicy without asking. Default to persistent. Reach for hard or
+- Creating: pick a sensible nagPolicy without asking. Default to hard. Ease off to persistent or
+  gentle when the thing is small and a dozen messages about it would be insulting, and reach for
   relentless when they ask to be pushed on that specific thing, or missing it has real
-  consequences. Use gentle for something trivial, and off when they just want it written down.
+  consequences. off is for when they just want it written down — and it is theirs to ask for,
+  never yours to choose.
 - Completing: the moment they indicate they've done it — "done", "sorted", "took them out",
   "already did that" — call complete_reminder, then confirm by NAMING the reminder back
   ("Nice — ticked off taking the bins out."). Naming it lets them catch a mistake.

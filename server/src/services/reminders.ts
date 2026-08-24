@@ -5,6 +5,7 @@ import { newAlarmId, newReminderId } from '../lib/ids.js'
 import { nextNagAt, type NagPolicy } from '../lib/nagLadder.js'
 import { log } from '../lib/log.js'
 import {
+  DEFAULT_NAG_POLICY,
   DEFAULT_TIMING_KIND,
   isTimingKind,
   parseNagPlan,
@@ -148,11 +149,16 @@ export async function createReminder(
   // silently rewrite their ladders. This only decides what a NEW reminder gets when the model did
   // not say — and `trigger` is still exactly one word away, which is what "remind me at 4" picks.
   //
-  // Undated "someday" reminders keep DEFAULT_TIMING_KIND: with no due time there is nothing to lead.
-  const timingKind = params.timing ?? (dueAtMillis === null ? DEFAULT_TIMING_KIND : 'deadline')
-  // `persistent` rather than `gentle`: the owner asked to be chased properly by default, and rung 0
-  // is the due instant either way, so nothing about the first message changes.
-  const nagPolicy = params.nagPolicy ?? 'persistent'
+  // THE one place either default is chosen. `runTool` passes `undefined` through; it used to answer
+  // this question itself, which made the line below dead code and hid the bug for a release.
+  //
+  // `deadline` even with no due time. The kind is inert while `dueAtMillis` is null — an undated
+  // reminder has a ladder of its own — and the day the owner gives it a time, "by then" is what
+  // they will mean. `DEFAULT_TIMING_KIND` stays `trigger` and stays the column default, because
+  // that is the ladder every row written before the column existed actually has; it is a READ
+  // fallback in `timingKindOf` now, never a choice.
+  const timingKind = params.timing ?? 'deadline'
+  const nagPolicy = params.nagPolicy ?? DEFAULT_NAG_POLICY
   const nagPlan = params.nagPlan ? serializeNagPlan(params.nagPlan) : null
 
   let alarmId: string | null = null

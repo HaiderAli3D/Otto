@@ -44,6 +44,19 @@ export function isNagPolicy(v: unknown): v is NagPolicy {
   return typeof v === 'string' && (NAG_POLICIES as string[]).includes(v)
 }
 
+/**
+ * How hard a reminder is chased when nobody said.
+ *
+ * `hard` rather than `persistent`: the owner asked to be warned several times through a run-up
+ * rather than twice. Rung 0 of a `trigger` is the due instant either way, so nothing about the
+ * FIRST message of an explicitly-silent reminder changes — only how much warning precedes a
+ * deadline, and how long the chase survives once it is past.
+ *
+ * Typed as an INTENSITY rather than a `NagPolicy` so it indexes the tables directly, and so
+ * "default to saying nothing" cannot be written here at all.
+ */
+export const DEFAULT_NAG_POLICY: Exclude<NagPolicy, 'off'> = 'hard'
+
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 
@@ -123,8 +136,24 @@ const TABLE: Record<TimingKind, Record<Exclude<NagPolicy, 'off'>, RungPlan>> = {
       tail: 'daily',
       maxChases: 8,
     },
+    // The last stretch borrows `appointment`'s density on purpose. This is the DEFAULT intensity
+    // now, so it is the ladder almost every reminder actually gets, and the run-up was thin exactly
+    // where it matters most: a deadline you have been warned about a week out is a deadline you
+    // have had a week to forget about. The five-minute rung is the one that catches something
+    // already in hand, and the fifteen is the one that still leaves time to start.
     hard: {
-      lead: [d(7), d(3), d(1), 6 * HOUR, 3 * HOUR, 1 * HOUR, 30 * MINUTE, 10 * MINUTE],
+      lead: [
+        d(7),
+        d(3),
+        d(1),
+        6 * HOUR,
+        3 * HOUR,
+        1 * HOUR,
+        30 * MINUTE,
+        15 * MINUTE,
+        10 * MINUTE,
+        5 * MINUTE,
+      ],
       chase: [0, 10 * MINUTE, 30 * MINUTE, 1 * HOUR, 2 * HOUR, 4 * HOUR, 8 * HOUR],
       tail: 'daily',
       maxChases: 14,

@@ -57,6 +57,28 @@ describe('the tables themselves', () => {
     for (const policy of INTENSITIES) expect(tableFor('trigger', policy).lead).toEqual([])
   })
 
+  it('warns as tightly before the default deadline as it does before an appointment', () => {
+    // `deadline x hard` is what almost every reminder now gets, so its run-up has to hold up in the
+    // last few minutes and not only in the last few days. A deadline warned about a week out is a
+    // deadline you have had a week to forget about; the 5-minute rung is the one that catches
+    // something already in hand.
+    const closest = (offsets: readonly (number | { daysBefore: number })[]): number =>
+      Math.min(...offsets.filter((o): o is number => typeof o === 'number'))
+    expect(closest(tableFor('deadline', 'hard').lead)).toBeLessThanOrEqual(
+      closest(tableFor('appointment', 'hard').lead),
+    )
+    // And the floor still never rewrites what the table placed deliberately.
+    const due = at('2026-08-20T12:00:00')
+    const plan = planRungs({
+      kind: 'deadline',
+      policy: 'hard',
+      dueAtMillis: due,
+      plannedAtMillis: at('2026-07-01T12:00:00'),
+      zone: ZONE,
+    })
+    expect(tightestGap(plan, due)).toBeGreaterThan(0)
+  })
+
   it('stops rather than going daily for every appointment intensity', () => {
     // An appointment an hour gone is the past; chasing the past daily is what `deadline` is for.
     for (const policy of INTENSITIES) expect(tableFor('appointment', policy).tail).toBe('stop')
@@ -142,7 +164,10 @@ describe('lead pruning', () => {
   })
 
   it('drops the ones already gone by when the deadline is set late', () => {
-    // 40 minutes of run-up: only the -30m and -10m rungs of `hard` can still happen.
+    // 40 minutes of run-up, so everything from the -30m rung inward can still happen: the ten-minute
+    // cutoff lands exactly on -30m, and `hard` now carries -15m and -5m as well. Four warnings out
+    // of ten, which is the point of the table being a superset — the same row serves a deadline set
+    // three weeks out and one set over lunch, with no lead-time bucket anywhere.
     const plan = planRungs({
       kind: 'deadline',
       policy: 'hard',
@@ -150,7 +175,12 @@ describe('lead pruning', () => {
       plannedAtMillis: due - 40 * MINUTE,
       zone: ZONE,
     })
-    expect(plan.leadAt.map(local)).toEqual(['2026-08-20 11:30', '2026-08-20 11:50'])
+    expect(plan.leadAt.map(local)).toEqual([
+      '2026-08-20 11:30',
+      '2026-08-20 11:45',
+      '2026-08-20 11:50',
+      '2026-08-20 11:55',
+    ])
     expect(plan.droppedAsTooLate).toBe(6)
   })
 

@@ -10,10 +10,12 @@ import {
   CALENDAR,
   JOURNEYS,
   PREFERENCES,
+  REMINDER_LOOP,
   REMINDER_TIMING,
   REPLYING,
 } from '../src/agent/promptSections.js'
 import { buildTools, runTool } from '../src/agent/tools.js'
+import { DEFAULT_NAG_POLICY } from '../src/lib/rungPlan.js'
 
 /**
  * The tool block renders at position 0 of every request, ahead of the system blocks, so its exact
@@ -233,5 +235,17 @@ describe('the cached prefix does not contradict itself', () => {
     expect(timing).not.toMatch(/Defaults to trigger\./)
     expect(timing).toMatch(/Defaults to deadline whenever dueLocalISO is given/)
     expect(REMINDER_TIMING).toMatch(/A time with no shape stated is a DEADLINE/)
+  })
+
+  it('states one default intensity, in the code and in both halves of the prefix', () => {
+    // Interpolated rather than written out, which is the whole point: the constant is the only
+    // place `hard` is decided, so prose that disagrees with it cannot compile past this line. The
+    // previous default was stated in four places — two of them code — and when one moved the other
+    // three quietly went on lying to the model.
+    const nagPolicy = schemaOf('create_reminder').nagPolicy!.description!
+    expect(nagPolicy).toContain(`${DEFAULT_NAG_POLICY} (default)`)
+    expect(REMINDER_LOOP).toContain(`Default to ${DEFAULT_NAG_POLICY}.`)
+    // And exactly one intensity claims it.
+    expect(nagPolicy.match(/\(default\)/g)).toHaveLength(1)
   })
 })

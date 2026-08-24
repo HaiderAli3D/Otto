@@ -57,12 +57,14 @@ export const reminderTools: ToolDef[] = [
           enum: ['off', 'gentle', 'persistent', 'hard', 'relentless'],
           description:
             'How hard to chase, from off to relentless. off = write it down and say nothing on a ' +
-            'clock. gentle = two or three messages in total. persistent (default) = a handful over ' +
-            'hours, then once a day. hard = a dozen or so, tight around the time itself. ' +
-            'relentless = twenty-plus, minutes apart around the moment. Pick one without asking. ' +
-            'Reach for hard or relentless when they have asked to be pushed on this specific thing, ' +
-            'or when missing it has real consequences. None of these ring the phone or override ' +
-            'quiet hours — that is escalateWithAlarm, which is a separate decision.',
+            'clock. gentle = two or three messages in total. persistent = a handful over hours, ' +
+            'then once a day. hard (default) = a dozen or so, spread through the run-up and tight ' +
+            'around the time itself. relentless = twenty-plus, minutes apart around the moment. ' +
+            'Pick one without asking. Ease off to persistent or gentle when the thing is small and ' +
+            'a dozen messages about it would be insulting; reach for relentless when they have ' +
+            'asked to be pushed on this specific thing, or when missing it has real consequences. ' +
+            'None of these ring the phone or override quiet hours — that is escalateWithAlarm, ' +
+            'which is a separate decision.',
         },
         leadMinutes: {
           type: 'array',
