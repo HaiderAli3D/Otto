@@ -8,12 +8,14 @@ import { eq } from 'drizzle-orm'
 import { DateTime } from 'luxon'
 import { db, ensureSchema } from '../src/db/client.js'
 import { reminders } from '../src/db/schema.js'
-import { tableFor } from '../src/lib/rungPlan.js'
+import { nextNagAt } from '../src/lib/nagLadder.js'
+import { DEFAULT_NAG_POLICY, tableFor } from '../src/lib/rungPlan.js'
 import { dueJobs } from '../src/services/jobs.js'
 import {
   completeReminder,
   createReminder,
   getReminder,
+  ladderParams,
   leadCountFor,
   onReminderAlarmEvent,
   resolvedPlanFor,
@@ -49,11 +51,55 @@ describe('timing kinds', () => {
     expect(r.nextNagAtMillis).toBeLessThan(due)
   })
 
-  it('still defaults an UNDATED reminder to trigger, because there is nothing to lead', async () => {
+  it('chases an undated reminder rather than filing it and forgetting it', async () => {
+    const device = makeDevice('dev_t1d')
+    const r = await createReminder(device, { title: 'sort the loft out' })
+    expect(r.dueAtMillis).toBeNull()
+    expect(r.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    // No run-up, because there is nothing to count down to — it is asked about, not warned about.
+    expect(leadCountFor(device, r)).toBe(0)
+    expect(dueJobs(r.nextNagAtMillis! + 1000).filter((j) => j.reminderId === r.reminderId)).toHaveLength(1)
+  })
+
+  it('keeps chasing when the owner takes the due date off something', async () => {
+    // clearDue used to be a silent off switch: the row kept its OPEN state and its place in the
+    // lists, and Otto simply stopped mentioning it. "There's no deadline on that any more" is not
+    // "stop reminding me" — that is nagPolicy off, or cancel_reminder.
+    const device = makeDevice('dev_t1e')
+    const r = await createReminder(device, { title: 'the loft', dueAtMillis: inHours(48) })
+    const res = await updateReminder(device, r.reminderId, { dueAtMillis: null })
+    expect(res.ok).toBe(true)
+
+    const after = getReminder(r.reminderId)!
+    expect(after.dueAtMillis).toBeNull()
+    expect(after.nextNagAtMillis!).toBeGreaterThan(Date.now())
+    // The job moved with the row. A rung the queue does not know about never fires.
+    const queued = dueJobs(after.nextNagAtMillis! + 1000).filter((j) => j.reminderId === r.reminderId)
+    expect(queued).toHaveLength(1)
+    expect(queued[0]!.runAtMillis).toBe(after.nextNagAtMillis)
+  })
+
+  it('never ends an undated ladder in answer to being told to push harder', async () => {
+    // The replan clamp, which used to exclude undated rows and so did the opposite of its job: an
+    // undated reminder whose ladder was spent answered "push me harder on the loft" by going
+    // permanently silent.
+    const device = makeDevice('dev_t1f')
+    const r = await createReminder(device, { title: 'the loft' })
+    db.update(reminders).set({ nagCount: 99 }).where(eq(reminders.reminderId, r.reminderId)).run()
+    expect(nextNagAt(ladderParams(device, getReminder(r.reminderId)!, 99, Date.now()))).toBeNull()
+
+    await updateReminder(device, r.reminderId, { nagPolicy: 'relentless' })
+    expect(getReminder(r.reminderId)!.nextNagAtMillis).not.toBeNull()
+  })
+
+  it('files an UNDATED reminder as a deadline waiting for a time', async () => {
+    // The kind is inert while there is no due time — nothing to lead, nothing to be late for — so
+    // this is about what happens the DAY IT GETS ONE. "Sort the loft out, actually by Sunday" should
+    // start warning through the run-up, not go silent until Sunday has been and gone.
     const device = makeDevice('dev_t1b')
     const r = await createReminder(device, { title: 'sort the loft out' })
-    expect(r.timingKind).toBe('trigger')
-    expect(r.nextNagAtMillis).toBeNull()
+    expect(r.timingKind).toBe('deadline')
+    expect(r.dueAtMillis).toBeNull()
   })
 
   it('keeps trigger exactly as it was when it is asked for by name', async () => {
@@ -118,10 +164,13 @@ describe('timing kinds', () => {
     expect(r.nextNagAtMillis).toBe(due)
   })
 
-  it('defaults to persistent rather than gentle — the owner asked to be chased properly', async () => {
+  it('defaults to hard — the owner asked to be warned several times, not twice', async () => {
     const device = makeDevice('dev_t5')
     const r = await createReminder(device, { title: 'x', dueAtMillis: inHours(1) })
-    expect(r.nagPolicy).toBe('persistent')
+    expect(r.nagPolicy).toBe('hard')
+    // Pinned to the constant as well as to the literal: the literal is what the owner asked for,
+    // and the constant is what stops the code and the prompt drifting apart about it.
+    expect(r.nagPolicy).toBe(DEFAULT_NAG_POLICY)
   })
 
   it('re-anchors a recurring deadline so the new occurrence gets real warnings', async () => {
@@ -269,6 +318,6 @@ describe('updateReminder', () => {
 
     await updateReminder(device, r.reminderId, { nagPlan: null })
     expect(getReminder(r.reminderId)!.nagPlan).toBeNull()
-    expect(leadCountFor(device, getReminder(r.reminderId)!)).toBe(tableFor('deadline', 'persistent').lead.length)
+    expect(leadCountFor(device, getReminder(r.reminderId)!)).toBe(tableFor('deadline', DEFAULT_NAG_POLICY).lead.length)
   })
 })

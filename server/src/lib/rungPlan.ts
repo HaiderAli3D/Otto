@@ -44,6 +44,19 @@ export function isNagPolicy(v: unknown): v is NagPolicy {
   return typeof v === 'string' && (NAG_POLICIES as string[]).includes(v)
 }
 
+/**
+ * How hard a reminder is chased when nobody said.
+ *
+ * `hard` rather than `persistent`: the owner asked to be warned several times through a run-up
+ * rather than twice. Rung 0 of a `trigger` is the due instant either way, so nothing about the
+ * FIRST message of an explicitly-silent reminder changes — only how much warning precedes a
+ * deadline, and how long the chase survives once it is past.
+ *
+ * Typed as an INTENSITY rather than a `NagPolicy` so it indexes the tables directly, and so
+ * "default to saying nothing" cannot be written here at all.
+ */
+export const DEFAULT_NAG_POLICY: Exclude<NagPolicy, 'off'> = 'hard'
+
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 
@@ -123,8 +136,24 @@ const TABLE: Record<TimingKind, Record<Exclude<NagPolicy, 'off'>, RungPlan>> = {
       tail: 'daily',
       maxChases: 8,
     },
+    // The last stretch borrows `appointment`'s density on purpose. This is the DEFAULT intensity
+    // now, so it is the ladder almost every reminder actually gets, and the run-up was thin exactly
+    // where it matters most: a deadline you have been warned about a week out is a deadline you
+    // have had a week to forget about. The five-minute rung is the one that catches something
+    // already in hand, and the fifteen is the one that still leaves time to start.
     hard: {
-      lead: [d(7), d(3), d(1), 6 * HOUR, 3 * HOUR, 1 * HOUR, 30 * MINUTE, 10 * MINUTE],
+      lead: [
+        d(7),
+        d(3),
+        d(1),
+        6 * HOUR,
+        3 * HOUR,
+        1 * HOUR,
+        30 * MINUTE,
+        15 * MINUTE,
+        10 * MINUTE,
+        5 * MINUTE,
+      ],
       chase: [0, 10 * MINUTE, 30 * MINUTE, 1 * HOUR, 2 * HOUR, 4 * HOUR, 8 * HOUR],
       tail: 'daily',
       maxChases: 14,
@@ -198,6 +227,62 @@ export function tableFor(kind: TimingKind, policy: Exclude<NagPolicy, 'off'>): R
 }
 
 /**
+ * The ladder for a reminder with NO due time: once each morning, then give up.
+ *
+ * Deliberately NOT a fourth row of `TABLE`. That table is keyed by `TimingKind`, so a fourth row
+ * needs a key that is not a real kind — which either widens the vocabulary the model, the tool
+ * schema and the stored column all share, or invents a second key type every caller has to reason
+ * about. And a `RungPlan` row MEANS "before the due time" and "after the due time", which is
+ * exactly what an undated reminder has not got. Same shape, different anchor, so it gets its own
+ * name rather than a borrowed key.
+ *
+ * `chase: []` with `tail: 'daily'` is the whole schedule, and it falls out of `rungInstant`
+ * unchanged: index 0 is already past the end of an empty chase list, so the first rung is the next
+ * day-start and every rung after it is the one after that. Because `leadAt` is empty too,
+ * `maxChases` is simply the total number of mornings.
+ *
+ * An empty chase list is also what keeps the anchor itself out of the ladder, and that matters more
+ * than it looks. Every one of the twelve dated rows opens `chase: [0, …]` — a rung ON the anchor —
+ * and for an undated reminder the anchor is the moment the owner finished typing. A `0` here would
+ * mean a nudge fired seconds after they asked for the reminder, at any hour, through the one branch
+ * in `nextNagAt` that skips quiet hours.
+ *
+ * Quieter than any dated ladder at the same intensity, on purpose. Nothing here is late, because
+ * there is no deadline to be late for. The job is to keep the thing visible until it is done or
+ * given a date — not to escalate at something nobody has missed.
+ */
+const UNDATED: Record<Exclude<NagPolicy, 'off'>, RungPlan> = {
+  gentle: { lead: [], chase: [], tail: 'daily', maxChases: 5 },
+  persistent: { lead: [], chase: [], tail: 'daily', maxChases: 10 },
+  hard: { lead: [], chase: [], tail: 'daily', maxChases: 14 },
+  relentless: { lead: [], chase: [], tail: 'daily', maxChases: 21 },
+}
+
+/** The undated row for one intensity, untouched by any clock. Exported for tests and previews. */
+export function undatedTableFor(policy: Exclude<NagPolicy, 'off'>): RungPlan {
+  return UNDATED[policy]
+}
+
+/**
+ * The undated ladder as a `ResolvedPlan`, so every consumer of a dated plan works on it unchanged.
+ *
+ * Takes no clock and no zone, and that is the whole difference: with no lead rungs there is nothing
+ * to prune against a planning moment or a quiet window. The anchor is supplied later, at rung time,
+ * by whoever knows it.
+ *
+ * An explicit `leadMinutes`/`chaseMinutes` override is IGNORED rather than honoured, for the reason
+ * `planRungs` ignores a lead array on a `trigger`: both are documented to the model as offsets from
+ * the due time, and there is no due time to offset from. Re-reading them against the planning
+ * moment would hand the owner a schedule nobody asked for — and an explicit `chaseMinutes: [0]`
+ * would fire the instant they finished typing. A stored plan is not discarded; it simply comes back
+ * the moment the reminder is given a date.
+ */
+export function planUndatedRungs(policy: NagPolicy): ResolvedPlan {
+  const base = UNDATED[policy === 'off' ? 'gentle' : policy]
+  return { leadAt: [], chase: base.chase, tail: base.tail, maxChases: base.maxChases, droppedAsTooLate: 0 }
+}
+
+/**
  * The smallest gap this particular ladder asks for between two consecutive rungs.
  *
  * The spacing floor in `nagLadder.ts` exists to stop a quiet-hours pile-up, and its whole
@@ -209,8 +294,8 @@ export function tableFor(kind: TimingKind, policy: Exclude<NagPolicy, 'off'>): R
  *
  * Returns `Infinity` for a single-rung ladder, so callers keep their own default.
  */
-export function tightestGap(plan: ResolvedPlan, dueAtMillis: number): number {
-  const instants = [...plan.leadAt, ...plan.chase.map((ms) => dueAtMillis + ms)]
+export function tightestGap(plan: ResolvedPlan, anchorMillis: number): number {
+  const instants = [...plan.leadAt, ...plan.chase.map((ms) => anchorMillis + ms)]
   let tightest = Number.POSITIVE_INFINITY
   for (let i = 1; i < instants.length; i++) {
     const gap = instants[i]! - instants[i - 1]!

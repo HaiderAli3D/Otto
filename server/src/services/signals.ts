@@ -258,8 +258,16 @@ export function weeklyRecord(deviceId: string, nowMillis: number = Date.now()): 
   // appear in this list. That rule is not delegated to the model — a review is unprompted, so the
   // one thing guaranteed to make the owner stop reading it is being told off for something they
   // already sorted. Being unable to say it is stronger than being told not to.
+  // The two arms are not symmetric, and undated reminders are what makes that show.
+  //
+  // Being MOVED is the owner's own doing, and it counts whether or not the thing has a date —
+  // "later, later, later" about the loft is exactly what this list is for. Being CHASED is Otto's
+  // doing, and for an undated reminder it is automatic: one every morning, so it crosses
+  // SLIPPING_CHASES inside three days and would then sit in the top three for good, crowding out
+  // the dated things that genuinely are sliding. "Chased fourteen times about the loft" is true and
+  // useless — the fourteen is the ladder's number, not the owner's.
   const slippers = open
-    .filter((r) => r.deferCount >= SLIPPING_MOVES || r.nagCount >= SLIPPING_CHASES)
+    .filter((r) => r.deferCount >= SLIPPING_MOVES || (r.dueAtMillis !== null && r.nagCount >= SLIPPING_CHASES))
     .sort((a, b) => b.deferCount - a.deferCount || b.nagCount - a.nagCount)
     .slice(0, 3)
     .map((r) => ({ title: r.title, moved: r.deferCount, chased: r.nagCount }))

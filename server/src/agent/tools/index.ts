@@ -2,7 +2,7 @@ import type OpenAI from 'openai'
 import { newAlarmId } from '../../lib/ids.js'
 import { isNagPolicy, isTimingKind, previewRungs, type NagPolicy, type TimingKind } from '../../lib/nagLadder.js'
 import { deferPastQuietHours } from '../../lib/quietHours.js'
-import { DEFAULT_TIMING_KIND, normaliseOffsets, type NagPlanSpec } from '../../lib/rungPlan.js'
+import { normaliseOffsets, type NagPlanSpec } from '../../lib/rungPlan.js'
 import { armAlarm, cancelAlarm, getAlarm, listArmed } from '../../services/alarms.js'
 import type { Device } from '../../services/devices.js'
 import { forgetFact, markFactsUsed, rememberFact, searchFacts } from '../../services/facts.js'
@@ -337,8 +337,14 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       if (recurrence !== null && dueAtMillis === null) {
         return { error: 'a recurring reminder needs dueLocalISO for its first occurrence' }
       }
-      const nagPolicy: NagPolicy = isNagPolicy(a.nagPolicy) ? a.nagPolicy : 'persistent'
-      const timing: TimingKind = isTimingKind(a.timing) ? a.timing : DEFAULT_TIMING_KIND
+      // Left UNDEFINED when the model said nothing, so `createReminder` decides. Answering here
+      // instead made its default unreachable: `params.timing ?? 'deadline'` could never fire,
+      // because this line had already answered with `trigger` — and `trigger` has zero lead rungs
+      // at every intensity, so a dated reminder the model did not classify said nothing at all
+      // until the moment had gone, which is the one moment the reminder was worthless. A default
+      // belongs where the row is written, not where the arguments are parsed.
+      const nagPolicy: NagPolicy | undefined = isNagPolicy(a.nagPolicy) ? a.nagPolicy : undefined
+      const timing: TimingKind | undefined = isTimingKind(a.timing) ? a.timing : undefined
       const plan = readNagPlan(a)
       if ('error' in plan) return { error: plan.error }
       const r = await createReminder(device, {
@@ -355,8 +361,12 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       return {
         reminderId: r.reminderId,
         dueLocal: dueAtMillis === null ? null : epochMillisToLocalHuman(dueAtMillis, device.timezone),
-        timing,
-        nagPolicy,
+        // What was STORED, not what was passed — both are `undefined` above when the model said
+        // nothing, and handing back `timing: undefined` would tell it nothing about the reminder it
+        // just made. The persona is instructed to confirm from what happened rather than from what
+        // was asked, and it can only do that if the result carries the answer.
+        timing: timingKindOf(r),
+        nagPolicy: r.nagPolicy,
         rings: Boolean(r.alarmId),
         repeats: recurrence ?? undefined,
         ...scheduleReport(device, r, plan.issues),
@@ -434,6 +444,22 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
           : a.dueLocalISO === undefined
             ? undefined
             : localIsoToEpochMillis(String(a.dueLocalISO), device.timezone)
+
+      // The same refusal `create_reminder` makes, on the path that could get round it. A recurrence
+      // needs an anchor instant to roll forward from, so `completeReminder` requires a due time —
+      // and stripping one from a series left the next completion taking the "nothing to roll to"
+      // branch and writing DONE. The whole series ended, silently, and the tool result said
+      // `completed: true` with no next occurrence, so Otto confirmed it cheerfully.
+      const before = getReminder(reminderId)
+      // `recurrence` is three-state here, so `??` is wrong: `clearRecurrence` sets it to null, and
+      // `null ?? before.recurrence` reads that as "leave it alone" — refusing the one call that
+      // legitimately drops both at once.
+      const willRepeat = recurrence === undefined ? (before?.recurrence ?? null) : recurrence
+      if (dueAtMillis === null && before && willRepeat !== null) {
+        return {
+          error: `"${before.title}" repeats, and a repeating reminder needs a due time to roll forward from. Pass clearRecurrence to end the series, or dueLocalISO to move it.`,
+        }
+      }
 
       // `useDefaultSchedule` clears any stored plan; otherwise an absent pair of arrays leaves
       // whatever was there alone. The two are mutually exclusive in effect, and clearing wins —

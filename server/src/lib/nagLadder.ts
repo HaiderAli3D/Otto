@@ -5,6 +5,7 @@ import {
   ABSOLUTE_MAX_RUNGS,
   DEFAULT_TIMING_KIND,
   planRungs,
+  planUndatedRungs,
   tightestGap,
   type NagPlanSpec,
   type NagPolicy,
@@ -19,6 +20,7 @@ export {
   isTimingKind,
   NAG_POLICIES,
   TIMING_KINDS,
+  DEFAULT_NAG_POLICY,
   DEFAULT_TIMING_KIND,
   type NagPlanSpec,
   type NagPolicy,
@@ -89,8 +91,8 @@ export function minRungGapMs(policy: NagPolicy): number {
  * rungs are 20 minutes apart, so a flat 30-minute floor pushed the last warning forward onto the
  * appointment itself and the owner got the heads-up and the "it's now" in the same breath.
  */
-function spacingFloor(policy: NagPolicy, plan: ResolvedPlan, dueAtMillis: number): number {
-  return Math.min(minRungGapMs(policy), tightestGap(plan, dueAtMillis))
+function spacingFloor(policy: NagPolicy, plan: ResolvedPlan, anchorMillis: number): number {
+  return Math.min(minRungGapMs(policy), tightestGap(plan, anchorMillis))
 }
 
 /** Where a rung sits relative to the due time. Drives wording, and nothing else. */
@@ -112,7 +114,7 @@ export function rungPhaseFor(leadCount: number, nagCount: number): RungPhase {
 function rungInstant(
   plan: ResolvedPlan,
   index: number,
-  dueAtMillis: number,
+  anchorMillis: number,
   zone: string,
   nowMillis: number,
   routine: Routine,
@@ -121,13 +123,13 @@ function rungInstant(
 
   const postDue = index - plan.leadAt.length
   if (postDue >= plan.maxChases) return null
-  if (postDue < plan.chase.length) return dueAtMillis + plan.chase[postDue]!
+  if (postDue < plan.chase.length) return anchorMillis + plan.chase[postDue]!
   if (plan.tail === 'stop') return null
 
   // Daily from here, on the owner's own morning rather than a fixed 09:00. Computed as a wall-clock
   // time in the device zone rather than by adding hours to a UTC instant — otherwise a UK owner's
   // nudges drift by an hour every summer.
-  return nextLocalTimeAt(Math.max(dueAtMillis, nowMillis), zone, dayStartHour(routine), dayStartMinute(routine))
+  return nextLocalTimeAt(Math.max(anchorMillis, nowMillis), zone, dayStartHour(routine), dayStartMinute(routine))
 }
 
 /**
@@ -136,6 +138,10 @@ function rungInstant(
  * `nagCount` is how many nudges have ALREADY been sent, so 0 means "the first one is due". Which
  * rung that indexes depends on the timing kind: for a `trigger` rung 0 is the due instant, and for
  * a `deadline` it is the first warning in the run-up, days before anything is late.
+ *
+ * With no due time at all the rungs hang off `plannedAtMillis` instead and there is no lead phase —
+ * see `planUndatedRungs`. An undated reminder is still chased; it simply has nothing to count down
+ * to, so it is asked about each morning rather than warned about in advance.
  *
  * Every parameter past `quiet` is optional and defaults to the pre-timing behaviour — `trigger`,
  * the default routine (day starts 09:00), no explicit plan. That is deliberate and is what lets
@@ -164,23 +170,37 @@ export function nextNagAt(params: {
   const routine = params.routine ?? DEFAULT_ROUTINE
 
   if (policy === 'off') return null
-  // Undated ("someday") reminders never nag on a clock; they surface in lists and the digest.
-  if (dueAtMillis === null) return null
   if (nagCount >= ABSOLUTE_MAX_RUNGS) return null
 
-  const plan = planRungs({
-    kind,
-    policy,
-    dueAtMillis,
-    plannedAtMillis: params.plannedAtMillis ?? nowMillis,
-    zone,
-    override: params.plan ?? null,
-    // Passed so a warning that quiet hours would push past its own deadline is dropped at plan
-    // time rather than delivered late.
-    quiet,
-  })
+  // An undated reminder is chased too. It just has nothing to count down TO.
+  //
+  // A ladder needs one instant to hang its offsets off, and for a dated reminder that is the due
+  // time. With no due time the anchor is the moment the chase was PLANNED — creation, or whichever
+  // edit last re-planned it. Everything below then works unchanged, because nothing in
+  // `rungInstant` or `tightestGap` requires that instant to be a deadline, only that every offset
+  // in the plan is measured from the same place.
+  //
+  // What used to be here was `return null`, and it is what made "sort the loft out" a write-only
+  // note: Otto took it, never mentioned it again, and the owner found out weeks later.
+  const undated = dueAtMillis === null
+  const plannedAt = params.plannedAtMillis ?? nowMillis
+  const anchor = undated ? plannedAt : dueAtMillis
 
-  const at = rungInstant(plan, nagCount, dueAtMillis, zone, nowMillis, routine)
+  const plan = undated
+    ? planUndatedRungs(policy)
+    : planRungs({
+        kind,
+        policy,
+        dueAtMillis,
+        plannedAtMillis: plannedAt,
+        zone,
+        override: params.plan ?? null,
+        // Passed so a warning that quiet hours would push past its own deadline is dropped at plan
+        // time rather than delivered late.
+        quiet,
+      })
+
+  const at = rungInstant(plan, nagCount, anchor, zone, nowMillis, routine)
   if (at === null) return null
 
   // The rung that lands ON the due instant is never moved, by spacing or by quiet hours, as long as
@@ -192,7 +212,12 @@ export function nextNagAt(params: {
   //
   // Keyed on the OFFSET being zero rather than the index being zero: with lead rungs the due
   // instant sits at index `leadAt.length`, not at 0.
-  if (at === dueAtMillis && at >= nowMillis) return at
+  //
+  // Never taken for an undated reminder. Its anchor is an instant WE chose, not one they named, so
+  // it has no claim on their quiet hours. The undated ladder has no rung on its anchor either — see
+  // `UNDATED` — so today this could only fire by accident; the guard is here so that giving it one
+  // later cannot silently reinstate a 3am nudge sent seconds after the owner finished typing.
+  if (!undated && at === anchor && at >= nowMillis) return at
 
   // Nothing has gone out yet, so there is nothing to space this from. Without this branch a
   // reminder created after its own due time would be pushed half an hour into the future instead
@@ -204,7 +229,7 @@ export function nextNagAt(params: {
   //
   // That order is load-bearing. Flooring after the deferral could push a rung that had legitimately
   // cleared the window (say 21:55, with the window opening at 22:00) straight back into it.
-  return deferPastQuietHours(Math.max(at, nowMillis + spacingFloor(policy, plan, dueAtMillis)), zone, quiet)
+  return deferPastQuietHours(Math.max(at, nowMillis + spacingFloor(policy, plan, anchor)), zone, quiet)
 }
 
 /**

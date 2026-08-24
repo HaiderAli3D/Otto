@@ -137,6 +137,33 @@ describe('the escalation ring cooldown', () => {
     expect(getReminder(r.reminderId)!.lastEscalatedAtMillis).not.toBeNull()
   })
 
+  it('never rings the phone for something that cannot be late', async () => {
+    // escalateWithAlarm buys three things — no quiet hours, no daily budget, and a ringing alarm
+    // once badly overdue — all justified by "this is time-critical, wake them". None of them survive
+    // without a due time: the ring is gated on being an hour past a deadline that does not exist, so
+    // an undated escalating reminder would have had every safety valve switched off and the one
+    // thing the flag is for permanently unreachable. It is still chased over WhatsApp.
+    const device = reachableDevice('dev_esc_undated')
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    outOfWindow.value = true
+    const r = await createReminder(device, {
+      title: 'sort the loft out',
+      nagPolicy: 'relentless',
+      escalateWithAlarm: true,
+    })
+    db.update(reminders)
+      .set({ nextNagAtMillis: Date.now() - 1_000 })
+      .where(eq(reminders.reminderId, r.reminderId))
+      .run()
+
+    await runNudge(r.reminderId)
+
+    expect(armedFor(r.reminderId)).toBe(0)
+    expect(getReminder(r.reminderId)!.lastEscalatedAtMillis).toBeNull()
+    // The rung was still spent, so it is being chased — just not rung at.
+    expect(getReminder(r.reminderId)!.nagCount).toBe(1)
+  })
+
   it('does NOT ring again on the very next rung', async () => {
     // The failure this exists for. Escalation fires whenever a rung could not be delivered and the
     // item is an hour overdue, and it used to be bounded only by the ladder being short and slow.

@@ -50,6 +50,18 @@ function roughGap(ms: number): string {
  * then" is what changes the wording, and "timing=deadline" is jargon the model has to translate.
  */
 function describePosition(r: Reminder, phase: RungPhase, now: number): string {
+  // Before the kind is mentioned at all. A kind describes what a due time MEANS, so pairing one
+  // with "it has no date" handed the model a sentence about a time that does not exist — and now
+  // that undated reminders are actually chased, that would have been the wording of every single
+  // one of these. Nothing here is late, and the message must not imply it is: this rung is asking
+  // whether the thing is still wanted, not chasing a miss.
+  if (r.dueAtMillis === null) {
+    return (
+      'This one has NO date on it. Nothing about it is late and you must not suggest it is — you ' +
+      'are checking it is still wanted, and nudging them to either do it or give you a time for it.'
+    )
+  }
+
   const kind = timingKindOf(r)
   const meaning =
     kind === 'deadline'
@@ -58,7 +70,6 @@ function describePosition(r: Reminder, phase: RungPhase, now: number): string {
         ? 'This is an appointment: it happens at that moment and is then over.'
         : 'This is a plain reminder: that time is when they asked to be told, not when anything happens.'
 
-  if (r.dueAtMillis === null) return `${meaning} It has no date.`
   if (phase === 'lead') {
     return (
       `${meaning} It is NOT due yet — they have ${roughGap(r.dueAtMillis - now)} left. ` +
