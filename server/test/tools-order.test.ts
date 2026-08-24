@@ -13,7 +13,10 @@ import {
   REMINDER_LOOP,
   REMINDER_TIMING,
   REPLYING,
+  TACK_ON,
 } from '../src/agent/promptSections.js'
+import { systemPrompt } from '../src/agent/prompt.js'
+import { ensureSchema } from '../src/db/client.js'
 import { buildTools, runTool } from '../src/agent/tools.js'
 import { DEFAULT_NAG_POLICY } from '../src/lib/rungPlan.js'
 
@@ -69,6 +72,9 @@ const EXPECTED = [
   'delete_calendar_event',
   'update_calendar_event',
   'plan_day',
+  // Last of all, same cached-prefix reason again. It has no sibling group: every other tool here
+  // writes to a store or reads one back, and this one changes what Otto is allowed to SAY.
+  'chase_in_reply',
 ]
 
 describe('tool list is deterministic', () => {
@@ -165,6 +171,30 @@ describe('the cached prefix does not contradict itself', () => {
     expect(REPLYING).toMatch(/Still ask before anything\s+destructive/)
     expect(CALENDAR).toContain('Do not ask permission first.')
     expect(CALENDAR).toMatch(/one exception to\s+asking before something destructive/)
+  })
+
+  it('agrees with TACK_ON that calling the tool and then staying quiet loses the chase', () => {
+    // The one tool whose effect the model can undo by changing its mind after calling it. The
+    // warning is therefore written three times — here, in TACK_ON, and in the tool's own result —
+    // and the tool block is the half that wins at the moment of acting.
+    const desc = buildTools().find((t) => t.name === 'chase_in_reply')!.description!
+    expect(desc).toMatch(/SPENDS the chase/)
+    expect(desc).toMatch(/Once per reply/)
+    expect(TACK_ON).toMatch(/spent the chase/)
+    expect(TACK_ON).toMatch(/One\. Not two/)
+  })
+
+  it('keeps REPLYING forbidding follow-ups while naming the one carve-out', () => {
+    // TACK_ON is an exception to REPLYING, not a replacement for it. If the general rule were
+    // softened rather than carved into, Otto would start offering to take on work again — which is
+    // a different thing entirely from chasing what it was already given.
+    expect(REPLYING).toMatch(/don't offer follow-ups they didn't ask for/)
+    expect(REPLYING).toMatch(/work you would be taking ON/)
+    // And the exception must be read AFTER the rule it qualifies, or recency settles it the wrong
+    // way — REPLYING is otherwise the last instruction before # Writing.
+    ensureSchema()
+    const prompt = systemPrompt({ deviceId: 'dev_order', timezone: 'Europe/London' } as never)
+    expect(prompt.indexOf(TACK_ON)).toBeGreaterThan(prompt.indexOf(REPLYING))
   })
 
   it('states the never-pick rule in the tool block as well as the prompt', () => {

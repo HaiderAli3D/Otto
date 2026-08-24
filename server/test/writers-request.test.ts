@@ -29,9 +29,8 @@ afterEach(() => __setModelClient(null))
 const brief = () => ({
   slot: 'morning' as const,
   zone: 'Europe/London',
-  events: [{ summary: 'Standup', startLocal: '09:30' }],
-  reminders: [{ title: 'Dentist', evidence: 'due today' }],
-  alarms: [{ label: 'Wake', firesAtLocal: '07:00' }],
+  counts: { events: 1, reminders: 1, alarms: 1 },
+  first: { what: 'Standup', atLocal: '09:30' },
   calendarUnreachable: false,
 })
 

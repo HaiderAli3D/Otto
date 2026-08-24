@@ -118,8 +118,9 @@ export function describeBudget(device: Device, nowMillis: number = Date.now()): 
   if (b.exhausted) {
     return (
       `You have sent the owner ${b.spent} messages today and are at your daily ceiling of ${b.limit}. ` +
-      'Anything else you were going to raise waits until after midnight. Replying to them is unaffected. ' +
-      'Do not promise a chase you cannot make tonight.'
+      'Anything else you were going to raise on your own waits until after midnight. Replying to them ' +
+      'is unaffected, and so is tacking one thing onto a reply — that spends no message, because it ' +
+      'cancels one you were going to send. Do not promise a chase you cannot make tonight.'
     )
   }
   if (b.spent >= Math.ceil(b.limit * 0.8)) {

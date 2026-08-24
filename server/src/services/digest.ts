@@ -8,11 +8,19 @@ import { epochMillisToLocalHuman, localDateKey, sameLocalDay } from './time.js'
 /**
  * The queued messages that already enumerate the owner's open items, so a digest would say it twice.
  *
- * A list rather than a literal `=== 'brief'`, because that is exactly the shape that let the weekly
+ * A list rather than a literal `=== 'weekly'`, because that is exactly the shape that let the weekly
  * review slip past: the next branch that adds a summarising kind adds it here, in one place, next to
  * the reason.
+ *
+ * `'brief'` USED to be in here and deliberately is not any more. The morning brief no longer
+ * enumerates anything — it is one line about the size of the day, and the items it counts are
+ * expected to arrive on their own afterwards. Retiring a real backlog on its behalf would drop
+ * messages the owner never saw in favour of a sentence that never named them. The evening brief does
+ * still list, but it is about TOMORROW and is off by default, so it does not cover today's backlog
+ * either; the outbox row carries no slot, so there is nothing finer to key on and nothing worth
+ * keying on. A stale backlog now becomes a digest, which is the mechanism built for it.
  */
-const SUMMARY_KINDS: readonly OutboxKind[] = ['brief', 'weekly']
+const SUMMARY_KINDS: readonly OutboxKind[] = ['weekly']
 
 /**
  * Queued nudges older than this are considered a backlog worth collapsing rather than replaying.

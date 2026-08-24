@@ -55,6 +55,14 @@ export function ladderParams(
     plannedAtMillis: r.plannedAtMillis ?? r.createdAt,
     routine: schedulingRoutine(device),
     plan: parseNagPlan(r.nagPlan),
+    // The whole switch-on for the fan-out. Every instant Otto picks for ITSELF — a rung a quiet
+    // window released, a daily chase on an exhausted ladder — is otherwise identical for every
+    // reminder in the database, so a backlog arrives as one burst. Keyed on the reminder id so the
+    // slot is stable for the life of the item however many times the rung is recomputed.
+    //
+    // Here rather than at the five call sites for the same reason as everything else in this
+    // function: a site that forgot it would quietly reinstate the pile-up for its own path only.
+    spreadKey: r.reminderId,
   }
 }
 

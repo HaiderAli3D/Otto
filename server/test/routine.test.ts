@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_ROUTINE, dayStartHour, dayStartMinute, describeRoutine, formatWindow, parseRoutine } from '../src/lib/routine.js'
+import { DateTime } from 'luxon'
+import {
+  DEFAULT_ROUTINE,
+  bedEndHour,
+  bedEndMinute,
+  dayStartHour,
+  dayStartMinute,
+  describeRoutine,
+  formatWindow,
+  impliedQuietHours,
+  parseRoutine,
+  wakingDayEndsAt,
+} from '../src/lib/routine.js'
 
 /**
  * The routine is context rather than a gate, so almost nothing here is about suppression. What it IS
@@ -63,5 +75,79 @@ describe('describeRoutine', () => {
     expect(text).toContain('10:00')
     expect(text).toContain('14:00')
     expect(text).toMatch(/Nothing stops you reaching them at any hour/)
+  })
+})
+
+
+/**
+ * Every instant below is an explicit ISO string in a named zone. Nothing here reads `Date.now()`,
+ * so none of it can pass or fail by the hour the suite happens to run at — the bug class this
+ * repository has fixed twice.
+ */
+const ZONE = 'Europe/London'
+const at = (iso: string): number => DateTime.fromISO(iso, { zone: ZONE }).toMillis()
+const local = (ms: number): string => DateTime.fromMillis(ms, { zone: ZONE }).toFormat('yyyy-MM-dd HH:mm')
+
+/** The owner this whole change was built for: up at noon, bed at two. */
+const NIGHT_OWL = parseRoutine('01:00-02:00', '11:00-12:00')!
+
+describe('bedEnd', () => {
+  it('is the LATEST bedtime, split into hour and minute', () => {
+    expect(bedEndHour(NIGHT_OWL)).toBe(2)
+    expect(bedEndMinute(NIGHT_OWL)).toBe(0)
+    expect(bedEndMinute(parseRoutine('01:00-02:45', '11:00-12:00')!)).toBe(45)
+  })
+})
+
+describe('wakingDayEndsAt', () => {
+  it('runs past midnight — tonight, not the end of the calendar day', () => {
+    // The whole reason this exists rather than `endOf('day')`. At noon on the 3rd, "the rest of
+    // today" for someone who goes to bed at two ends at 02:00 on the 4th.
+    expect(local(wakingDayEndsAt(NIGHT_OWL, ZONE, at('2026-08-03T12:00')))).toBe('2026-08-04 02:00')
+  })
+
+  it('is still ahead of them at one in the morning', () => {
+    expect(local(wakingDayEndsAt(NIGHT_OWL, ZONE, at('2026-08-04T01:00')))).toBe('2026-08-04 02:00')
+  })
+
+  it('rolls to the next one once they are past it', () => {
+    expect(local(wakingDayEndsAt(NIGHT_OWL, ZONE, at('2026-08-04T03:00')))).toBe('2026-08-05 02:00')
+  })
+
+  it('lands on the stated wall-clock time across a DST change, not an hour either side', () => {
+    // Asserted as a local clock string, never as a millisecond delta: the clocks go back on
+    // 2026-10-25, so "+14h" and "02:00" are different answers and only one of them is right.
+    expect(local(wakingDayEndsAt(NIGHT_OWL, ZONE, at('2026-10-24T23:00')))).toBe('2026-10-25 02:00')
+    expect(local(wakingDayEndsAt(NIGHT_OWL, ZONE, at('2026-03-28T23:00')))).toBe('2026-03-29 02:00')
+  })
+})
+
+describe('impliedQuietHours', () => {
+  it('runs from the latest bedtime to the point they are certainly up', () => {
+    // END at wake.END, the same edge dayStartHour reads. Someone who says they are up at noon
+    // means nothing before noon — an end at 11:00 would satisfy the symmetry and miss the point.
+    expect(impliedQuietHours(NIGHT_OWL)).toBe('02:00-12:00')
+  })
+
+  it('reproduces the old server-wide default for the old default routine', () => {
+    // DEFAULT_ROUTINE is bed 23:00-01:00, wake 07:00-09:00 — so an owner who happened to state
+    // exactly that gets 01:00-09:00, close to QUIET_HOURS_DEFAULT and never wilder than it.
+    expect(impliedQuietHours(DEFAULT_ROUTINE)).toBe('01:00-09:00')
+  })
+
+  it('is storage form, hyphen not en dash, so it parses back', () => {
+    // formatQuietHours is prose for the owner and uses an en dash; feeding that to parseQuietHours
+    // silently gives null, which would mean "no quiet hours at all" for someone who set some.
+    expect(impliedQuietHours(NIGHT_OWL)).not.toContain('–')
+  })
+
+  it('is null when the window would be degenerate', () => {
+    // bed.end === wake.end is ambiguous between a zero-length window and a 24h one. Better to
+    // derive nothing than to write a string the parser will reject at every read site.
+    expect(impliedQuietHours(parseRoutine('01:00-02:00', '00:00-02:00')!)).toBeNull()
+  })
+
+  it('carries a non-zero minute through both edges', () => {
+    expect(impliedQuietHours(parseRoutine('01:00-02:30', '11:00-12:15')!)).toBe('02:30-12:15')
   })
 })

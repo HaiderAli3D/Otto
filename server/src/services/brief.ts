@@ -6,9 +6,9 @@ import { reminders } from '../db/schema.js'
 import { nextBriefRunAt, slotForRunAt, type BriefSlot } from '../lib/briefSchedule.js'
 import { log } from '../lib/log.js'
 import { MIN_RUNG_GAP_MS } from '../lib/nagLadder.js'
+import { wakingDayEndsAt } from '../lib/routine.js'
 import { listArmed } from './alarms.js'
 import { getDevice, type Device } from './devices.js'
-import { BACKLOG_AGE_MS } from './digest.js'
 import { hasGoogle, tryListCalendarEvents } from './google.js'
 import { cancelJobsForDevice, cancelNudges, enqueueJob, ensureSingletonJob } from './jobs.js'
 import {
@@ -20,7 +20,7 @@ import {
   windowOpen,
 } from './outbox.js'
 import { leadCountFor, listReminders, type Reminder } from './reminders.js'
-import { getSettings, markBriefSent } from './settings.js'
+import { getSettings, markBriefSent, schedulingRoutine } from './settings.js'
 import { reminderEvidence } from './signals.js'
 import { localDateKey, sameLocalDay } from './time.js'
 
@@ -44,15 +44,26 @@ const EVENING_TTL_MS = 3 * 60 * 60 * 1000
 /**
  * Hard ceiling on reminders handed to the composer. The prompt already says three or four items, but
  * that is an instruction to a model; this is the guarantee. Thirty open reminders would otherwise
- * become a thirty-line fallback on the morning the API is down.
+ * become a thirty-line fallback on the evening the API is down.
+ *
+ * EVENING ONLY now. The morning slot hands over counts rather than rows, so there is no list for a
+ * cap to truncate — and truncating the COUNT would be a lie about the size of their day.
  */
 const MAX_REMINDERS = 6
 
 /**
- * A nudge due within this of the brief is saying the same thing at the same moment, so the brief
- * speaks for it. Wide enough to cover the window-edge pile-up (every overnight rung resolves to the
- * exact millisecond quiet hours end, which is also the default brief time) without reaching so far
- * forward that the brief quietly owns the rest of the morning.
+ * A nudge due within this of the brief lands in the same breath as it, so the rung is held.
+ *
+ * The reason has CHANGED even though the number has not, and the difference matters to anyone
+ * reading this next. It used to be about repetition: the brief named the item and the nudge then
+ * named it again. The morning brief names nothing now, so this is about BURST — one line about the
+ * shape of the day plus a chase, inside a single scheduler tick, reads as two messages at once on
+ * the owner's phone.
+ *
+ * `lib/spread.ts` makes this rare rather than routine: rungs a quiet window releases are fanned
+ * across the hours after it, and the fan-out is strictly positive precisely so nothing lands back on
+ * the release edge — which for an owner whose window ends when their day starts IS the brief instant.
+ * What is left is coincidence, and this catches it.
  */
 const COVERED_BY_BRIEF_MS = 20 * 60 * 1000
 
@@ -100,26 +111,47 @@ async function safeCalendarEvents(
 }
 
 /**
- * Everything the brief may mention for one slot, or null when there is nothing to say.
+ * The instant this waking day ends — the owner's next bedtime, not midnight.
  *
- * The window is [now, end of today] for a morning brief and the whole of tomorrow for an evening
+ * "The rest of today" for someone who goes to bed at two in the morning runs past midnight, so
+ * `endOf('day')` would cut their evening in half and call a 01:30 rung tomorrow's problem.
+ */
+function dayEndsAt(device: Device, nowMillis: number): number {
+  return wakingDayEndsAt(schedulingRoutine(device), device.timezone, nowMillis)
+}
+
+/**
+ * Everything the brief may say for one slot, or null when there is nothing to say.
+ *
+ * The two slots return genuinely different things, and the union type is what forces every consumer
+ * to notice:
+ *
+ * - MORNING is the SHAPE of the day — how many things, and the next one. Not a list. Every item it
+ *   counts carries its own ladder and will reach the owner at the moment it actually matters, and
+ *   `lib/spread.ts` is what stops those moments arriving together. Listing them here as well was
+ *   saying everything twice, once when it was useless.
+ * - EVENING is about TOMORROW and still lists, because nothing in tomorrow can announce itself
+ *   before they read it.
+ *
+ * The window is [now, their bedtime] for a morning brief and the whole of tomorrow for an evening
  * one. Morning starts at NOW rather than at midnight because an event that already happened is not
- * news at 07:00.
+ * news, and it ENDS at their bedtime rather than at midnight for the same reason in reverse.
  *
  * MUST NOT CONTAIN renderRecord(), and this is the sharpest call in the feature. The aggregate
  * 14-day record ("3 alarms slept through, 2 reminders dropped") is the evidence Otto is entitled to
  * cite when he is CHASING — it lands in the middle of a conversation the owner started, about a
- * thing they just failed to do. Delivering the same numbers unprompted at 07:00 is a performance
- * review before coffee, and it is exactly how a proactive feature gets muted in week one. The
- * per-item `reminderEvidence` on the specific thing being mentioned is IN — "chased 4×" about the
- * dentist call is a fact about the item. The aggregate about THEM is OUT.
+ * thing they just failed to do. Delivering the same numbers unprompted at the start of their day is
+ * a performance review before coffee, and it is exactly how a proactive feature gets muted in week
+ * one.
  */
 export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: number): Promise<BriefInput | null> {
   const zone = device.timezone
   const nowLocal = DateTime.fromMillis(nowMillis, { zone })
-  const day = slot === 'morning' ? nowLocal : nowLocal.plus({ days: 1 })
-  const from = slot === 'morning' ? nowLocal : day.startOf('day')
-  const to = day.endOf('day')
+  const morning = slot === 'morning'
+  const from = morning ? nowLocal : nowLocal.plus({ days: 1 }).startOf('day')
+  const to = morning
+    ? DateTime.fromMillis(dayEndsAt(device, nowMillis), { zone })
+    : nowLocal.plus({ days: 1 }).endOf('day')
 
   const calendar = await safeCalendarEvents(device.deviceId, localIso(from), localIso(to))
   const events = calendar.events
@@ -128,16 +160,9 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
     .filter((e) => e.startIso.includes('T'))
     .map((e) => ({ summary: e.summary, at: DateTime.fromISO(e.startIso, { zone }) }))
     .filter((e) => e.at.isValid)
-    .map((e) => ({ summary: e.summary, startLocal: e.at.toFormat('HH:mm') }))
+    .sort((a, b) => a.at.toMillis() - b.at.toMillis())
 
   const open = listReminders(device.deviceId, { state: 'open' })
-  const reminders = remindersForBrief(open).map((r) => ({
-    title: r.title,
-    // leadCount so a deadline still in its run-up reads as "warned 3× beforehand" rather than
-    // "chased 3×" — the brief is unprompted, and being sharp there about something not yet late is
-    // the worst place to get it wrong.
-    evidence: reminderEvidence(r, zone, nowMillis, leadCountFor(device, r)),
-  }))
 
   // Alarms a reminder is RENTING are already being reported as that reminder. Listing both
   // double-reports one thing — "Call the dentist" and "09:00 Call the dentist" are the same item,
@@ -146,69 +171,120 @@ export async function collectBrief(device: Device, slot: BriefSlot, nowMillis: n
   const rented = new Set(open.map((r) => r.alarmId).filter((id): id is string => id !== null))
   const fromMs = from.toMillis()
   const toMs = to.toMillis()
-  const alarms = listArmed(device.deviceId)
+  const armed = listArmed(device.deviceId)
     .filter((a) => !rented.has(a.alarmId) && a.triggerAtMillis >= fromMs && a.triggerAtMillis <= toMs)
     .sort((a, b) => a.triggerAtMillis - b.triggerAtMillis)
-    .map((a) => ({ label: a.label, firesAtLocal: DateTime.fromMillis(a.triggerAtMillis, { zone }).toFormat('HH:mm') }))
 
-  // An unreachable calendar on its own is NOT worth a message: `tryListCalendarEvents` has already
-  // queued the reconnect-link warning for the one cause that never heals by itself, and a
-  // 07:00 "I couldn't read your calendar" next to nothing else is the empty proactive message this
-  // whole module is built to avoid. Silence stays the rule; honesty only applies to a brief that
-  // was going out anyway.
+  if (morning) {
+    // Today's business only. Events and alarms are already windowed; reminders never were, and that
+    // asymmetry is what would otherwise let a deadline five days out be counted as part of today —
+    // every day, for five days, which is the dump rebuilt one item at a time. Undated items count:
+    // they have no date to fall outside the window, and they are exactly the things that go missing.
+    const todays = open.filter((r) => r.dueAtMillis === null || r.dueAtMillis <= toMs)
+
+    // An unreachable calendar on its own is NOT worth a message: `tryListCalendarEvents` has already
+    // queued the reconnect-link warning for the one cause that never heals by itself, and a lone
+    // "I couldn't read your calendar" is the empty proactive message this whole module is built to
+    // avoid. Silence stays the rule; honesty only applies to a brief that was going out anyway.
+    if (events.length === 0 && todays.length === 0 && armed.length === 0) return null
+
+    return {
+      slot: 'morning',
+      zone,
+      counts: { events: events.length, reminders: todays.length, alarms: armed.length },
+      first: firstTimedThing(events, armed, zone),
+      calendarUnreachable: calendar.unreachable,
+    }
+  }
+
+  const reminders = remindersForBrief(open).map((r) => ({
+    title: r.title,
+    // leadCount so a deadline still in its run-up reads as "warned 3× beforehand" rather than
+    // "chased 3×" — the brief is unprompted, and being sharp there about something not yet late is
+    // the worst place to get it wrong.
+    evidence: reminderEvidence(r, zone, nowMillis, leadCountFor(device, r)),
+  }))
+  const alarms = armed.map((a) => ({
+    label: a.label,
+    firesAtLocal: DateTime.fromMillis(a.triggerAtMillis, { zone }).toFormat('HH:mm'),
+  }))
   if (events.length === 0 && reminders.length === 0 && alarms.length === 0) return null
-  return { slot, zone, events, reminders, alarms, calendarUnreachable: calendar.unreachable }
+  return {
+    slot: 'evening',
+    zone,
+    events: events.map((e) => ({ summary: e.summary, startLocal: e.at.toFormat('HH:mm') })),
+    reminders,
+    alarms,
+    calendarUnreachable: calendar.unreachable,
+  }
 }
 
 /**
- * Retire a stale nudge backlog the brief is about to cover anyway.
+ * The next timed thing left in the day, across both calendar and alarms, or null.
  *
- * Half of the two-way handshake with services/digest.ts (the other half is there, for when the brief
- * lands first). The brief lists these same reminders, so replaying six nudges the owner never saw
- * AND a brief about them is the double-up. Same age threshold as the digest, imported rather than
- * copied so the two can never disagree about what "stale" means.
+ * The one item a morning brief is allowed to NAME. "Three things today" on its own is a number
+ * rather than a sentence, and the anchor is what makes it useful without becoming a list.
  *
- * ONLY call this when the brief is genuinely about to go out — see the window check at the call
- * site. Retiring the backlog for a brief that then expires unseen is not a double-up avoided, it is
- * every message lost.
+ * Reminders are deliberately not eligible. A reminder's due time is when Otto will chase them about
+ * it anyway, so naming it here spends the surprise and then repeats it an hour later; an event or an
+ * alarm is something they have to BE somewhere for.
  */
+function firstTimedThing(
+  events: Array<{ summary: string; at: DateTime }>,
+  alarms: Array<{ label: string; triggerAtMillis: number }>,
+  zone: string,
+): { what: string; atLocal: string } | null {
+  const candidates: Array<{ what: string; at: number }> = [
+    ...events.map((e) => ({ what: e.summary, at: e.at.toMillis() })),
+    ...alarms.map((a) => ({ what: a.label, at: a.triggerAtMillis })),
+  ].sort((a, b) => a.at - b.at)
+  const first = candidates[0]
+  if (first === undefined) return null
+  return { what: first.what, atLocal: DateTime.fromMillis(first.at, { zone }).toFormat('HH:mm') }
+}
+
 /**
- * Which open reminders the brief actually names. One source of truth, because two things depend on
- * it: what the composer is told, and which nudges are therefore redundant right now.
+ * Which open reminders the EVENING brief names. Morning hands over counts, so it never comes here.
  */
 function remindersForBrief(open: Reminder[]): Reminder[] {
   return [...open].sort(byDue).slice(0, MAX_REMINDERS)
 }
 
+/** Is this rung about to fire in the same breath as the brief? One predicate, two callers. */
+function rungIsAboutNow(r: Reminder, nowMillis: number): boolean {
+  return r.nextNagAtMillis !== null && r.nextNagAtMillis <= nowMillis + COVERED_BY_BRIEF_MS
+}
+
 /**
- * A nudge due about now for something the brief just named would repeat it word for word.
+ * Push a rung that would land in the same scheduler tick as the brief.
  *
- * This is the window-edge collision, and it is the whole reason it exists: quiet hours defer every
- * overnight rung to the exclusive end of the window, `deferPastQuietHours` returns that end with no
- * spread, and the default brief sits on the same boundary. Three reminders chased overnight
- * therefore resolve to ONE instant — 07:00:00.000 — which is also when the brief goes out. Measured
- * on the merged tree: the brief listing all three, then three nudges chasing those same three, four
- * messages inside a single scheduler tick.
+ * NOT about repetition any more. The morning brief names nothing, so a chase arriving alongside it
+ * is not a restatement — it is two messages at once, which on a phone is one buzz that turns into
+ * two and reads as the burst this whole change exists to end.
  *
- * `supersedeStaleNudges` cannot catch these: it retires outbox ROWS older than two hours, and these
- * are job rows that become outbox rows at the same instant, aged 0 ms.
+ * `lib/spread.ts` does the structural half: rungs a quiet window releases are fanned out, and the
+ * offset is strictly positive so nothing lands back on the release edge — which for an owner whose
+ * window ends when their day begins is also the brief instant. This catches what is left, which is
+ * coincidence rather than the old guaranteed collision.
  *
- * So the rung is PUSHED, not spent: `nagCount` is untouched, because the brief did the chasing and
- * the ladder should resume from where it was if the thing is still open half an hour later. Spending
- * a rung here would inflate the "chased N×" counter the persona cites as evidence — the same reason
- * the quiet-hours defer in `runNudge` is placed before the claim rather than after it.
+ * Widened from "the reminders the brief named" to every open reminder, because there is no named
+ * list to scope it to any more, and a rung is either about to fire alongside the brief or it is not.
+ *
+ * The rung is PUSHED, not spent: `nagCount` is untouched. Spending one here would inflate the
+ * "chased N×" counter the persona cites as evidence, for a message that did nothing but move.
  */
 function holdNudgesCoveredByBrief(device: Device, open: Reminder[], nowMillis: number): void {
   const pushTo = nowMillis + MIN_RUNG_GAP_MS
   let held = 0
-  for (const r of remindersForBrief(open)) {
-    if (r.nextNagAtMillis === null || r.nextNagAtMillis > nowMillis + COVERED_BY_BRIEF_MS) continue
+  for (const r of open) {
+    const rung = r.nextNagAtMillis
+    if (rung === null || !rungIsAboutNow(r, nowMillis)) continue
     // Guarded on the rung we read, exactly like the other deferral paths: better-sqlite3 is
     // synchronous, so with no await in between this cannot land on top of a rung runNudge claimed.
     const moved = db
       .update(reminders)
       .set({ nextNagAtMillis: pushTo, updatedAt: nowMillis })
-      .where(and(eq(reminders.reminderId, r.reminderId), eq(reminders.nextNagAtMillis, r.nextNagAtMillis)))
+      .where(and(eq(reminders.reminderId, r.reminderId), eq(reminders.nextNagAtMillis, rung)))
       .run()
     if (moved.changes === 0) continue
     cancelNudges(r.reminderId)
@@ -216,14 +292,7 @@ function holdNudgesCoveredByBrief(device: Device, open: Reminder[], nowMillis: n
     enqueueJob('nudge', pushTo, { reminderId: r.reminderId, deviceId: device.deviceId })
     held++
   }
-  if (held > 0) log.info({ deviceId: device.deviceId, held }, 'brief: held nudges it just covered itself')
-}
-
-function supersedeStaleNudges(waUserId: string, nowMillis: number): void {
-  const stale = pendingFor(waUserId).filter((r) => r.kind === 'nudge' && nowMillis - r.createdAt > BACKLOG_AGE_MS)
-  if (stale.length === 0) return
-  markSuperseded(stale.map((r) => r.id))
-  log.info({ waUserId, superseded: stale.length }, 'brief: retired a stale nudge backlog it already covers')
+  if (held > 0) log.info({ deviceId: device.deviceId, held }, 'brief: held nudges landing in its own tick')
 }
 
 /**
@@ -270,28 +339,29 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
 
   const body = await composeBrief(input)
 
-  // Retire the backlog ONLY when this brief is actually about to be read. A queued brief is not a
+  // Hold colliding rungs ONLY when this brief is actually about to be read. A queued brief is not a
   // delivered one: with the window shut it is a row with a 3–4h fuse, and if that fuse burns out
-  // `flushOutbox` drops it EXPIRED. Superseding first would spend three real nudges on a message
-  // nobody ever saw and leave the owner with nothing — the same silence as the expired-brief case in
-  // digest.ts, reached from the other side. Left queued instead, the nudges survive to next contact,
-  // where `maybeCollapseBacklog` decides between them and a still-live brief.
+  // `flushOutbox` drops it EXPIRED. Moving rungs for a message nobody ever saw would delay real
+  // chases on behalf of silence.
+  //
+  // The old `supersedeStaleNudges` pass is GONE from here, and its counterpart has been removed from
+  // digest.ts's SUMMARY_KINDS. It retired a stale nudge backlog on the grounds that "the brief lists
+  // these same reminders" — which stopped being true the day the morning brief became one line about
+  // the size of the day. Retiring a backlog on behalf of a sentence that never names it would drop
+  // messages the owner had not seen. A stale backlog now collapses into a digest on next contact,
+  // which is the mechanism built for exactly that.
   //
   // Re-read the device rather than trusting the snapshot the handler passed in: `composeBrief` can
   // sit on a socket for 15s, and an inbound message arriving in that window is exactly what opens
   // the window. `enqueueAndTryFlush` re-reads for the same reason. No await between this read and
-  // the write it decides, so the flush below cannot deliver a nudge we meant to retire.
+  // the write it decides, so the flush below cannot race a rung we meant to move.
   //
-  // "Actually about to be read" now also means "not held for quiet hours". An owner who moved their
-  // brief to 06:30 inside a 22:00–07:00 window gets a row the delivery gate holds until 07:00, which
-  // is every bit as undelivered as a shut window — while the nudges it would retire are exempt and
-  // about to go out on their own.
+  // "Actually about to be read" now also means "not held for quiet hours". An owner whose brief sits
+  // just inside their window gets a row the delivery gate holds until the window ends, which is
+  // every bit as undelivered as a shut window — while the nudges it would collide with are exempt
+  // and about to go out on their own.
   const current = getDevice(device.deviceId) ?? device
   if (windowOpen(current, nowMillis) && !heldByQuietHours(current, 'brief', nowMillis)) {
-    supersedeStaleNudges(waUserId, nowMillis)
-    // Same condition, same reason, different age of nudge: the backlog above is what the owner never
-    // saw, this is what is about to be said twice in the same second. Both only when the brief is
-    // genuinely going out — a held brief must not silence the nudges that would have covered for it.
     holdNudgesCoveredByBrief(current, listReminders(current.deviceId, { state: 'open' }), nowMillis)
   }
 

@@ -1,7 +1,8 @@
 import { DateTime } from 'luxon'
 import { describe, expect, it } from 'vitest'
 import { MAX_NAGS, nextNagAt, nudgeText, nudgeTextFor } from '../src/lib/nagLadder.js'
-import { deferPastQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
+import { deferPastQuietHours, inQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
+import { MORNING_SPREAD_MS, spreadOffsetMs } from '../src/lib/spread.js'
 import { parseRoutine } from '../src/lib/routine.js'
 import { planRungs, tableFor, undatedTableFor, type NagPolicy, type TimingKind } from '../src/lib/rungPlan.js'
 
@@ -444,5 +445,269 @@ describe('nudgeText', () => {
     const d = nudgeText('Take the bins out', 5, 'due Mon, 3 Aug 2026, 18:00')
     expect(new Set([a, b, c, d]).size).toBe(4)
     expect(d).toContain('due Mon, 3 Aug 2026, 18:00')
+  })
+})
+
+/**
+ * The fan-out. Every case here supplies `spreadKey` explicitly — the rest of this file deliberately
+ * does not, which is what pins that the spread is opt-in and that the pre-spread instants are
+ * unchanged for every caller that predates it.
+ *
+ * No clock is read anywhere: every instant is an explicit ISO string, so nothing here can pass or
+ * fail by the hour the suite runs at.
+ */
+describe('nextNagAt spread', () => {
+  const NOON_OWNER = parseRoutine('01:00-02:00', '11:00-12:00')!
+
+  describe('the invariants it must not break', () => {
+    it('never moves the due instant the owner picked, even with a key', () => {
+      // The one branch that returns before the spread is reachable. A reminder due 23:30 inside a
+      // quiet window still fires at 23:30, because that is the time they named.
+      const due = at('2026-08-03T23:30:00')
+      const got = nextNagAt({
+        policy: 'persistent',
+        nagCount: 0,
+        dueAtMillis: due,
+        zone: ZONE,
+        nowMillis: at('2026-08-03T20:00:00'),
+        quiet: NIGHT,
+        kind: 'trigger',
+        spreadKey: 'rem_due_exempt',
+      })
+      expect(got).toBe(due)
+    })
+
+    it('still exempts the due instant when it sits after a run of lead rungs', () => {
+      // With lead rungs the due instant is at index leadAt.length, not 0 — the case the exemption
+      // is keyed on the OFFSET being zero rather than the index being zero.
+      // Same clock for the plan and the call: `nextNagAt` re-plans internally, so a plan built at a
+      // different instant prunes a different number of lead rungs and `leadAt.length` stops being
+      // the index of the due rung at all.
+      const due = at('2026-08-06T15:00:00')
+      const now = at('2026-08-06T09:00:00')
+      const plan = planRungs({
+        kind: 'deadline',
+        policy: 'persistent',
+        dueAtMillis: due,
+        plannedAtMillis: now,
+        zone: ZONE,
+        override: null,
+        quiet: NIGHT,
+      })
+      expect(plan.leadAt.length).toBeGreaterThan(0)
+      const got = nextNagAt({
+        policy: 'persistent',
+        nagCount: plan.leadAt.length,
+        dueAtMillis: due,
+        zone: ZONE,
+        nowMillis: now,
+        plannedAtMillis: now,
+        quiet: NIGHT,
+        kind: 'deadline',
+        spreadKey: 'rem_due_exempt_lead',
+      })
+      expect(got).toBe(due)
+    })
+
+    it('leaves a rung that legitimately cleared the window exactly where it was', () => {
+      // 21:55 against a window opening at 22:00. The spacing floor runs before the deferral and the
+      // spread runs after it, so a rung the window never touched must come back untouched.
+      const due = at('2026-08-03T18:00:00')
+      const got = nextNagAt({
+        policy: 'gentle',
+        nagCount: 1,
+        dueAtMillis: due,
+        zone: ZONE,
+        nowMillis: at('2026-08-03T21:25:00'),
+        quiet: NIGHT,
+        kind: 'trigger',
+        spreadKey: 'rem_cleared',
+      })
+      expect(local(got!)).toBe('2026-08-03 21:55')
+    })
+
+    it('never pushes a lead rung past the deadline it is warning about', () => {
+      // The test that catches a naive spread. A warning deferred to 07:00 for something due at
+      // 08:00 has an hour of room; adding up to three hours of fan-out would land the heads-up
+      // after the thing had already happened.
+      const due = at('2026-08-04T08:00:00')
+      const now = at('2026-08-01T12:00:00')
+      const plan = planRungs({
+        kind: 'deadline',
+        policy: 'hard',
+        dueAtMillis: due,
+        plannedAtMillis: now,
+        zone: ZONE,
+        override: null,
+        quiet: NIGHT,
+      })
+      for (let i = 0; i < plan.leadAt.length; i++) {
+        const got = nextNagAt({
+          policy: 'hard',
+          nagCount: i,
+          dueAtMillis: due,
+          zone: ZONE,
+          nowMillis: now,
+          quiet: NIGHT,
+          kind: 'deadline',
+          spreadKey: 'rem_lead_clamp',
+        })
+        if (got === null) continue
+        expect(got).toBeLessThan(due)
+      }
+    })
+
+    it('does not spread a chase the window never moved — escalating reminders included', () => {
+      // escalateWithAlarm resolves to `quiet: null` upstream, so nothing is ever window-moved for
+      // it. Its ordinary chases must land exactly on the table's own offsets.
+      const due = at('2026-08-03T23:00:00')
+      const plain = nextNagAt({
+        policy: 'persistent',
+        nagCount: 1,
+        dueAtMillis: due,
+        zone: ZONE,
+        nowMillis: due,
+        quiet: null,
+        kind: 'trigger',
+      })
+      const keyed = nextNagAt({
+        policy: 'persistent',
+        nagCount: 1,
+        dueAtMillis: due,
+        zone: ZONE,
+        nowMillis: due,
+        quiet: null,
+        kind: 'trigger',
+        spreadKey: 'rem_escalating',
+      })
+      expect(keyed).toBe(plain)
+    })
+
+    it('changes nothing at all when no key is supplied', () => {
+      const due = at('2026-08-03T23:00:00')
+      const params = {
+        policy: 'persistent' as const,
+        nagCount: 1,
+        dueAtMillis: due,
+        zone: ZONE,
+        nowMillis: due,
+        quiet: NIGHT,
+        kind: 'trigger' as const,
+      }
+      expect(nextNagAt(params)).toBe(deferPastQuietHours(due + 30 * 60_000, ZONE, NIGHT))
+    })
+  })
+
+  describe('the pile-ups it is for', () => {
+    it('fans out rungs a quiet window released onto one instant', () => {
+      // Without a key these six all resolve to 07:00:00.000 — the collision the brief has had to
+      // patch around since quiet hours existed.
+      const due = at('2026-08-03T23:00:00')
+      const results = ['a', 'b', 'c', 'd', 'e', 'f'].map(
+        (k) =>
+          nextNagAt({
+            policy: 'persistent',
+            nagCount: 1,
+            dueAtMillis: due,
+            zone: ZONE,
+            nowMillis: due,
+            quiet: NIGHT,
+            kind: 'trigger',
+            spreadKey: `rem_${k}`,
+          })!,
+      )
+      const windowEnd = at('2026-08-04T07:00:00')
+      // Four or more distinct instants out of six keys. Not five: with twelve buckets the expected
+      // number of distinct slots for six keys is about 4.9, so demanding five would be pinning a
+      // coin flip. The bucket coverage itself is pinned properly in spread.test.ts; what matters
+      // here is that six reminders released together no longer arrive as one instant.
+      expect(new Set(results).size).toBeGreaterThanOrEqual(4)
+      for (const r of results) {
+        expect(r).toBeGreaterThan(windowEnd)
+        expect(r).toBeLessThanOrEqual(windowEnd + MORNING_SPREAD_MS)
+        expect(inQuietHours(r, ZONE, NIGHT)).toBe(false)
+      }
+    })
+
+    it('fans out the daily tail, which is one instant for every exhausted ladder', () => {
+      // Every ladder that runs out of chases lands on dayStartHour. For a noon owner that is 12:00,
+      // and three of them arriving together at noon is the morning dump rebuilt by another route.
+      const due = at('2026-08-01T18:00:00')
+      const dayStart = at('2026-08-04T12:00:00')
+      const results = ['x', 'y', 'z'].map(
+        (k) =>
+          nextNagAt({
+            policy: 'persistent',
+            nagCount: 6,
+            dueAtMillis: due,
+            zone: ZONE,
+            nowMillis: at('2026-08-03T13:00:00'),
+            quiet: parseQuietHours('02:00-12:00'),
+            kind: 'trigger',
+            routine: NOON_OWNER,
+            spreadKey: `rem_${k}`,
+          })!,
+      )
+      expect(new Set(results).size).toBeGreaterThanOrEqual(2)
+      for (const r of results) {
+        expect(r).toBeGreaterThan(dayStart)
+        expect(r).toBeLessThanOrEqual(dayStart + MORNING_SPREAD_MS)
+      }
+    })
+
+    it('gives an undated reminder its own slot rather than the shared day start', () => {
+      const now = at('2026-08-03T13:00:00')
+      const first = nextNagAt({
+        policy: 'persistent',
+        nagCount: 0,
+        dueAtMillis: null,
+        zone: ZONE,
+        nowMillis: now,
+        plannedAtMillis: now,
+        routine: NOON_OWNER,
+        spreadKey: 'rem_loft',
+      })!
+      expect(first).toBe(at('2026-08-04T12:00:00') + spreadOffsetMs('rem_loft'))
+    })
+
+    it('keeps the same slot for the life of one reminder, however often it is recomputed', () => {
+      // Idempotence is the property that makes the spread safe: the offset is a function of the key
+      // alone, never of the instant, so it can never compound across recomputations.
+      const due = at('2026-08-03T23:00:00')
+      const call = (nowMillis: number): number =>
+        nextNagAt({
+          policy: 'persistent',
+          nagCount: 1,
+          dueAtMillis: due,
+          zone: ZONE,
+          nowMillis,
+          quiet: NIGHT,
+          kind: 'trigger',
+          spreadKey: 'rem_stable',
+        })!
+      const offset = spreadOffsetMs('rem_stable')
+      for (const t of ['2026-08-03T23:00:00', '2026-08-03T23:05:00', '2026-08-04T00:30:00']) {
+        expect(call(at(t))).toBe(at('2026-08-04T07:00:00') + offset)
+      }
+    })
+
+    it('holds its wall-clock slot across a DST change rather than drifting an hour', () => {
+      // Asserted on local clock strings. The base is wall-clock and the offset is a duration, so
+      // consecutive daily rungs must land at the same HH:mm either side of the transition.
+      const due = at('2026-10-20T18:00:00')
+      const slot = (nowMillis: number): string =>
+        local(
+          nextNagAt({
+            policy: 'persistent',
+            nagCount: 6,
+            dueAtMillis: due,
+            zone: ZONE,
+            nowMillis,
+            routine: NOON_OWNER,
+            spreadKey: 'rem_dst',
+          })!,
+        ).slice(11)
+      expect(slot(at('2026-10-24T13:00:00'))).toBe(slot(at('2026-10-26T13:00:00')))
+    })
   })
 })

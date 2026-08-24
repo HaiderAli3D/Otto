@@ -1,5 +1,6 @@
 import { nextLocalTimeAt } from '../services/time.js'
-import { deferPastQuietHours, type QuietHours } from './quietHours.js'
+import { deferPastQuietHours, inQuietHours, type QuietHours } from './quietHours.js'
+import { spreadOffsetMs } from './spread.js'
 import { DEFAULT_ROUTINE, dayStartHour, dayStartMinute, type Routine } from './routine.js'
 import {
   ABSOLUTE_MAX_RUNGS,
@@ -111,6 +112,16 @@ export function rungPhaseFor(leadCount: number, nagCount: number): RungPhase {
  * run out of things to say. The reminder stays OPEN either way and still shows in lists, digests
  * and the brief — it just stops pestering.
  */
+/**
+ * Which branch of the table produced a rung. Read only by the spread, which must be able to tell a
+ * daily-tail rung — the same day-start instant for every exhausted ladder in the database — from a
+ * chase rung, which already varies per item because it is an offset from the owner's own due time.
+ *
+ * Returned from here rather than recomputed by the caller so the test can never drift from the
+ * branch: there is exactly one place that decides a rung is a daily one, and it is the line below.
+ */
+export type RungSource = 'lead' | 'chase' | 'dailyTail'
+
 function rungInstant(
   plan: ResolvedPlan,
   index: number,
@@ -118,18 +129,73 @@ function rungInstant(
   zone: string,
   nowMillis: number,
   routine: Routine,
-): number | null {
-  if (index < plan.leadAt.length) return plan.leadAt[index]!
+): { at: number; source: RungSource } | null {
+  if (index < plan.leadAt.length) return { at: plan.leadAt[index]!, source: 'lead' }
 
   const postDue = index - plan.leadAt.length
   if (postDue >= plan.maxChases) return null
-  if (postDue < plan.chase.length) return anchorMillis + plan.chase[postDue]!
+  if (postDue < plan.chase.length) return { at: anchorMillis + plan.chase[postDue]!, source: 'chase' }
   if (plan.tail === 'stop') return null
 
   // Daily from here, on the owner's own morning rather than a fixed 09:00. Computed as a wall-clock
   // time in the device zone rather than by adding hours to a UTC instant — otherwise a UK owner's
   // nudges drift by an hour every summer.
-  return nextLocalTimeAt(Math.max(anchorMillis, nowMillis), zone, dayStartHour(routine), dayStartMinute(routine))
+  return {
+    at: nextLocalTimeAt(Math.max(anchorMillis, nowMillis), zone, dayStartHour(routine), dayStartMinute(routine)),
+    source: 'dailyTail',
+  }
+}
+
+/**
+ * Fan out an instant OTTO chose that carries no per-item variation. Returns `at` unchanged otherwise.
+ *
+ * Exactly two such instants exist, and they are the two pile-ups the owner experiences as a burst:
+ * the exclusive END of a quiet window, which `deferPastQuietHours` returns with no spread at all, so
+ * every rung held overnight resolves to one millisecond; and the daily tail rung, which is the same
+ * `dayStartHour` for every ladder that has run out of chases. Everything else is already anchored to
+ * a due time the owner picked and spreads itself.
+ *
+ * Deliberately NOT inside `deferPastQuietHours`. Three things depend on that function's exact
+ * output: `runNudge` compares it for EQUALITY to decide whether the assumed-attendance gate wrote an
+ * instant, `rungPlan` uses it inside the lead-rung survival filter, and two paths re-defer an
+ * already-deferred instant and rely on it being a fixpoint. It also has no per-item key and must not
+ * grow one.
+ *
+ * Only ever moves an instant LATER, so it cannot undercut the spacing floor and cannot invert two
+ * rungs of the same reminder — rung N+1's base is measured from when rung N actually FIRED, which is
+ * the spread instant, not the unspread one.
+ */
+function spreadSelfChosen(p: {
+  at: number
+  base: number
+  source: RungSource
+  dueAtMillis: number | null
+  key: string | undefined
+  zone: string
+  quiet: QuietHours
+}): number {
+  // No key means the caller is one of the four external schedulers that predate this, or a test
+  // pinning the pre-spread instants. Same backwards-compatibility contract as `routine` and `plan`.
+  if (p.key === undefined) return p.at
+
+  const movedByWindow = p.at !== p.base
+  if (!movedByWindow && p.source !== 'dailyTail') return p.at
+
+  const spread = p.at + spreadOffsetMs(p.key)
+
+  // A lead rung is a warning about something that has not happened yet, and a warning that lands
+  // after the thing is worse than no warning. The window has already moved this one off its chosen
+  // offset, so spreading it is legitimate — but never far enough to cross the deadline it is about.
+  // `rungPlan`'s survival filter drops warnings the window would push past their own due time; this
+  // is the same rule applied to the extra distance the spread adds.
+  if (p.source === 'lead' && p.dueAtMillis !== null && spread >= p.dueAtMillis) return p.at
+
+  // Belt and braces: unreachable for any window narrower than roughly twenty-one hours. If a spread
+  // ever did land back inside the window, DROPPING it is the only safe answer — deferring it would
+  // return the window end again and rebuild the very pile this exists to break.
+  if (inQuietHours(spread, p.zone, p.quiet)) return p.at
+
+  return spread
 }
 
 /**
@@ -163,6 +229,14 @@ export function nextNagAt(params: {
   plannedAtMillis?: number
   routine?: Routine
   plan?: NagPlanSpec | null
+  /**
+   * A stable per-item key that switches the fan-out on — in practice the reminder id.
+   *
+   * Optional, and no key means no spread at all, which is what keeps every caller and every test
+   * that predates this producing byte-identical instants. `services/reminders.ts` supplies it from
+   * `ladderParams`, so all five production paths are covered by one line there.
+   */
+  spreadKey?: string
 }): number | null {
   const { policy, nagCount, dueAtMillis, zone, nowMillis } = params
   const quiet = params.quiet ?? null
@@ -200,8 +274,9 @@ export function nextNagAt(params: {
         quiet,
       })
 
-  const at = rungInstant(plan, nagCount, anchor, zone, nowMillis, routine)
-  if (at === null) return null
+  const rung = rungInstant(plan, nagCount, anchor, zone, nowMillis, routine)
+  if (rung === null) return null
+  const at = rung.at
 
   // The rung that lands ON the due instant is never moved, by spacing or by quiet hours, as long as
   // it is still ahead of us. That instant is the one the owner picked, so a reminder due 23:30
@@ -219,17 +294,29 @@ export function nextNagAt(params: {
   // later cannot silently reinstate a 3am nudge sent seconds after the owner finished typing.
   if (!undated && at === anchor && at >= nowMillis) return at
 
-  // Nothing has gone out yet, so there is nothing to space this from. Without this branch a
+  // Nothing has gone out yet, so there is nothing to space this from. Without the first branch a
   // reminder created after its own due time would be pushed half an hour into the future instead
   // of being chased promptly.
-  if (nagCount === 0) return deferPastQuietHours(Math.max(at, nowMillis), zone, quiet)
-
-  // Every rung past the first, settled: hold it off the heels of the one that just fired, THEN push
-  // it out of the quiet window.
   //
-  // That order is load-bearing. Flooring after the deferral could push a rung that had legitimately
-  // cleared the window (say 21:55, with the window opening at 22:00) straight back into it.
-  return deferPastQuietHours(Math.max(at, nowMillis + spacingFloor(policy, plan, anchor)), zone, quiet)
+  // Otherwise: hold the rung off the heels of the one that just fired, THEN push it out of the quiet
+  // window. That order is load-bearing. Flooring after the deferral could push a rung that had
+  // legitimately cleared the window (say 21:55, with the window opening at 22:00) straight back
+  // into it.
+  const chosen =
+    nagCount === 0 ? Math.max(at, nowMillis) : Math.max(at, nowMillis + spacingFloor(policy, plan, anchor))
+  const deferred = deferPastQuietHours(chosen, zone, quiet)
+
+  // Last, and only ever later: fan out the instants Otto picked for itself, so a backlog released at
+  // one edge does not arrive as one burst. Everything above is untouched by it.
+  return spreadSelfChosen({
+    at: deferred,
+    base: chosen,
+    source: rung.source,
+    dueAtMillis,
+    key: params.spreadKey,
+    zone,
+    quiet,
+  })
 }
 
 /**

@@ -35,7 +35,7 @@ import { maybeCollapseBacklog } from '../src/services/digest.js'
 import { seedBrief } from '../src/services/handlers/brief.js'
 import { enqueueJob } from '../src/services/jobs.js'
 import { enqueueOutbound, flushOutbox, pendingFor } from '../src/services/outbox.js'
-import { createReminder } from '../src/services/reminders.js'
+import { createReminder, getReminder } from '../src/services/reminders.js'
 import { getSettings, updateSettings } from '../src/services/settings.js'
 import { makeDevice } from './helpers.js'
 
@@ -227,9 +227,9 @@ describe('delivery', () => {
 })
 
 describe('what goes in it', () => {
-  it('reports an alarm a reminder is renting exactly once', async () => {
-    // listArmed and listReminders both know about the same alarm. Reporting both is one thing
-    // counted twice, and a brief that pads itself is a brief that gets skimmed.
+  it('counts an alarm a reminder is renting exactly once', async () => {
+    // listArmed and listReminders both know about the same alarm. Counting both is one thing
+    // counted twice, and a brief that overstates the size of the day is one that gets ignored.
     const device = owner('dev_b12', '447700900012')
     const rented = await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW + 2 * HOUR, ring: true })
     expect(rented.alarmId).not.toBeNull()
@@ -237,9 +237,12 @@ describe('what goes in it', () => {
 
     const input = await collectBrief(device, 'morning', NOW)
 
-    expect(input!.reminders.map((r) => r.title)).toEqual(['Call the dentist'])
-    // The rented one is gone; the standalone alarm survives.
-    expect(input!.alarms.map((a) => a.label)).toEqual(['Leave for the station'])
+    expect(input!.slot).toBe('morning')
+    expect(input).toMatchObject({ counts: { reminders: 1, alarms: 1 } })
+    // The rented alarm is not counted a second time; the standalone one is what the 1 refers to.
+    // It is also what the brief NAMES: `first` ranges over events and alarms only, never reminders,
+    // because a reminder's due time is when Otto chases them about it anyway.
+    expect(input!.slot === 'morning' && input.first?.what).toBe('Leave for the station')
   })
 
   it('never carries the aggregate 14-day record', async () => {
@@ -253,8 +256,12 @@ describe('what goes in it', () => {
     const body = briefRows('447700900013')[0]!.body
     expect(body).not.toContain('The record')
     expect(body).not.toContain('last 14 days')
-    // Per-item evidence about the thing being mentioned IS in — that is a fact about the item.
-    expect(body).toContain('OVERDUE')
+    // Nor any per-item evidence, now that the morning brief no longer names items at all. Nothing
+    // is late at the START of the day, so there is nothing here to be sharp about — the chase
+    // itself arrives later, on the item's own rung, where the counters belong.
+    expect(body).not.toContain('OVERDUE')
+    expect(body).not.toContain('Call the dentist')
+    expect(body).toContain('1 reminder')
   })
 
   it('takes timed calendar events and drops all-day ones', async () => {
@@ -268,7 +275,10 @@ describe('what goes in it', () => {
 
     const input = await collectBrief(device, 'morning', NOW)
 
-    expect(input!.events).toEqual([{ summary: 'Standup', startLocal: '09:30' }])
+    // One counted event, not two: the bank holiday is a label on the day rather than a moment in
+    // it, so it neither counts nor becomes the thing the brief names.
+    expect(input).toMatchObject({ counts: { events: 1 } })
+    expect(input!.slot === 'morning' && input.first).toEqual({ what: 'Standup', atLocal: '09:30' })
   })
 
   it('survives a revoked Google grant instead of killing the job', async () => {
@@ -281,8 +291,7 @@ describe('what goes in it', () => {
 
     const input = await collectBrief(device, 'morning', NOW)
 
-    expect(input!.events).toEqual([])
-    expect(input!.reminders).toHaveLength(1)
+    expect(input).toMatchObject({ counts: { events: 0, reminders: 1 } })
     expect(await runBrief(device, NOW)).toBe(true)
   })
 
@@ -401,10 +410,13 @@ describe('interaction with the backlog digest', () => {
         .map((r) => [r.body, r.state]),
     )
 
-  it('supersedes a stale nudge backlog it is about to cover anyway', async () => {
+  it('no longer retires a nudge backlog on behalf of a brief that names nothing', async () => {
+    // THE behaviour that had to go when the morning brief stopped listing. It used to retire a
+    // stale backlog on the grounds that "the brief covers these anyway" — true while the brief
+    // enumerated the owner's open items, and false the moment it became one line about the size of
+    // the day. Retiring them now would drop three messages the owner never saw in favour of a
+    // sentence that never mentions them.
     const device = owner('dev_b16', '447700900016')
-    // The window is OPEN, so the brief this queues really does go out in the same breath — which is
-    // the only condition under which retiring the backlog is safe.
     markInbound(device.deviceId)
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
 
@@ -420,16 +432,17 @@ describe('interaction with the backlog digest', () => {
     await runBrief(device, NOW)
 
     const states = statesByBody('447700900016')
+    // Every one of them reaches the owner. None is SUPERSEDED.
     expect([states.get('nudge 1'), states.get('nudge 2'), states.get('nudge 3')]).toEqual([
-      'SUPERSEDED',
-      'SUPERSEDED',
-      'SUPERSEDED',
+      'SENT',
+      'SENT',
+      'SENT',
     ])
-    expect(states.get('fresh')).toBe('SENT')
-    expect(pendingFor('447700900016')).toHaveLength(0)
-    // Two sends, not five: the three retired nudges never reached the wire, the fresh one and the
-    // brief did.
-    expect(sendMock).toHaveBeenCalledTimes(2)
+    // The fresh nudge and the brief are still PENDING rather than SENT, and that is MAX_SENDS_PER_FLUSH
+    // (3) doing its job, not a message being lost — the outbox_flush job picks the tail up five
+    // minutes later. The point of the assertion is the state: queued, never SUPERSEDED.
+    expect(states.get('fresh')).toBe('PENDING')
+    expect(pendingFor('447700900016').map((r) => r.kind)).toEqual(['nudge', 'brief'])
   })
 
   it('leaves the backlog alone when the brief cannot go out yet, and heals on next contact', async () => {
@@ -489,9 +502,10 @@ describe('interaction with the backlog digest', () => {
     expect(getDevice(device.deviceId)!.lastDigestAt).toBe(NOW + 4.5 * HOUR)
   })
 
-  it('still lets a LIVE queued brief cancel the digest', async () => {
-    // The narrowing must not go too far the other way: a brief with time left on it is exactly the
-    // case the handshake exists for, and it must still silence the digest.
+  it('does not let a queued brief cancel the digest, however much time is left on it', async () => {
+    // The same removal seen from the digest's side. `SUMMARY_KINDS` no longer contains 'brief', so
+    // a queued brief neither silences the digest nor retires what it would have collapsed. The
+    // backlog becomes a catch-up digest, which is the mechanism built for exactly that.
     const device = owner('dev_b24', '447700900024')
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
 
@@ -509,8 +523,8 @@ describe('interaction with the backlog digest', () => {
       ttlMs: 4 * HOUR,
     })
 
-    expect(await maybeCollapseBacklog(device, '447700900024')).toBe(false)
-    expect(pendingFor('447700900024').map((r) => r.kind)).toEqual(['brief'])
+    expect(await maybeCollapseBacklog(device, '447700900024')).toBe(true)
+    expect(pendingFor('447700900024').map((r) => r.kind)).toEqual(['brief', 'digest'])
   })
 
   it('lets a queued WEEKLY REVIEW cancel the digest too', async () => {
@@ -550,8 +564,10 @@ describe('interaction with the backlog digest', () => {
   })
 
   it('lets a queued brief cancel the digest without spending the day\'s digest', async () => {
-    // The other half of the handshake: the brief was written first and this contact is what flushes
-    // it. A digest on top would restate the same reminders in a different voice seconds later.
+    // Was the mirror image of the case above — the brief queued first, this contact flushing it —
+    // and it rested on the brief restating the same reminders. It restates nothing now, so the two
+    // messages say different things and both are worth having: one line about the size of the day,
+    // and a catch-up naming what is actually outstanding.
     const device = owner('dev_b17', '447700900017')
     await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
 
@@ -562,13 +578,13 @@ describe('interaction with the backlog digest', () => {
     vi.setSystemTime(NOW)
     enqueueOutbound({ waUserId: '447700900017', deviceId: device.deviceId, kind: 'brief', body: 'the brief', dedupeKey: 'brief:x' })
 
-    expect(await maybeCollapseBacklog(device, '447700900017')).toBe(false)
+    expect(await maybeCollapseBacklog(device, '447700900017')).toBe(true)
 
     const pending = pendingFor('447700900017')
-    expect(pending.map((r) => r.kind)).toEqual(['brief'])
+    expect(pending.map((r) => r.kind)).toEqual(['brief', 'digest'])
     expect(pending[0]!.body).toBe('the brief')
-    // No digest went out, so the day's one digest is still available if a real backlog builds later.
-    expect(getDevice(device.deviceId)!.lastDigestAt).toBeNull()
+    // A digest DID go out, so the day's allowance is spent — unlike the weekly-review case above,
+    // where nothing was queued and the allowance is deliberately kept.
   })
 })
 
@@ -646,5 +662,124 @@ describe('the brief does not repeat itself in the same second', () => {
     await runBrief(device, NOW, NOW)
 
     expect(db.select().from(reminders).where(eq(reminders.reminderId, r.reminderId)).get()!.nextNagAtMillis).toBe(NOW)
+  })
+})
+
+/**
+ * The morning brief as a SHAPE rather than a list — the change the owner actually asked for.
+ *
+ * Everything here runs under this file's fixed `NOW` with only `Date` faked, so none of it can
+ * pass or fail by the hour the suite happens to run at.
+ */
+describe('the morning brief is one line about the size of the day', () => {
+  it('names nothing and counts everything', async () => {
+    const device = owner('dev_b30', '447700900030')
+    for (const title of ['Call the dentist', 'File the tax return', 'Take the bins out']) {
+      await createReminder(device, { title, dueAtMillis: NOW + 3 * HOUR })
+    }
+
+    await runBrief(device, NOW)
+
+    const body = briefRows('447700900030')[0]!.body
+    expect(body).toContain('3 reminders')
+    for (const title of ['Call the dentist', 'File the tax return', 'Take the bins out']) {
+      expect(body).not.toContain(title)
+    }
+    // One line. The old brief allowed one line PER ITEM; this is the guarantee that it does not.
+    expect(body.split('\n')).toHaveLength(1)
+  })
+
+  it('counts the whole backlog rather than truncating it at four', async () => {
+    // MAX_REMINDERS caps the EVENING list. Applying it to a count would understate the day —
+    // "4 reminders" when there are nine is a worse answer than saying nothing.
+    const device = owner('dev_b31', '447700900031')
+    for (let i = 0; i < 9; i++) {
+      await createReminder(device, { title: `thing ${i}`, dueAtMillis: NOW + 3 * HOUR })
+    }
+
+    const input = await collectBrief(device, 'morning', NOW)
+
+    expect(input).toMatchObject({ counts: { reminders: 9 } })
+  })
+
+  it('leaves out a deadline that is days away', async () => {
+    // The asymmetry that would otherwise rebuild the dump one item at a time: events and alarms
+    // were always windowed to the day and reminders never were, so something due on Friday counted
+    // towards "today" every morning from Monday.
+    const device = owner('dev_b32', '447700900032')
+    await createReminder(device, { title: 'File the tax return', dueAtMillis: NOW + 5 * 24 * HOUR })
+
+    expect(await collectBrief(device, 'morning', NOW)).toBeNull()
+  })
+
+  it('still counts an undated reminder, which has no date to fall outside the day', async () => {
+    // "Sort the loft out" is exactly the kind of thing that goes missing, so it counts. It has no
+    // due time to compare against the window, and dropping it for that reason would be backwards.
+    const device = owner('dev_b33', '447700900033')
+    await createReminder(device, { title: 'Sort the loft out' })
+
+    expect(await collectBrief(device, 'morning', NOW)).toMatchObject({ counts: { reminders: 1 } })
+  })
+
+  it('counts a reminder due late tonight, past midnight, as part of today', async () => {
+    // The owner in question goes to bed at two. Their day ends at their bedtime, not at midnight,
+    // so a 01:00 deadline is tonight's problem and `endOf('day')` would call it tomorrow's.
+    const device = owner('dev_b34', '447700900034')
+    updateSettings(device.deviceId, { bedWindow: '01:00-02:00', wakeWindow: '11:00-12:00' })
+    // NOW is 07:00 UTC; 20 hours on is 03:00 the next day, comfortably past their 02:00 bedtime.
+    await createReminder(device, { title: 'late one', dueAtMillis: NOW + 16 * HOUR })
+    await createReminder(device, { title: 'too late', dueAtMillis: NOW + 20 * HOUR })
+
+    expect(await collectBrief(device, 'morning', NOW)).toMatchObject({ counts: { reminders: 1 } })
+  })
+
+  it('stays silent, and does not spend the day, when there is nothing on', async () => {
+    // Silence is the common case now and must not burn the once-a-day marker, or a genuinely busy
+    // afternoon could not produce a brief tomorrow.
+    const device = owner('dev_b35', '447700900035')
+
+    expect(await runBrief(device, NOW)).toBe(false)
+    expect(briefRows('447700900035')).toHaveLength(0)
+    expect(getSettings(device.deviceId).lastBriefAt).toBeNull()
+  })
+
+  it('holds a rung that would land in the same tick as the brief', async () => {
+    // Not about repetition any more — the brief names nothing. It is about BURST: one line about
+    // the day plus a chase, inside a single scheduler tick, is two buzzes at once.
+    const device = owner('dev_b36', '447700900036')
+    markInbound(device.deviceId)
+    const r = await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+    db.update(reminders).set({ nextNagAtMillis: NOW }).where(eq(reminders.reminderId, r.reminderId)).run()
+
+    await runBrief(device, NOW)
+
+    const after = getReminder(r.reminderId)!
+    expect(after.nextNagAtMillis).toBe(NOW + 30 * 60 * 1000)
+    // The rung MOVED but was not spent: nagCount is the evidence the persona cites, and a message
+    // that only got out of the way must not inflate it.
+    expect(after.nagCount).toBe(0)
+  })
+
+  it('leaves a rung hours away completely alone', async () => {
+    const device = owner('dev_b37', '447700900037')
+    markInbound(device.deviceId)
+    const r = await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW + 6 * HOUR })
+    db.update(reminders).set({ nextNagAtMillis: NOW + 4 * HOUR }).where(eq(reminders.reminderId, r.reminderId)).run()
+
+    await runBrief(device, NOW)
+
+    expect(getReminder(r.reminderId)!.nextNagAtMillis).toBe(NOW + 4 * HOUR)
+  })
+
+  it('keeps the evening brief a list, because nothing in tomorrow can announce itself first', async () => {
+    const device = owner('dev_b38', '447700900038')
+    updateSettings(device.deviceId, { eveningBriefEnabled: true })
+    await createReminder(device, { title: 'Call the dentist', dueAtMillis: NOW - 4 * 24 * HOUR })
+
+    const input = await collectBrief(device, 'evening', NOW)
+
+    expect(input!.slot).toBe('evening')
+    expect(input!.slot === 'evening' && input.reminders.map((r) => r.title)).toEqual(['Call the dentist'])
+    expect(briefFallback(input!)).toContain('Call the dentist')
   })
 })

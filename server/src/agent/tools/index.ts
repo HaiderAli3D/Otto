@@ -32,6 +32,7 @@ import {
   updateReminder,
   type Reminder,
 } from '../../services/reminders.js'
+import { chaseInReply } from '../../services/tackOn.js'
 import { nagQuietHours } from '../../services/settings.js'
 import { epochMillisToLocalHuman, localIsoToEpochMillis } from '../../services/time.js'
 import { alarmTools } from './alarms.js'
@@ -46,6 +47,7 @@ import { googleLinkTools, googleTools } from './google.js'
 import { createJourney, journeyTools } from './journey.js'
 import { createLeaveByAlarm, leaveByTools } from './leaveBy.js'
 import { noteTools } from './notes.js'
+import { tackOnTools } from './tackOn.js'
 import { managePlaces, placeTools } from './places.js'
 import { reminderTools } from './reminders.js'
 import { settingsTools } from './settings.js'
@@ -96,6 +98,9 @@ export function buildTools(): OpenAI.Responses.FunctionTool[] {
     // three are one feature — Otto changing a calendar rather than only adding to it — so they sit
     // together rather than each being wedged next to a conceptual sibling further up.
     ...calendarEditTools,
+    // Last of all, same reason again. It has no sibling group to sit beside: it is the only tool
+    // that changes what Otto is allowed to SAY rather than what it does to a store.
+    ...tackOnTools,
   ].map(
     (t) => ({
       type: 'function' as const,
@@ -424,6 +429,11 @@ export async function runTool(device: Device, name: string, input: unknown): Pro
       const ok = await cancelReminder(device, reminderId)
       supersedePending(reminderId)
       return { cancelled: ok, title: existing.title }
+    }
+    // Sits with the reminder cases rather than at the end: position in this switch is DISPATCH, not
+    // prompt bytes, so it belongs next to what it actually operates on.
+    case 'chase_in_reply': {
+      return chaseInReply(device, String(a.reminderId))
     }
     case 'reopen_reminder': {
       const reminderId = String(a.reminderId)
