@@ -1,3 +1,4 @@
+import { nextLocalTimeAt } from '../services/time.js'
 import { parseQuietHours } from './quietHours.js'
 
 /**
@@ -11,6 +12,14 @@ import { parseQuietHours } from './quietHours.js'
  * only thing that suppresses anything; this is context Otto reads and reasons about, and the one
  * input that decides which wall-clock hour a self-chosen rung lands on. An owner can have a routine
  * and no quiet hours at all — that is in fact the configuration this was built for.
+ *
+ * That boundary is narrower than it first reads, and the narrowing is deliberate. `impliedQuietHours`
+ * below turns a routine INTO a quiet-hours string, and `setPreferences` writes that string into the
+ * column once, at the moment the owner states their hours. Nothing derives a window at READ time:
+ * `quietHoursFor` still consults the column and only the column, so an owner who says "quiet hours
+ * off" is off, and a window they typed themselves is never overwritten by a later routine change.
+ * A routine SEEDS a value the owner can then see and edit; it is still never consulted to decide
+ * whether to suppress. Do not move that derivation to read time — see `services/settings.ts`.
  */
 export type Window = { startMinute: number; endMinute: number }
 
@@ -65,6 +74,54 @@ export function dayStartHour(r: Routine): number {
 
 export function dayStartMinute(r: Routine): number {
   return r.wake.endMinute % 60
+}
+
+/** The hour and minute of the LATEST bedtime — the edge at which their waking day ends. */
+export function bedEndHour(r: Routine): number {
+  return Math.floor(r.bed.endMinute / 60)
+}
+
+export function bedEndMinute(r: Routine): number {
+  return r.bed.endMinute % 60
+}
+
+/**
+ * The instant this waking day ends: the next occurrence of their LATEST bedtime.
+ *
+ * "The rest of today" for someone who goes to bed at two in the morning is not the rest of the
+ * calendar day — a rung at 01:30 is still tonight to them, and midnight is the middle of their
+ * evening. Anything asking "will this come up before they go to bed?" wants this, not `endOf('day')`.
+ *
+ * Wall-clock through `nextLocalTimeAt` rather than an added offset, for the reason the whole file
+ * shares: a fixed "+14h" drifts by an hour on the two DST nights of the year.
+ */
+export function wakingDayEndsAt(r: Routine, zone: string, nowMillis: number): number {
+  return nextLocalTimeAt(nowMillis, zone, bedEndHour(r), bedEndMinute(r))
+}
+
+/**
+ * The quiet window a routine IMPLIES, in storage form (`"02:00-12:00"`), or null if degenerate.
+ *
+ * Latest bedtime to the point they are certainly up. Both edges mirror `dayStartHour`'s reasoning
+ * above rather than inventing their own:
+ *
+ * - START at `bed.end`, the LATEST they go to bed, because going silent at the earliest would mute
+ *   an hour they are reliably awake and happy to be reached in.
+ * - END at `wake.end`, the same edge `dayStartHour` reads, because a window that lifted at the
+ *   EARLIEST they might be up would let Otto speak first into a coin flip. Someone who says they
+ *   are up at noon means nothing before noon.
+ *
+ * Null on the degenerate case — `parseQuietHours` rejects `start === end` as ambiguous between a
+ * zero-length window and a 24-hour one, and nobody means either. Checked by parsing back what we
+ * just formatted rather than by comparing minutes, so this can never disagree with the parser that
+ * everything downstream actually uses.
+ *
+ * Formatted with `formatWindow` (hyphen), NOT `formatQuietHours` (en dash) — the latter is prose
+ * for the owner, and feeding it back to `parseQuietHours` would silently produce null.
+ */
+export function impliedQuietHours(r: Routine): string | null {
+  const spec = formatWindow({ startMinute: r.bed.endMinute, endMinute: r.wake.endMinute })
+  return parseQuietHours(spec) === null ? null : spec
 }
 
 function hhmm(minuteOfDay: number): string {

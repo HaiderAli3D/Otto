@@ -147,3 +147,34 @@ describe('deferPastQuietHours across a DST boundary', () => {
     }
   })
 })
+
+/**
+ * A guard, not a feature test.
+ *
+ * The morning pile-up this codebase spent a long time patching around is caused by exactly the
+ * behaviour asserted below: `deferPastQuietHours` returns the window's end with no per-item
+ * variation, so everything held overnight lands on one millisecond. The fix lives in `nagLadder`'s
+ * spread, deliberately, because three callers depend on this function's exact output — one of them
+ * compares it for EQUALITY to decide whether the assumed-attendance gate wrote an instant.
+ *
+ * So if someone later "fixes" the pile-up here instead, this fails, and the comment explains why.
+ */
+describe('deferPastQuietHours stays spreadless and idempotent', () => {
+  const NIGHT = parseQuietHours('22:00-07:00')
+  const zone = 'Europe/London'
+  const at = (iso: string): number => DateTime.fromISO(iso, { zone }).toMillis()
+
+  it('gives every instant inside one window the identical end', () => {
+    const end = deferPastQuietHours(at('2026-08-03T22:30:00'), zone, NIGHT)
+    for (const inside of ['2026-08-03T22:00:00', '2026-08-03T23:59:00', '2026-08-04T03:17:00', '2026-08-04T06:59:00']) {
+      expect(deferPastQuietHours(at(inside), zone, NIGHT)).toBe(end)
+    }
+  })
+
+  it('is a fixpoint — deferring an already-deferred instant returns it unchanged', () => {
+    // What lets runNudge re-defer as a backstop without walking the rung forward a day at a time.
+    const once = deferPastQuietHours(at('2026-08-03T23:00:00'), zone, NIGHT)
+    expect(deferPastQuietHours(once, zone, NIGHT)).toBe(once)
+    expect(deferPastQuietHours(deferPastQuietHours(once, zone, NIGHT), zone, NIGHT)).toBe(once)
+  })
+})

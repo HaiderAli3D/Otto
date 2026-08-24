@@ -22,7 +22,8 @@ import { DateTime } from 'luxon'
 import { eq } from 'drizzle-orm'
 import { db, ensureSchema } from '../src/db/client.js'
 import { jobs, reminders } from '../src/db/schema.js'
-import { deferPastQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
+import { deferPastQuietHours, inQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
+import { spreadOffsetMs } from '../src/lib/spread.js'
 import { getDevice, linkWhatsapp, markInbound, type Device } from '../src/services/devices.js'
 import { dueJobs } from '../src/services/jobs.js'
 import { runNudge } from '../src/services/nagging.js'
@@ -251,7 +252,11 @@ describe('runNudge across a quiet window that swallows several rungs', () => {
     await runNudge(r.reminderId)
     expect(sends).toHaveLength(1)
     const windowEnd = getReminder(r.reminderId)!.nextNagAtMillis!
-    expect(windowEnd).toBe(utc('2026-08-04T07:00:00'))
+    // The window end PLUS this reminder's own slot in the fan-out. Deferring alone returns the end
+    // with no spread at all, which is what put every reminder held overnight on one millisecond;
+    // the offset is a pure function of the id, so this is exact rather than approximate.
+    expect(windowEnd).toBe(utc('2026-08-04T07:00:00') + spreadOffsetMs(r.reminderId))
+    expect(inQuietHours(windowEnd, 'UTC', parseQuietHours('22:00-07:00'))).toBe(false)
     sends.length = 0
 
     // Now run the scheduler as it actually runs: every 15s, fire whatever is due.
@@ -263,8 +268,44 @@ describe('runNudge across a quiet window that swallows several rungs', () => {
 
     expect(sends).toHaveLength(1)
     expect(getReminder(r.reminderId)!.nagCount).toBe(2)
-    // And the rung after it is a real gap away, not on the same instant.
-    expect(getReminder(r.reminderId)!.nextNagAtMillis).toBe(utc('2026-08-04T07:30:00'))
+    // And the rung after it is a real gap away, not on the same instant. Measured from the rung
+    // that just fired rather than from a hardcoded 07:30, which is what MIN_RUNG_GAP_MS actually
+    // promises — and is true whatever slot the fan-out gave this reminder.
+    expect(getReminder(r.reminderId)!.nextNagAtMillis).toBe(windowEnd + 30 * 60_000)
+  })
+
+  it('gives each reminder held by one window its own slot past the end of it', async () => {
+    // The feature, reached through the real service path rather than the pure ladder: before the
+    // fan-out all three of these resolved to the identical 07:00:00.000 and the scheduler fired
+    // every one of them inside a single 15-second tick.
+    //
+    // Asserted as "each rung is the window end plus ITS OWN offset" rather than as "the three
+    // instants are distinct". Reminder ids are random ULIDs, so with twelve buckets two of three
+    // ids collide about a quarter of the time — a distinctness assertion here would be a coin flip
+    // of exactly the kind this suite has twice had to go back and fix. The separation itself is
+    // pinned deterministically in nagLadder.test.ts, where the keys are literals.
+    vi.setSystemTime(utc('2026-08-03T22:55:00'))
+    const device = reachableDevice('dev_ng8')
+    updateSettings(device.deviceId, { quietHours: '22:00-07:00' })
+    const due = utc('2026-08-03T23:00:00')
+    const windowEnd = utc('2026-08-04T07:00:00')
+
+    const made = []
+    for (const title of ['take the pills', 'put the bins out', 'call mum']) {
+      made.push(
+        await createReminder(device, { title, dueAtMillis: due, timing: 'trigger', nagPolicy: 'persistent' }),
+      )
+    }
+
+    vi.setSystemTime(due)
+    for (const r of made) await runNudge(r.reminderId)
+
+    for (const r of made) {
+      const rung = getReminder(r.reminderId)!.nextNagAtMillis!
+      expect(rung).toBe(windowEnd + spreadOffsetMs(r.reminderId))
+      expect(rung).toBeGreaterThan(windowEnd)
+      expect(inQuietHours(rung, 'UTC', parseQuietHours('22:00-07:00'))).toBe(false)
+    }
   })
 })
 
