@@ -8,7 +8,7 @@ import { armAlarm, getAlarm, recordServerEvent } from './alarms.js'
 import { commitmentAt } from './commitments.js'
 import { getDevice, type Device } from './devices.js'
 import { cancelJobs, cancelJobsForDevice, enqueueJob, jobPayload, type Job } from './jobs.js'
-import { enqueueAndTryFlush, windowOpen } from './outbox.js'
+import { enqueueAndFlushRow, windowOpen } from './outbox.js'
 
 /**
  * "You up?" — the follow-up for an alarm whose job was getting the owner out of bed.
@@ -218,7 +218,13 @@ export async function runWakeCheck(job: Job, nowMillis: number = Date.now()): Pr
   const advanced: WakePayload = { round: next, startedAt }
   db.update(jobs).set({ payload: JSON.stringify(advanced) }).where(eq(jobs.id, job.id)).run()
 
-  await enqueueAndTryFlush({
+  // The round is only a round if it was ASKED. `runWakeCheck` used to discard this result, so a
+  // question that was dropped — by the commitment gate, or by a phone with no reachable transport —
+  // counted exactly as one that landed: the ladder walked to its end, `escalate` recorded
+  // WAKE_CHECK_FAILED, and the owner was told they had been asked three times and slept through it.
+  //
+  // Queued counts as asked: the row is alive and will reach them. Retired does not.
+  const outcome = await enqueueAndFlushRow({
     waUserId,
     deviceId: device.deviceId,
     kind: 'wake_check',
@@ -226,7 +232,13 @@ export async function runWakeCheck(job: Job, nowMillis: number = Date.now()): Pr
     dedupeKey: `wake:${job.alarmId}:${round}`,
     ttlMs: WAKE_TTL_MS,
   })
-  return wakeCheckAt(next, startedAt)
+  if (outcome.retired) {
+    // Give the round back. Nothing was asked, so nothing was answered, and the ladder must not spend
+    // a rung on it — the same argument every deferral in services/nagging.ts makes.
+    db.update(jobs).set({ payload: JSON.stringify({ round, startedAt }) }).where(eq(jobs.id, job.id)).run()
+    log.warn({ alarmId: job.alarmId, round }, 'wake-check round was retired undelivered; not counting it')
+  }
+  return wakeCheckAt(outcome.retired ? round : next, startedAt)
 }
 
 /**
