@@ -108,9 +108,13 @@ describe('the commitment gate at delivery', () => {
     expect(statesFor(wa)).toEqual(['SUPERSEDED'])
   })
 
-  it('drops every kind, with no exempt list to argue about', async () => {
+  it('drops everything that will be composed again', async () => {
+    // The rule is REGENERATION, not importance. A nudge has another rung behind it, the brief and
+    // the weekly review run tomorrow, a digest rebuilds from whatever is still queued — so dropping
+    // one costs a repetition the owner never sees, and saving them up would deliver the same
+    // interruption late, as a burst, on the way out of the room.
     const { device, wa } = readyDevice()
-    for (const kind of ['nudge', 'brief', 'weekly', 'digest', 'system_warning', 'wake_check'] as const) {
+    for (const kind of ['nudge', 'brief', 'weekly', 'digest', 'wake_check'] as const) {
       enqueueOutbound({ waUserId: wa, deviceId: device.deviceId, kind, body: `a ${kind}`, dedupeKey: `k:${kind}` })
     }
 
@@ -118,6 +122,27 @@ describe('the commitment gate at delivery', () => {
 
     expect(sendMock).not.toHaveBeenCalled()
     expect(statesFor(wa).every((s) => s === 'SUPERSEDED')).toBe(true)
+  })
+
+  it('holds the two that are said once and by nothing else', async () => {
+    // This block used to drop these too, on the argument that a second exempt list beside
+    // QUIET_EXEMPT_KINDS reintroduces the ambiguity a hard rule exists to remove. That argument
+    // holds for everything above and not for these: `scheduler/loop.ts` queues the arm-ack warning
+    // and deletes its own job in the same breath — one shot, no chain, and the literal "armack"
+    // appears exactly once in the repository. A meeting live at any proactive flush destroyed the
+    // only message that would ever have told the owner their alarm never reached the phone, while
+    // they sat in the very meeting whose signal blackspot caused it.
+    //
+    // HELD, not exempt: the meeting is still not interrupted. They go out when it ends.
+    const { device, wa } = readyDevice()
+    for (const kind of ['system_warning', 'missed_alarm'] as const) {
+      enqueueOutbound({ waUserId: wa, deviceId: device.deviceId, kind, body: `a ${kind}`, dedupeKey: `k:${kind}` })
+    }
+
+    await flushOutbox(wa, device.deviceId, { proactiveFor: device })
+
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(statesFor(wa).every((s) => s === 'PENDING')).toBe(true)
   })
 
   it('still answers the owner when THEY are the ones who messaged', async () => {

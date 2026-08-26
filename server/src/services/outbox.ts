@@ -106,6 +106,30 @@ const STALE_CLAIM_MS = 2 * 60 * 1000
 export const QUIET_EXEMPT_KINDS: readonly OutboxKind[] = ['nudge', 'wake_check', 'reply']
 
 /**
+ * Kinds the commitment gate HOLDS rather than drops.
+ *
+ * The test is REGENERATION, not importance, and that is what makes this a rule rather than a second
+ * list of favourites. Everything not here is a message that will be composed again — a nudge has
+ * another rung behind it, the brief and the weekly review run tomorrow, a digest rebuilds from
+ * whatever is still queued — so dropping one costs a repetition the owner never sees, and saving
+ * them up would deliver the same interruption late, as a burst, on the way out of the room.
+ *
+ * These two are said once and by nothing else:
+ *
+ * - `system_warning` is where the arm-ack failure lands. `scheduler/loop.ts` queues it and deletes
+ *   its own job in the same breath: one shot, no chain, and the literal "armack" appears exactly
+ *   once in this repository. Dropping it means the owner is never told their alarm did not reach
+ *   the phone — and the meeting they are sitting in is a fair description of why it did not.
+ * - `missed_alarm` is the same shape for the same reason: it reports something that has already
+ *   happened, and nothing will report it a second time.
+ *
+ * HELD, not exempt. The meeting is not interrupted; the message simply still exists when it ends.
+ * `reply` is not in this list because it is not proactive at all and is not gated here — see the
+ * kind's own comment on the union above.
+ */
+export const HELD_THROUGH_A_COMMITMENT: readonly OutboxKind[] = ['system_warning', 'missed_alarm']
+
+/**
  * Would delivering `kind` to this device right now break its quiet hours?
  *
  * Only ever consulted for a PROACTIVE delivery — Otto speaking first. A flush triggered by the
@@ -360,7 +384,7 @@ export async function flushOutbox(
       log.info({ waUserId, id: row.id, kind: row.kind }, 'outbox: daily message budget spent; holding')
       continue
     }
-    // DROPPED, not held — the one place in this file where that is the right verb.
+    // DROPPED, not held — for anything that will come round again on its own.
     //
     // The position is the decision. A row the two gates above are HOLDING was never going out in
     // this pass anyway, so it keeps its TTL and its place; only a row that would genuinely have
@@ -371,12 +395,30 @@ export async function flushOutbox(
     // already sweeps it, `budget.ts` does not count it, and `nudgeHistory` excludes it — so the
     // nudge writer will not think it already said this.
     //
-    // NO EXEMPT-KIND LIST, deliberately. A second list beside QUIET_EXEMPT_KINDS reintroduces the
-    // "which one governs this?" ambiguity a hard rule exists to remove. The one genuinely dangerous
-    // case — a dropped wake_check leaving someone asleep — is answered at its source in
-    // services/wakeCheck.ts, which stands the whole ladder down rather than letting it be silently
-    // swallowed here.
+    // The rule that decides which verb applies is REGENERATION, not importance, and the original
+    // version of this block had no rule at all: it dropped everything, on the argument that a
+    // second exempt-kind list beside QUIET_EXEMPT_KINDS reintroduces the "which governs this?"
+    // ambiguity a hard rule exists to remove. That argument holds for a nudge (its ladder queues
+    // another rung), a brief, a weekly review and a digest — every one of them is a message that
+    // will be composed again. It does not hold for the two that are said ONCE. `scheduler/loop.ts`
+    // enqueues the arm-ack warning and then deletes its job: one shot, no chain, and the literal
+    // "armack" appears exactly once in this repository. So a meeting live at any proactive flush
+    // destroyed the only message that would ever have told the owner their alarm never reached the
+    // phone — while they sat in the very meeting whose signal blackspot caused it.
+    //
+    // Held, not exempted: they still do not interrupt the meeting. They go out when it ends, which
+    // for a warning about an alarm that is not set is exactly soon enough and infinitely better
+    // than never.
     if (commitment !== null && row.kind !== 'reply') {
+      // HELD for the one-shot kinds, DROPPED for everything else. Both leave the meeting alone;
+      // the difference is whether the message still exists afterwards.
+      if (HELD_THROUGH_A_COMMITMENT.includes(row.kind as OutboxKind)) {
+        log.info(
+          { waUserId, id: row.id, kind: row.kind, until: commitment.endMillis },
+          'outbox: holding a one-shot warning until the commitment ends',
+        )
+        continue
+      }
       markSuperseded([row.id])
       log.info(
         { waUserId, id: row.id, kind: row.kind, until: commitment.endMillis },

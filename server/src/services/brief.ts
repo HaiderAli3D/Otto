@@ -335,7 +335,17 @@ function holdNudgesCoveredByBrief(device: Device, open: Reminder[], nowMillis: n
       .run()
     if (moved.changes === 0) continue
     cancelNudges(r.reminderId)
-    supersedePending(r.reminderId)
+    // `supersedePending` is deliberately NOT here.
+    //
+    // Moving a rung that has not fired is reversible and costs nothing. Retiring a nudge that is
+    // already WRITTEN and waiting in the outbox is neither — and the two were being done together,
+    // on the grounds that the brief covers the item. For an evening brief that is arguable; for a
+    // morning one it is simply false, because it names nothing. So a chase composed hours earlier,
+    // sitting PENDING because the window was shut, was destroyed by a brief that never mentioned it
+    // — and the rung it belonged to had already been spent, so nothing replaced it.
+    //
+    // Same conclusion as `chaseInReply`, and the same reasoning: a repetition is recoverable, and
+    // silence about something the owner asked to be chased on is not.
     enqueueJob('nudge', pushTo, { reminderId: r.reminderId, deviceId: device.deviceId })
     held++
   }
