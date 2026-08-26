@@ -51,11 +51,37 @@ export function parseRecurrence(rule: string): Recurrence | null {
 }
 
 /**
+ * Do these two instants read as the same time on a clock in `zone`?
+ *
+ * The one question `advanceRecurrence` has to ask before it chains a series forward. `nextOccurrence`
+ * re-imposes the anchor's wall clock on every step, so its answer normally carries that clock
+ * exactly — and chaining on it keeps the iteration below short. The exception is a spring-forward
+ * gap, where the requested time does not exist and luxon resolves it forward: adopting THAT as the
+ * next anchor would carry the one-hour correction past the gap and leave the series permanently
+ * late, which is the bug the wall-clock re-imposition exists to prevent. So the caller keeps the old
+ * anchor for exactly one step, and the day after the gap lands back where the owner set it.
+ */
+export function sameWallClock(aMillis: number, bMillis: number, zone: string): boolean {
+  const a = DateTime.fromMillis(aMillis, { zone })
+  const b = DateTime.fromMillis(bMillis, { zone })
+  return a.hour === b.hour && a.minute === b.minute
+}
+
+/**
  * The next occurrence strictly after BOTH the previous trigger and `nowMillis`, at the same
- * wall-clock time in `zone` (DST-correct: luxon calendar arithmetic keeps the local time).
- * `nowMillis` matters when the phone was unreachable across occurrences — the series skips
- * straight to the future instead of arming a past time. Returns null for an invalid rule or
- * when no occurrence exists within the search bound (~3 years of daily steps).
+ * wall-clock time in `zone`. `nowMillis` matters when the phone was unreachable across occurrences —
+ * the series skips straight to the future instead of arming a past time. Returns null for an invalid
+ * rule or when no occurrence exists within the search bound (~3 years of daily steps).
+ *
+ * THE WALL CLOCK IS IMPOSED LAST, on every step, and that is the whole DST story.
+ *
+ * Calendar arithmetic alone is not enough, though the comment here used to claim it was. `plus` keeps
+ * the local time only while that local time EXISTS: on a spring-forward morning 01:30 does not
+ * happen at all, so luxon resolves it to 02:30 and returns a corrected instant. That instant is then
+ * written to the alarm row and becomes the next anchor, so the one-hour correction outlives the gap
+ * it was made for and the series is permanently an hour late. `services/time.ts nextLocalTimeAt`
+ * documents exactly this trap and avoids it the same way: advance the DATE, then set the time, so
+ * the correction lasts precisely as long as the gap does.
  */
 export function nextOccurrence(rule: string, prevTriggerMillis: number, zone: string, nowMillis: number): number | null {
   const rec = parseRecurrence(rule)
@@ -63,9 +89,14 @@ export function nextOccurrence(rule: string, prevTriggerMillis: number, zone: st
   const anchor = DateTime.fromMillis(prevTriggerMillis, { zone })
   if (!anchor.isValid) return null
 
+  // Captured ONCE from the anchor, then re-imposed after every step below. Reading it back off each
+  // candidate instead would carry a gap correction forward, which is the bug.
+  const wall = { hour: anchor.hour, minute: anchor.minute, second: 0, millisecond: 0 }
+  const atWallClock = (dt: DateTime): DateTime => dt.set(wall)
+
   if (rec.freq === 'WEEKLY' && rec.byday) {
     for (let i = 1; i <= 800; i++) {
-      const candidate: DateTime = anchor.plus({ days: i })
+      const candidate = atWallClock(anchor.plus({ days: i }))
       if (rec.byday.includes(candidate.weekday) && candidate.toMillis() > nowMillis) return candidate.toMillis()
     }
     return null
@@ -75,7 +106,7 @@ export function nextOccurrence(rule: string, prevTriggerMillis: number, zone: st
     // plus({months}) clamps (Jan 31 + 1mo = Feb 28); skipping clamped months keeps a day-31
     // series on real 31sts instead of silently drifting to the 28th forever.
     for (let i = 1; i <= 60; i++) {
-      const candidate: DateTime = anchor.plus({ months: i * rec.interval })
+      const candidate = atWallClock(anchor.plus({ months: i * rec.interval }))
       if (candidate.day !== anchor.day) continue
       if (candidate.toMillis() > nowMillis) return candidate.toMillis()
     }
@@ -84,7 +115,7 @@ export function nextOccurrence(rule: string, prevTriggerMillis: number, zone: st
 
   for (let i = 1; i <= 1100; i++) {
     const step = rec.freq === 'DAILY' ? { days: i * rec.interval } : { weeks: i * rec.interval }
-    const candidate: DateTime = anchor.plus(step)
+    const candidate = atWallClock(anchor.plus(step))
     if (candidate.toMillis() > nowMillis) return candidate.toMillis()
   }
   return null

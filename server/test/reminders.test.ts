@@ -18,6 +18,7 @@ import {
   reopenReminder,
   snoozeReminder,
 } from '../src/services/reminders.js'
+import { getDevice, setTimezone } from '../src/services/devices.js'
 import { makeDevice } from './helpers.js'
 
 beforeEach(() => ensureSchema())
@@ -92,6 +93,40 @@ describe('reminder lifecycle', () => {
     expect(after.state).toBe('OPEN')
     expect(after.completedCount).toBe(1)
     expect(after.nagCount).toBe(0) // ladder reset for the new occurrence
+  })
+
+  it('holds a recurring series to its own wall clock across a spring-forward gap', async () => {
+    // `due_at_millis` is rewritten by every roll, so the occurrence luxon corrects out of the gap
+    // used to become the anchor for every occurrence after it and the series stayed an hour late
+    // for good. Same defect and same column as `alarms`, one table along.
+    const device = makeDevice('dev_r_dst')
+    setTimezone(device.deviceId, ZONE)
+    const start = DateTime.fromISO('2027-03-27T01:30', { zone: ZONE }).toMillis()
+    const r = await createReminder(getDevice(device.deviceId)!, {
+      title: 'meds',
+      dueAtMillis: start,
+      recurrence: 'FREQ=DAILY',
+    })
+    expect(getReminder(r.reminderId)!.seriesAnchorMillis).toBe(start)
+
+    vi.useFakeTimers()
+    vi.setSystemTime(DateTime.fromISO('2027-03-27T02:00', { zone: ZONE }).toJSDate())
+    await completeReminder(getDevice(device.deviceId)!, r.reminderId)
+    const gapDay = getReminder(r.reminderId)!
+    // There is no 01:30 that morning, so the occurrence itself is corrected forward…
+    expect(DateTime.fromMillis(gapDay.dueAtMillis!, { zone: ZONE }).toFormat('yyyy-MM-dd HH:mm')).toBe(
+      '2027-03-28 02:30',
+    )
+    // …but the anchor stays put, which is what stops the correction outliving the gap.
+    expect(gapDay.seriesAnchorMillis).toBe(start)
+
+    vi.setSystemTime(DateTime.fromISO('2027-03-28T03:00', { zone: ZONE }).toJSDate())
+    await completeReminder(getDevice(device.deviceId)!, r.reminderId)
+    const dayAfter = getReminder(r.reminderId)!
+    expect(DateTime.fromMillis(dayAfter.dueAtMillis!, { zone: ZONE }).toFormat('yyyy-MM-dd HH:mm')).toBe(
+      '2027-03-29 01:30',
+    )
+    vi.useRealTimers()
   })
 
   it('cancelling a recurring reminder ends the whole series', async () => {

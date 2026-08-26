@@ -20,7 +20,7 @@ import { armAlarm, cancelAlarm } from './alarms.js'
 import type { Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
 import { withdrawNudge } from './push.js'
-import { nextOccurrence } from './recurrence.js'
+import { nextOccurrence, sameWallClock } from './recurrence.js'
 import { nagQuietHours, schedulingRoutine } from './settings.js'
 
 export type Reminder = typeof reminders.$inferSelect
@@ -198,6 +198,9 @@ export async function createReminder(
     detail: params.detail ?? null,
     state: 'OPEN',
     dueAtMillis,
+    // Where the series lives, fixed at creation. Equal to the due time for every reminder that is
+    // not recurring, and read only when one is — see the column comment in db/schema.ts.
+    seriesAnchorMillis: dueAtMillis,
     timingKind,
     recurrence: params.recurrence ?? null,
     nagPolicy,
@@ -249,9 +252,14 @@ export async function completeReminder(
   // completion must not wait on FCM, and the app expires an un-withdrawn nudge on its own.
   void withdrawNudge(device, reminderId)
 
+  // Anchored on the SERIES, not on the occurrence that just completed. `due_at_millis` is rewritten
+  // by every roll, so a spring-forward morning — where the requested time does not exist and luxon
+  // resolves it an hour forward — used to make the corrected instant the anchor for every occurrence
+  // after it, and the series stayed an hour late for good. Same column and same rule as `alarms`.
+  const seriesAnchor = r.seriesAnchorMillis ?? r.dueAtMillis
   const next =
-    r.recurrence && r.dueAtMillis !== null
-      ? nextOccurrence(r.recurrence, r.dueAtMillis, device.timezone, now)
+    r.recurrence && seriesAnchor !== null
+      ? nextOccurrence(r.recurrence, seriesAnchor, device.timezone, now)
       : null
 
   if (next !== null) {
@@ -264,12 +272,18 @@ export async function completeReminder(
     // time, so its lead rungs must be pruned against this moment — measuring them against a
     // createdAt that is weeks old leaves every warning in the plan and every one of them in the
     // past, and the ladder goes silent until the due instant.
-    const rolled: Reminder = { ...r, dueAtMillis: next, plannedAtMillis: now }
+    // Chained through the step only when the wall clock survived it — see `alarms.advanceRecurrence`
+    // for the argument. On the one morning a year it does not, the old anchor stands for a single
+    // step and the day after lands back where the owner set it.
+    const nextAnchor =
+      seriesAnchor !== null && sameWallClock(next, seriesAnchor, device.timezone) ? next : seriesAnchor
+    const rolled: Reminder = { ...r, dueAtMillis: next, plannedAtMillis: now, seriesAnchorMillis: nextAnchor }
     const firstNag = nextNagAt(ladderParams(device, rolled, 0, now))
     db.update(reminders)
       .set({
         state: 'OPEN',
         dueAtMillis: next,
+        seriesAnchorMillis: nextAnchor,
         plannedAtMillis: now,
         nagCount: 0,
         nextNagAtMillis: firstNag,

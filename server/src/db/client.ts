@@ -218,6 +218,8 @@ export function ensureSchema(): void {
   ensureColumn('jobs', 'reminder_id', 'reminder_id TEXT')
   ensureColumn('reminders', 'defer_count', 'defer_count INTEGER NOT NULL DEFAULT 0')
   ensureColumn('alarms', 'wake_check', 'wake_check INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('alarms', 'series_anchor_millis', 'series_anchor_millis INTEGER')
+  ensureColumn('reminders', 'series_anchor_millis', 'series_anchor_millis INTEGER')
 
   // Timing semantics and per-reminder schedules. `trigger` is the only safe backfill for existing
   // rows — it has no lead rungs, so every reminder written before this column keeps its ladder.

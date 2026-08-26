@@ -7,7 +7,7 @@ import { newAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
 import { cancelJobs, deleteJob, enqueueJob, jobPayload, jobsForAlarm, reanchorJob } from './jobs.js'
 import { clearToken, getDevice, type Device } from './devices.js'
-import { nextOccurrence } from './recurrence.js'
+import { nextOccurrence, sameWallClock } from './recurrence.js'
 
 export type Alarm = typeof alarms.$inferSelect
 
@@ -58,12 +58,24 @@ export async function armAlarm(
     recurrence?: string | null
     /** Follow this alarm up over WhatsApp once it is dismissed — see services/wakeCheck.ts. */
     wakeCheck?: boolean
+    /**
+     * The wall clock the SERIES lives at, for a recurring alarm. Defaults to `triggerAtMillis`.
+     *
+     * Only `advanceRecurrence` passes this explicitly. The series must not drift with what the phone
+     * reports back, and each occurrence is a NEW row — so an anchor that is not propagated by hand
+     * is re-derived from the occurrence, which is the drift this exists to stop, one day later.
+     */
+    seriesAnchorMillis?: number
   },
 ): Promise<{ alarmId: string; sent: boolean }> {
   const now = Date.now()
   const existing = getAlarm(params.alarmId)
   const allowWhileIdle = params.allowWhileIdle ?? true
   const wakeCheck = params.wakeCheck ?? false
+  // A one-off alarm gets an anchor too, and it costs nothing: the column is only ever READ for a row
+  // that carries a recurrence, and populating it always means "this alarm has no anchor" is not a
+  // state anything downstream has to reason about.
+  const seriesAnchorMillis = params.seriesAnchorMillis ?? params.triggerAtMillis
   db.insert(alarms)
     .values({
       alarmId: params.alarmId,
@@ -74,13 +86,16 @@ export async function armAlarm(
       allowWhileIdle,
       recurrence: params.recurrence ?? null,
       wakeCheck,
+      seriesAnchorMillis,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     })
     .onConflictDoUpdate({
       target: alarms.alarmId,
-      // `wakeCheck` belongs in BOTH halves: this is an upsert, and re-arming the same alarmId (the
-      // SYNC/recovery path) would otherwise silently keep whatever the row had before.
+      // `wakeCheck` and `seriesAnchorMillis` belong in BOTH halves: this is an upsert, and re-arming
+      // the same alarmId (the SYNC/recovery path) would otherwise silently keep whatever the row had
+      // before — which for the anchor means an alarm re-armed at a new time keeps a series anchor
+      // pointing at the old one.
       set: {
         triggerAtMillis: params.triggerAtMillis,
         label: params.label,
@@ -88,6 +103,7 @@ export async function armAlarm(
         allowWhileIdle,
         recurrence: params.recurrence ?? null,
         wakeCheck,
+        seriesAnchorMillis,
         updatedAt: now,
       },
     })
@@ -130,7 +146,11 @@ export async function advanceRecurrence(alarmId: string): Promise<{ advanced: bo
     .run()
   if (claimed.changes === 0) return { advanced: false } // the other path got here first
 
-  const nextAt = nextOccurrence(rule, alarm.triggerAtMillis, device.timezone, Date.now())
+  // The ANCHOR, not the trigger. `recordEvent` adopts whatever the phone reports on ARMED — after a
+  // snooze that is the snoozed instant — and computing tomorrow from it walked a daily 06:30 to
+  // 07:33 inside a week, permanently. `?? triggerAtMillis` for rows written before the column.
+  const anchor = alarm.seriesAnchorMillis ?? alarm.triggerAtMillis
+  const nextAt = nextOccurrence(rule, anchor, device.timezone, Date.now())
   if (nextAt === null) {
     log.warn({ alarmId, rule }, 'recurrence: no next occurrence computable; series ends')
     return { advanced: false }
@@ -145,6 +165,12 @@ export async function advanceRecurrence(alarmId: string): Promise<{ advanced: bo
     // Carried forward, or a recurring 06:30 wake-up loses its check on day two — which is the one
     // alarm the whole feature exists for.
     wakeCheck: alarm.wakeCheck,
+    // Chained on `nextAt` when the wall clock survived the step, which is every ordinary day, and
+    // that is what keeps `nextOccurrence`'s iteration short. On a spring-forward gap the requested
+    // time does not exist and luxon resolves it an hour forward — adopting that as the next anchor
+    // would carry the correction past the gap and leave the series permanently late, so the old
+    // anchor stands for exactly one step and the day after lands back where the owner set it.
+    seriesAnchorMillis: sameWallClock(nextAt, anchor, device.timezone) ? nextAt : anchor,
   })
   log.info({ from: alarmId, to: nextAlarmId, nextAt }, 'recurrence: advanced series')
   return { advanced: true, nextAlarmId }
@@ -269,7 +295,25 @@ export function recordEvent(
     const set: Partial<Alarm> = { state: event, updatedAt: Date.now() }
     // Adopt the phone-reported trigger only on ARMED (snooze/re-arm moved it); other events keep
     // the server's time.
+    //
+    // `seriesAnchorMillis` is deliberately NOT touched here. This column is "where this occurrence
+    // actually is", which the phone is the authority on; the anchor is "where the series lives",
+    // which it is not. They used to be one column, and one snooze a morning walked a daily 06:30
+    // to 07:33 inside a week because `advanceRecurrence` read the value the phone had moved.
     if (event === 'ARMED' && typeof triggerAtMillis === 'number') set.triggerAtMillis = triggerAtMillis
     db.update(alarms).set(set).where(eq(alarms.alarmId, alarmId)).run()
+
+    // The advance backstop was queued by `armAlarm` at the ORIGINAL trigger plus ten minutes, and
+    // adopting a later one leaves it in the past relative to the occurrence it guards. A snooze
+    // longer than the backstop window therefore let the series advance while the occurrence was
+    // still pending — the phone rings at 06:39, and the server has already moved on to tomorrow.
+    // Re-queued off the trigger we just adopted, so the guard keeps its ten-minute margin.
+    if (event === 'ARMED' && typeof triggerAtMillis === 'number') {
+      const alarm = getAlarm(alarmId)
+      if (alarm?.recurrence) {
+        cancelJobs('recurring', alarmId)
+        enqueueJob('recurring', triggerAtMillis + RECURRING_BACKSTOP_MS, { alarmId, deviceId })
+      }
+    }
   }
 }
