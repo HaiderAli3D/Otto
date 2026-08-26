@@ -122,16 +122,27 @@ export function renderFacts(deviceId: string): string {
   if (all.length === 0) {
     return "You don't know anything about the owner yet. Save facts with remember_fact as you learn them."
   }
-  // Pick by pinned + recency, then sort the CHOSEN set by key for a stable render.
-  const chosen = all.slice(0, INJECT_LIMIT).sort((a, b) => a.key.localeCompare(b.key))
-  const lines: string[] = []
+  // Pick by pinned + recency, SPEND THE BUDGET IN THAT ORDER, and only then sort what survived by
+  // key for a byte-stable render.
+  //
+  // The sort used to come first, so the budget was spent alphabetically and the `break` dropped
+  // whatever sorted last — which has nothing to do with what matters. A pinned fact whose key began
+  // with "w" lost to an inferred one beginning with "a", every turn, silently, and `listFacts` had
+  // gone to the trouble of ordering by pinned and recency for nothing. The owner's stated wake time
+  // is exactly the kind of thing that sorts late.
+  const chosen: typeof all = []
   let budget = INJECT_CHAR_BUDGET
-  for (const f of chosen) {
+  for (const f of all.slice(0, INJECT_LIMIT)) {
     const line = `- ${f.key}: ${f.value}`
-    if (line.length > budget) break
+    // `continue`, not `break`: one long fact must not evict every shorter one behind it, and the
+    // order here is importance, so the ones behind it are the ones we most want to keep.
+    if (line.length > budget) continue
     budget -= line.length
-    lines.push(line)
+    chosen.push(f)
   }
+  const lines = chosen
+    .sort((a, b) => a.key.localeCompare(b.key))
+    .map((f) => `- ${f.key}: ${f.value}`)
   const more = all.length > lines.length ? `\n(${all.length - lines.length} more — use recall_facts.)` : ''
   return `What you remember about the owner:\n${lines.join('\n')}${more}`
 }

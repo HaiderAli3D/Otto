@@ -415,11 +415,18 @@ describe('chase_in_reply', () => {
       setRow(id, { nagCount: 1, lastNaggedAtMillis: null, nextNagAtMillis: now + HOUR })
     }
 
+    // Whichever of the two the selection rules actually offer this turn. Naming one by hand made
+    // this test depend on a tie-break between two reminders that are deliberately identical — and
+    // now that the tool enforces the candidate rather than trusting the id it is handed, picking
+    // the wrong one refuses the FIRST call and the test stops being about second calls at all.
+    const offered = tackOnCandidate(device, now)!.reminder.reminderId
+    const other = offered === a.reminderId ? b.reminderId : a.reminderId
+
     const { client, requests } = fakeModel([
       {
         output: [
-          fnCall('chase_in_reply', { reminderId: a.reminderId }, 'c1'),
-          fnCall('chase_in_reply', { reminderId: b.reminderId }, 'c2'),
+          fnCall('chase_in_reply', { reminderId: offered }, 'c1'),
+          fnCall('chase_in_reply', { reminderId: other }, 'c2'),
         ],
       },
       { output: [say('Added. btw the report?')] },
@@ -428,12 +435,13 @@ describe('chase_in_reply', () => {
 
     await runAgentTurn({ waUserId: device.whatsappNumber!, device, content: 'hello' })
 
-    expect(getReminder(a.reminderId)!.nagCount).toBe(2)
-    expect(getReminder(b.reminderId)!.nagCount).toBe(1)
+    expect(getReminder(offered)!.nagCount).toBe(2)
+    expect(getReminder(other)!.nagCount).toBe(1)
 
     const items = requests[1]!.input as Array<{ type?: string; call_id?: string; output?: string }>
     const second = items.find((i) => i.type === 'function_call_output' && i.call_id === 'c2')!
-    expect(JSON.parse(second.output!).error).toContain('one per reply')
+    // Refused either way — by the cooldown the first call started, or by not being the candidate.
+    expect(String(JSON.parse(second.output!).error)).toMatch(/one per reply|not this turn's tack-on/)
   })
 
   describe('refusals write nothing', () => {

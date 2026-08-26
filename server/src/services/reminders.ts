@@ -17,12 +17,13 @@ import {
   type TimingKind,
 } from '../lib/rungPlan.js'
 import { armAlarm, cancelAlarm } from './alarms.js'
-import type { Device } from './devices.js'
+import { getDevice, type Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
+import { supersedePending } from './outbox.js'
 import { withdrawNudge } from './push.js'
 import { nextOccurrence, sameWallClock } from './recurrence.js'
 import { formatWindow } from '../lib/routine.js'
-import { parseQuietHours, type QuietHours } from '../lib/quietHours.js'
+import { deferPastQuietHours, parseQuietHours, type QuietHours } from '../lib/quietHours.js'
 import { nagQuietHours, schedulingRoutine } from './settings.js'
 
 export type Reminder = typeof reminders.$inferSelect
@@ -369,12 +370,31 @@ export async function cancelReminder(device: Device, reminderId: string): Promis
 export function snoozeReminder(reminderId: string, untilMillis: number): boolean {
   const r = getReminder(reminderId)
   if (!r || r.state !== 'OPEN') return false
+
+  // Deferred out of quiet hours like every other instant this server chooses.
+  //
+  // The lock-screen Snooze button posts a fixed offset the PHONE computed — `NudgeTiming.snoozeUntil`
+  // knows nothing about the owner's window — and this wrote it verbatim. So "snooze 3 hours" at
+  // 23:30 landed at 02:30, and every gate the ladder is careful about was bypassed by the one path
+  // the owner reaches with their thumb from a locked screen.
+  //
+  // `escalateWithAlarm` is exempt here for the same reason it is exempt in `nagQuietHours`: it is a
+  // per-item opt-in documented as "this WILL wake them", and a global default must not overrule the
+  // one reminder the owner marked as the exception.
+  const device = getDevice(r.deviceId)
+  const quiet = device ? nagQuietHours(device, r.escalateWithAlarm) : null
+  const at = device ? deferPastQuietHours(untilMillis, device.timezone, quiet) : untilMillis
+
   db.update(reminders)
-    .set({ nextNagAtMillis: untilMillis, deferCount: r.deferCount + 1, updatedAt: Date.now() })
+    .set({ nextNagAtMillis: at, deferCount: r.deferCount + 1, updatedAt: Date.now() })
     .where(eq(reminders.reminderId, reminderId))
     .run()
   cancelNudges(reminderId)
-  enqueueJob('nudge', untilMillis, { reminderId, deviceId: r.deviceId })
+  // A nudge already queued for this reminder is about to say the thing they have just pushed away.
+  // Every other mover retires it; this one did not, so a shut window meant the snoozed chase arrived
+  // anyway on next contact.
+  supersedePending(reminderId)
+  enqueueJob('nudge', at, { reminderId, deviceId: r.deviceId })
   return true
 }
 
