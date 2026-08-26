@@ -157,6 +157,15 @@ export type CalendarEvent = {
   location: string | null
   status: string | null
   /**
+   * The OWNER's own answer to the invitation: `accepted`, `declined`, `tentative`,
+   * `needsAction`, or null when there is no attendee row for them.
+   *
+   * Every other signal `isProtectedEvent` reads is a guess at whether they are busy. This is the one
+   * field where they have answered the question directly, and it was not being mapped at all — so an
+   * invitation they had declined still silenced Otto for its whole hour.
+   */
+  selfResponse: string | null
+  /**
    * The series this is one occurrence OF, or null for a one-off.
    *
    * `listCalendarEvents` sets `singleEvents`, so a repeating meeting arrives as instances whose own
@@ -196,6 +205,10 @@ function toCalendarEvent(e: calendar_v3.Schema$Event): CalendarEvent {
     recurringEventId: e.recurringEventId ?? null,
     organizerSelf: e.organizer?.self === true,
     attendeeCount: (e.attendees ?? []).length,
+    // The owner's OWN answer to the invitation, which is the one field that says whether they are
+    // going. Google puts it on the attendee row flagged `self`; an event with no such row (one they
+    // created, or a bare block) has no RSVP and reads as null.
+    selfResponse: (e.attendees ?? []).find((a) => a.self === true)?.responseStatus ?? null,
     eventType: e.eventType ?? null,
   }
 }

@@ -134,3 +134,26 @@ export function appendAssistantTurns(waUserId: string, deviceId: string | null, 
   for (const text of texts) history.push({ role: 'assistant', content: text })
   saveSession(waUserId, deviceId, history)
 }
+
+/**
+ * Turns appended to the stored transcript since a snapshot was taken, in order.
+ *
+ * There are two writers of one session row and only one of them is serialised. `runAgentTurn` reads
+ * the history, spends up to a minute in model and tool calls, and writes it back — while the
+ * scheduler is free to flush a nudge in that window and `appendAssistantTurns` it onto the row.
+ * Whoever writes last wins, and it is almost always the turn: the nudge vanishes from the
+ * transcript, and the owner's "done" a minute later answers a message the model cannot see.
+ *
+ * `routes/whatsapp.ts` serialises inbound messages against each other with a per-user chain, but the
+ * scheduler is not on it and cannot be — a flush called from inside the chain would await itself.
+ *
+ * So instead of locking, the turn REPLAYS what it missed. Compared by identity on the tail rather
+ * than by content: assistant turns repeat themselves legitimately ("Nudge: the report is still
+ * open" twice is a real thing that happens), so anything content-addressed would drop the second.
+ * The snapshot length is the only reliable cut, and both writers only ever append.
+ */
+export function turnsAppendedSince(waUserId: string, snapshotLength: number): Item[] {
+  const stored = loadSession(waUserId)
+  if (stored.length <= snapshotLength) return []
+  return stored.slice(snapshotLength)
+}

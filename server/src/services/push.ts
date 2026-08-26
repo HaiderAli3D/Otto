@@ -101,6 +101,8 @@ const LEVEL_BY_KIND: Record<OutboxKind, 'SILENT' | 'NORMAL' | 'URGENT'> = {
   missed_alarm: 'URGENT',
   system_warning: 'URGENT',
   wake_check: 'URGENT',
+  // Answering them, which they are waiting for. It makes a sound and it is not an alarm.
+  reply: 'NORMAL',
 }
 
 /** How long a notification is worth showing before it becomes noise, by kind. */
@@ -112,6 +114,8 @@ const TTL_BY_KIND_MS: Record<OutboxKind, number> = {
   missed_alarm: 12 * 60 * 60 * 1000,
   system_warning: 24 * 60 * 60 * 1000,
   wake_check: 45 * 60 * 1000,
+  // Short: an answer nobody read within the hour has been overtaken by the conversation.
+  reply: 60 * 60 * 1000,
 }
 
 /** Can this device receive a nudge right now, as far as we can tell? */

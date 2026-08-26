@@ -102,6 +102,11 @@ export const MAX_COMMITMENT_MS = 4 * 60 * 60 * 1000
  */
 export function isProtectedEvent(e: CalendarEvent): boolean {
   if (e.isAllDay || e.status === 'cancelled') return false
+  // DECLINED is the owner saying, in the calendar's own vocabulary, that they will not be there.
+  // Every test below is a guess at whether they are busy; this is the one place they have answered
+  // the question directly, and it was not being read — so an invitation they had turned down still
+  // silenced Otto for its whole hour, and dropped whatever he would have said.
+  if (e.selfResponse === 'declined') return false
   if (e.eventType !== null && e.eventType !== 'default') return false
   if (e.attendeeCount >= 2) return true
   if (e.attendeeCount >= 1 && !e.organizerSelf) return true

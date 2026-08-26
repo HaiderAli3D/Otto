@@ -12,7 +12,7 @@ import {
 } from '../services/devices.js'
 import { maybeCollapseBacklog } from '../services/digest.js'
 import { ingestFailureMessage, ingestInbound } from '../services/ingest.js'
-import { flushOutbox } from '../services/outbox.js'
+import { enqueueAndFlushRow, flushOutbox } from '../services/outbox.js'
 import { listReminders } from '../services/reminders.js'
 import { appendAssistantTurns, maybeResetIdleSession } from '../services/sessions.js'
 import type { Device } from '../services/devices.js'
@@ -157,5 +157,26 @@ async function handleInbound(msg: InboundMessage): Promise<void> {
   if (delivered.length > 0) appendAssistantTurns(from, device.deviceId, delivered)
 
   const reply = await runAgentTurn({ waUserId: from, device: fresh, content: ingested.content })
-  await sendText(from, reply)
+
+  // The reply goes out like everything else Otto says, rather than through a bare `sendText`.
+  //
+  // This was the one outbound message in the system with no outbox row, no retry and no fallback:
+  // a Meta 5xx, a timeout, or a phone that had just dropped off wifi meant the owner asked a
+  // question, Otto composed an answer, spent whatever it cost, wrote it into the transcript as
+  // though it had been said — and they simply never got it. Every other kind of message has a
+  // durable row behind it, and the reply is the one they are actively waiting for.
+  //
+  // `enqueueAndFlushRow` sends it immediately when the window is open, which for an inbound reply
+  // it always is, so the ordinary path is unchanged. What is new is what happens when that fails:
+  // the row survives, the five-minute sweep retries it, and if the window has shut in the meantime
+  // it goes to the phone as a notification.
+  //
+  // No dedupeKey: two identical replies to two identical questions are two different messages, and
+  // the partial unique index spans the whole table.
+  await enqueueAndFlushRow({
+    waUserId: from,
+    deviceId: device.deviceId,
+    kind: 'reply',
+    body: reply,
+  })
 }

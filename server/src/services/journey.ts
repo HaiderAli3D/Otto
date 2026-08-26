@@ -135,6 +135,8 @@ function syntheticEvent(p: { title: string; startIso: string; endIso: string; lo
     isAllDay: false,
     location: p.location,
     status: null,
+    // Nobody was invited, so there is no RSVP to read — the "we know nothing" value, like the rest.
+    selfResponse: null,
     recurringEventId: null,
     organizerSelf: false,
     attendeeCount: 0,

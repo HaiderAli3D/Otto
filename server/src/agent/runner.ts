@@ -4,7 +4,7 @@ import type { Device } from '../services/devices.js'
 import {
   bumpSessionFailures,
   clearSessionFailures,
-  loadSession,
+  loadSession, turnsAppendedSince,
   saveSession,
   trimToValidStart,
   type Item,
@@ -212,10 +212,25 @@ export async function runAgentTurn(params: {
   }
   const { waUserId, device, content } = params
   const history: Item[] = loadSession(waUserId)
+  // The length BEFORE this turn's own user message, which is the cut anything appended by the
+  // scheduler while we were thinking will sit after. See `turnsAppendedSince`.
+  const snapshotLength = history.length
   history.push({ role: 'user', content } as Item)
 
   try {
     const reply = await runLoop(device, history)
+    // Replay anything the scheduler appended while this turn was in flight — a nudge that flushed
+    // mid-turn, most often. Without this the last writer wins, which is almost always the turn, and
+    // the nudge disappears from the transcript: the owner's "done" a minute later then answers a
+    // message the model has no record of ever sending.
+    //
+    // Spliced in BEFORE this turn's own additions rather than appended after, because that is the
+    // order they actually happened in — the flush landed while the model was still deciding.
+    const missed = turnsAppendedSince(waUserId, snapshotLength)
+    if (missed.length > 0) {
+      history.splice(snapshotLength, 0, ...missed)
+      log.debug({ waUserId, missed: missed.length }, 'replayed turns the scheduler appended mid-turn')
+    }
     saveSession(waUserId, device.deviceId, history)
     clearSessionFailures(waUserId)
     return reply

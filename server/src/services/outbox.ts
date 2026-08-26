@@ -27,6 +27,16 @@ export type OutboxKind =
   | 'brief'
   | 'weekly'
   | 'wake_check'
+  /**
+   * An answer to something the owner just said. The one kind that is NOT Otto speaking first.
+   *
+   * It has a row for durability alone — a Meta 5xx or a dropped connection used to mean the reply
+   * was composed, charged for, written into the transcript, and never delivered. Every gate in this
+   * file exists to govern Otto INTERRUPTING someone, and none of them may govern this: quiet hours
+   * are explicitly "about you speaking first", the daily budget counts interruptions, and holding an
+   * answer back until a meeting ends would be absurd.
+   */
+  | 'reply'
 
 const WINDOW_MS = 24 * 60 * 60 * 1000
 /** Meta's clock is authoritative; don't race the edge of the window and eat a 131047. */
@@ -93,7 +103,7 @@ const STALE_CLAIM_MS = 2 * 60 * 1000
  * beside it (brief, weekly review, and the five-minute sweep) each spoke first inside a window Otto
  * had just promised to respect.
  */
-export const QUIET_EXEMPT_KINDS: readonly OutboxKind[] = ['nudge', 'wake_check']
+export const QUIET_EXEMPT_KINDS: readonly OutboxKind[] = ['nudge', 'wake_check', 'reply']
 
 /**
  * Would delivering `kind` to this device right now break its quiet hours?
@@ -366,7 +376,7 @@ export async function flushOutbox(
     // case — a dropped wake_check leaving someone asleep — is answered at its source in
     // services/wakeCheck.ts, which stands the whole ladder down rather than letting it be silently
     // swallowed here.
-    if (commitment !== null) {
+    if (commitment !== null && row.kind !== 'reply') {
       markSuperseded([row.id])
       log.info(
         { waUserId, id: row.id, kind: row.kind, until: commitment.endMillis },

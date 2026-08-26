@@ -28,13 +28,29 @@ import { getSettings } from './settings.js'
  * `nudge`, `brief`, `weekly` and `digest` all count and can all be held — a budget the brief could
  * step around would be a budget on nudges wearing a more general name.
  */
-export const BUDGET_EXEMPT_KINDS: readonly OutboxKind[] = ['wake_check', 'system_warning', 'missed_alarm']
+export const BUDGET_EXEMPT_KINDS: readonly OutboxKind[] = [
+  'wake_check',
+  'system_warning',
+  'missed_alarm',
+  // Answering them is not an interruption, and a ceiling on interruptions must never make Otto
+  // stop replying. This is the one kind the owner is actively waiting for.
+  'reply',
+]
 
 /**
  * Listed here rather than imported from outbox.ts to avoid an import cycle — outbox.ts consults the
  * budget at flush time. Pinned against the real union by a test.
  */
-const OUTBOX_KINDS: OutboxKind[] = ['nudge', 'digest', 'missed_alarm', 'system_warning', 'brief', 'weekly', 'wake_check']
+const OUTBOX_KINDS: OutboxKind[] = [
+  'nudge',
+  'digest',
+  'missed_alarm',
+  'system_warning',
+  'brief',
+  'weekly',
+  'wake_check',
+  'reply',
+]
 
 /** The kinds a day's ceiling actually applies to. */
 const BUDGETED_KINDS: string[] = OUTBOX_KINDS.filter((k) => !BUDGET_EXEMPT_KINDS.includes(k))
