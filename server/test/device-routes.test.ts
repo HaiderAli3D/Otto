@@ -15,6 +15,8 @@ import { db } from '../src/db/client.js'
 import { jobs } from '../src/db/schema.js'
 import { armAlarm } from '../src/services/alarms.js'
 import { scheduleBriefChain } from '../src/services/brief.js'
+import { linkWhatsapp } from '../src/services/devices.js'
+import { pendingFor } from '../src/services/outbox.js'
 import { getDevice, setTimezone } from '../src/services/devices.js'
 import { dueJobs } from '../src/services/jobs.js'
 import { and, eq } from 'drizzle-orm'
@@ -32,6 +34,88 @@ function expectValidSig(data: Record<string, string>, secret: string): void {
 
 beforeEach(() => {
   sent.length = 0
+})
+
+describe('what the phone says about its own health', () => {
+  /**
+   * The app has been reporting `notificationsEnabled` and `mutedChannels` on every heartbeat for two
+   * releases and the route's zod schema stripped them, so it was paying to compute a signal nothing
+   * read. `exactAlarmsPermitted` is the one that matters most and did not exist: `registerWithOs`
+   * refuses an alarm silently when the grant is gone, and from the server an alarm the OS refused
+   * looks exactly like one that is set.
+   */
+  const beat = async (
+    app: Awaited<ReturnType<typeof makeApp>>,
+    deviceId: string,
+    health: Record<string, unknown>,
+  ) =>
+    app.inject({
+      method: 'POST',
+      url: `/devices/${deviceId}/heartbeat`,
+      payload: { appVersion: '1.3.0', atMillis: Date.now(), ...health },
+    })
+
+  const warnings = (waUserId: string) =>
+    pendingFor(waUserId).filter((r) => r.kind === 'system_warning')
+
+  it('tells the owner when the phone can no longer set an exact alarm', async () => {
+    const app = await makeApp()
+    makeDevice('dev_h1')
+    linkWhatsapp('dev_h1', '447700900801')
+
+    expect((await beat(app, 'dev_h1', { exactAlarmsPermitted: false })).statusCode).toBe(204)
+
+    const rows = warnings('447700900801')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.body).toContain('exact alarms')
+  })
+
+  it('says it once a day, however often the heartbeat runs', async () => {
+    // The heartbeat runs constantly and a broken grant does not heal on its own, so without the
+    // dedupe key this would be a message every fifteen minutes about a thing they already know.
+    const app = await makeApp()
+    makeDevice('dev_h2')
+    linkWhatsapp('dev_h2', '447700900802')
+
+    for (let i = 0; i < 4; i++) await beat(app, 'dev_h2', { exactAlarmsPermitted: false })
+
+    expect(warnings('447700900802')).toHaveLength(1)
+  })
+
+  it('says nothing when the app is too old to report it', async () => {
+    // `undefined` is an older build, not a broken one. Warning here would reach every owner who has
+    // not updated — the false alarm that teaches someone to ignore the channel.
+    const app = await makeApp()
+    makeDevice('dev_h3')
+    linkWhatsapp('dev_h3', '447700900803')
+
+    await beat(app, 'dev_h3', {})
+
+    expect(warnings('447700900803')).toHaveLength(0)
+  })
+
+  it('says nothing when everything is fine', async () => {
+    const app = await makeApp()
+    makeDevice('dev_h4')
+    linkWhatsapp('dev_h4', '447700900804')
+
+    await beat(app, 'dev_h4', { exactAlarmsPermitted: true, notificationsEnabled: true, mutedChannels: [] })
+
+    expect(warnings('447700900804')).toHaveLength(0)
+  })
+
+  it('mentions muted channels and switched-off notifications separately', async () => {
+    const app = await makeApp()
+    makeDevice('dev_h5')
+    linkWhatsapp('dev_h5', '447700900805')
+
+    await beat(app, 'dev_h5', { notificationsEnabled: false, mutedChannels: ['otto_nudge_low'] })
+
+    const bodies = warnings('447700900805').map((r) => r.body)
+    expect(bodies).toHaveLength(2)
+    expect(bodies.some((b) => b.includes('Notifications are switched off'))).toBe(true)
+    expect(bodies.some((b) => b.includes('muted'))).toBe(true)
+  })
 })
 
 describe('which device events count as the owner being awake', () => {

@@ -48,8 +48,8 @@ android {
         // The gate matters more for location than it did for nudges: a nudge has a fallback
         // transport (WhatsApp) and a location request has none, so an ungated send would leave the
         // agent waiting on an answer that is never coming.
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

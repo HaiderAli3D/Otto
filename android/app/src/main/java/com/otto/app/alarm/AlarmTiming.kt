@@ -12,6 +12,21 @@ enum class FireDecision {
 
     /** Trigger is older than the grace window — record MISSED instead of ringing late. */
     MISSED,
+
+    /**
+     * Room accepted it; the OS did not.
+     *
+     * Never returned by [AlarmTiming.classify] — this is a REGISTRATION outcome, not a timing one,
+     * and it shares the enum because it is what `AlarmController.arm` has to answer with. The
+     * distinction it exists to preserve: the server reads an ARMED report as the delivery ack that
+     * cancels its arm-ack watchdog, so an alarm the OS refused (exact-alarm permission withdrawn,
+     * a SecurityException, an OEM quota) must not be reported as one that is set. It used to be:
+     * both failures were swallowed, ARM was returned regardless, and the alarm simply never rang
+     * with nothing anywhere saying so.
+     *
+     * The row stays ARMED in Room so boot re-arm retries it once the grant comes back.
+     */
+    NOT_REGISTERED,
 }
 
 /**
