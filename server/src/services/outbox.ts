@@ -118,6 +118,32 @@ export function windowOpen(device: Device, now: number = Date.now()): boolean {
   return device.lastInboundAt !== null && now - device.lastInboundAt < WINDOW_MS - WINDOW_SAFETY_MS
 }
 
+/**
+ * Queue one proactive message. Returns its row id, or null when the dedupe index rejected it.
+ *
+ * The id is what lets `enqueueAndTryFlush` answer "did YOUR message go out" rather than "did
+ * anything go out", which two callers were already reading it as.
+ */
+/**
+ * Is this failure about the ACCOUNT rather than about this one message?
+ *
+ * 401/403 is an authentication problem by any reading. The Meta codes are the ones that mean the
+ * number, the app or the business is in a state no message can get past: 131026 (message
+ * undeliverable / not a WhatsApp user), 131049 (per-user marketing limit), 131048 (spam rate limit)
+ * and 130472 (user in an experiment group). Status 0 is this server's own "Meta is not configured"
+ * sentinel, which is as account-level as it gets.
+ *
+ * Deliberately a short list of things we are SURE about. Anything unrecognised keeps the old
+ * per-message treatment, so being wrong here can only ever cost one message rather than the queue.
+ */
+const META_ACCOUNT_CODES = new Set([131026, 131049, 131048, 130472])
+
+function isAccountLevel(res: { status: number; metaCode?: number }): boolean {
+  if (res.status === 0) return true
+  if (res.status === 401 || res.status === 403) return true
+  return res.metaCode !== undefined && META_ACCOUNT_CODES.has(res.metaCode)
+}
+
 export function enqueueOutbound(params: {
   waUserId: string
   deviceId?: string | null
@@ -126,10 +152,11 @@ export function enqueueOutbound(params: {
   reminderId?: string | null
   dedupeKey?: string | null
   ttlMs?: number
-}): void {
+}): number | null {
   const now = Date.now()
   try {
-    db.insert(outbox)
+    const res = db
+      .insert(outbox)
       .values({
         waUserId: params.waUserId,
         deviceId: params.deviceId ?? null,
@@ -143,11 +170,28 @@ export function enqueueOutbound(params: {
         createdAt: now,
       })
       .run()
+    return Number(res.lastInsertRowid)
   } catch (err) {
     // The partial unique index on (dedupe_key) WHERE state='PENDING' rejects a duplicate. That is
-    // the double-nudge guard doing its job, not an error.
-    log.debug({ err, dedupeKey: params.dedupeKey }, 'outbox enqueue skipped (already pending)')
+    // the double-nudge guard doing its job, not an error — and it is the ONLY failure that is not.
+    //
+    // Swallowing everything at debug level meant a genuinely broken write — a disk that filled, a
+    // column a migration had not added, a locked database — looked exactly like the guard working
+    // as designed, on the one path where losing a message is invisible by construction: nothing
+    // downstream is waiting for a row that was never inserted.
+    if (isDedupeRejection(err)) {
+      log.debug({ dedupeKey: params.dedupeKey }, 'outbox enqueue skipped (already pending)')
+    } else {
+      log.error({ err, kind: params.kind, dedupeKey: params.dedupeKey }, 'outbox enqueue FAILED; message lost')
+    }
+    return null
   }
+}
+
+/** Is this the partial unique index on `dedupe_key` doing its job, rather than a real failure? */
+function isDedupeRejection(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code
+  return typeof code === 'string' && code.startsWith('SQLITE_CONSTRAINT')
 }
 
 export function pendingFor(waUserId: string): OutboxRow[] {
@@ -268,6 +312,12 @@ export async function flushOutbox(
   if (rows.length === 0) return []
   const delivered: string[] = []
 
+  // Read once, before the first await, and used for two decisions: which transport each row takes,
+  // and whether the phone can be reached at all. A row with no device behind it (deviceId null) can
+  // only ever go over WhatsApp, so it keeps the old behaviour of simply trying.
+  const device = (deviceId ? getDevice(deviceId) : null) ?? null
+  const windowIsOpen = device === null ? true : windowOpen(device, now)
+
   // ONE calendar read per proactive pass, hoisted out of the loop and taken only once there is
   // something to deliver. `releaseStaleClaims` has already run — it must precede the first await —
   // and every row below is still taken with a guarded UPDATE, so this yield cannot cost a row.
@@ -325,7 +375,14 @@ export async function flushOutbox(
       continue
     }
     // Enough for one pass; the rest keep their place in the queue for the next one.
-    if (opts.proactiveFor && delivered.length >= MAX_SENDS_PER_FLUSH) {
+    //
+    // The `proactiveFor` guard is gone. It exempted exactly the case the cap was written for: the
+    // owner breaking a day of silence, which reopens the window and drains the entire backlog into
+    // one second — unreadable, and the traffic shape that gets a business number rate-limited. The
+    // reason it was scoped to proactive passes was to keep the owner's own REPLY from waiting behind
+    // a backlog, and that still holds: the reply is sent by routes/whatsapp.ts after this returns,
+    // not from inside this queue.
+    if (delivered.length >= MAX_SENDS_PER_FLUSH) {
       log.info({ waUserId, remaining: rows.length - delivered.length }, 'outbox: pass full, leaving the tail queued')
       break
     }
@@ -350,14 +407,31 @@ export async function flushOutbox(
       break
     }
 
+    // The transport is chosen HERE, and this is what makes the phone tier reachable at all.
+    //
+    // `pushOutboxRow` used to sit only inside the `res.outOfWindow` branch below — reachable only
+    // when Meta contradicted us with a 131047, i.e. only when our own window belief was WRONG. And
+    // all three callers of this function refused to call it unless `windowOpen()` was already true.
+    // So the FCM tier, which SETUP.md describes as the reason no WhatsApp template is needed, never
+    // once ran in the case it exists for: after a day of the owner's silence every brief, review and
+    // chase sat PENDING until its TTL burned and it was retired EXPIRED, with the phone online and
+    // reachable the whole time.
+    //
+    // A shut window now produces the same shape of result Meta would have, without the round trip,
+    // and falls into the same branch. Every gate above still applies — a push is Otto speaking
+    // first, so quiet hours, the daily budget and the commitment rule all still govern it.
     let res: SendResult
-    try {
-      res = await sendText(waUserId, row.body)
-    } catch (err) {
-      // sendText is documented never to throw, but a claim nobody releases is invisible to every
-      // later flush — put the row back before the error propagates, exactly where it was.
-      db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
-      throw err
+    if (windowIsOpen) {
+      try {
+        res = await sendText(waUserId, row.body)
+      } catch (err) {
+        // sendText is documented never to throw, but a claim nobody releases is invisible to every
+        // later flush — put the row back before the error propagates, exactly where it was.
+        db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
+        throw err
+      }
+    } else {
+      res = { ok: false, permanent: true, status: 0, outOfWindow: true, body: 'window shut; not attempted' }
     }
 
     if (res.ok) {
@@ -369,7 +443,9 @@ export async function flushOutbox(
       continue
     }
     if (res.outOfWindow) {
-      if (deviceId) clearInboundWindow(deviceId)
+      // Only when META said so. A window we already knew was shut needs no correcting, and clearing
+      // it on every sweep of a quiet day would rewrite `lastInboundAt` for no reason.
+      if (deviceId && res.status !== 0) clearInboundWindow(deviceId)
 
       // A shut window is no longer a wall. Meta permits free-form text only inside 24 hours of the
       // owner's last inbound, and with no approved template configured `shouldKnock` can never fire
@@ -378,7 +454,6 @@ export async function flushOutbox(
       //
       // Attempted on the CLAIMED row, so the two transports can never both deliver it: whichever
       // succeeds marks it SENT, and if push fails too the row goes back exactly where it was.
-      const device = deviceId ? getDevice(deviceId) : null
       if (device && (await pushOutboxRow(device, row, Date.now()))) {
         db.update(outbox)
           .set({ state: 'SENT', sentAtMillis: Date.now(), deliveredVia: 'push' })
@@ -395,11 +470,35 @@ export async function flushOutbox(
       break // no point trying the rest
     }
     if (res.permanent) {
+      // ACCOUNT-LEVEL failures leave the row PENDING and stop the pass. Everything else is a
+      // per-message problem and retires just this one.
+      //
+      // `graphFetch` classes every non-429 4xx as permanent with no retry, and this branch used to
+      // stamp FAILED — terminal, retried by nothing — and then `continue`, walking the rest of the
+      // queue and doing the same to every row behind it. So one expired token, one rotated app
+      // secret, one removed system user discarded the day's brief, every queued chase and any
+      // arm-ack warning inside a single five-minute tick, and there was nothing left to send once
+      // the token was fixed. `MAX_SENDS_PER_FLUSH` could not stop it: the cap counts DELIVERED rows,
+      // which under a systemic error stays at zero. `sendText` also reports `permanent` when Meta is
+      // not configured at all, so an unset access token emptied the queue on the first sweep.
+      //
+      // Left PENDING so the ordinary TTL and the gc backstop still bound the row's life.
+      if (isAccountLevel(res)) {
+        db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
+        log.error(
+          { waUserId, id: row.id, status: res.status, metaCode: res.metaCode },
+          'outbox: account-level send failure; leaving the queue intact and stopping this pass',
+        )
+        break
+      }
       db.update(outbox)
         .set({ state: 'FAILED', sentAtMillis: null, lastError: res.body.slice(0, 500), attempts: row.attempts + 1 })
         .where(eq(outbox.id, row.id))
         .run()
-      continue
+      // Stop rather than walking on. A permanent failure is far more often systemic than it is about
+      // this one message, and the cost of being wrong in each direction is not symmetric: stopping
+      // costs a five-minute wait for the next sweep, carrying on costs the whole queue.
+      break
     }
     // Transient — count the attempt and stop this pass, EXCEPT once the row has exhausted its
     // attempts. This row is at the head of the queue and the `break` below is unconditional, so a
@@ -446,12 +545,68 @@ export async function enqueueAndTryFlush(params: {
   dedupeKey?: string | null
   ttlMs?: number
 }): Promise<boolean> {
-  enqueueOutbound(params)
+  const id = enqueueOutbound(params)
   const device = getDevice(params.deviceId)
-  if (!device || !windowOpen(device)) return false
+  if (!device) return false
+
+  // NO WINDOW GATE. This used to return early whenever `windowOpen` was false, which is precisely
+  // why the FCM tier was unreachable: the one path that could have pushed refused to run in the one
+  // case a push is for. `flushOutbox` now picks the transport per row and the gates inside it are
+  // unchanged, so this is a strictly wider net rather than a looser one.
   const delivered = await flushOutbox(params.waUserId, params.deviceId, { proactiveFor: device })
   if (delivered.length > 0) appendAssistantTurns(params.waUserId, params.deviceId, delivered)
-  return delivered.length > 0
+
+  // THIS row's fate, not "did anything go out".
+  //
+  // The old `delivered.length > 0` answered a different question and two callers read it as this
+  // one. `runNudge` escalates to a ringing alarm when its nudge could not be delivered, so a brief
+  // going out ahead of it in the same pass told it the chase had landed when it had not; and
+  // `runWakeCheck` counts a round as asked. `MAX_SENDS_PER_FLUSH` makes "something else went out,
+  // mine did not" an ordinary outcome rather than a rare one.
+  //
+  // A null id means the dedupe index rejected the insert — an identical message is already PENDING,
+  // so something is on its way and the caller should not act as though nothing is.
+  if (id === null) return true
+  return rowState(id) === 'SENT'
+}
+
+/**
+ * The three answers a producer can need, for the two that need more than "did it go out".
+ *
+ * `retired` is the one worth having a word for: the commitment gate DROPS a proactive row rather
+ * than holding it, so a message can end a flush neither delivered nor waiting. A producer that
+ * stamps a once-a-day marker has to tell that apart from "queued, and it will go when it can",
+ * because the marker is what stops it ever trying again.
+ */
+export type FlushOutcome = { sent: boolean; queued: boolean; retired: boolean }
+
+export async function enqueueAndFlushRow(params: {
+  waUserId: string
+  deviceId: string
+  kind: OutboxKind
+  body: string
+  reminderId?: string | null
+  dedupeKey?: string | null
+  ttlMs?: number
+}): Promise<FlushOutcome> {
+  const id = enqueueOutbound(params)
+  const device = getDevice(params.deviceId)
+  if (!device) return { sent: false, queued: false, retired: true }
+  const delivered = await flushOutbox(params.waUserId, params.deviceId, { proactiveFor: device })
+  if (delivered.length > 0) appendAssistantTurns(params.waUserId, params.deviceId, delivered)
+  // A dedupe rejection means an identical message is already PENDING — queued, by someone else.
+  if (id === null) return { sent: false, queued: true, retired: false }
+  const state = rowState(id)
+  return {
+    sent: state === 'SENT',
+    queued: state === 'PENDING' || state === 'SENDING',
+    retired: state === null || state === 'SUPERSEDED' || state === 'EXPIRED' || state === 'FAILED',
+  }
+}
+
+/** The current state of one outbox row, or null if it has been swept. */
+function rowState(id: number): string | null {
+  return db.select({ state: outbox.state }).from(outbox).where(eq(outbox.id, id)).get()?.state ?? null
 }
 
 /**
@@ -551,16 +706,22 @@ export async function sweepOutbox(now: number = Date.now()): Promise<void> {
     const live = rows.filter((r) => !expired.includes(r))
     if (live.length === 0) continue
 
-    if (windowOpen(device, now)) {
-      const delivered = await flushOutbox(waUserId, device.deviceId, { proactiveFor: device })
-      if (delivered.length > 0) appendAssistantTurns(waUserId, device.deviceId, delivered)
-      continue
-    }
+    // Flush unconditionally. The window used to decide whether this ran at all, which meant the
+    // sweep — the one thing that visits a device nobody is talking to — did nothing for the entire
+    // period a push was the only way to reach them. `flushOutbox` picks the transport per row.
+    const delivered = await flushOutbox(waUserId, device.deviceId, { proactiveFor: device })
+    if (delivered.length > 0) appendAssistantTurns(waUserId, device.deviceId, delivered)
+    if (windowOpen(device, now)) continue
+
+    // Still here: the window is shut. Anything the phone could take has just gone over FCM, so what
+    // is left is genuinely unreachable and worth a paid knock.
+    const stillPending = pendingFor(waUserId)
+    if (stillPending.length === 0) continue
 
     // Computed only on this branch, and only with a template configured, so the default install
     // pays nothing: the sweep reaches here just when the WhatsApp window is already shut.
     const inCommitment = template !== null && (await commitmentAt(device, now)) !== null
-    if (!shouldKnock({ rows: live, device, template, now, inCommitment })) continue
+    if (!shouldKnock({ rows: stillPending, device, template, now, inCommitment })) continue
     // Start the cooldown on the ATTEMPT, before the send, not on its outcome.
     //
     // `sendTemplate` classifies an abort/timeout and a 5xx as transient, and a template Meta
@@ -570,11 +731,15 @@ export async function sweepOutbox(now: number = Date.now()): Promise<void> {
     // direction to be wrong in: the queue is still there at the next cooldown, and at the next
     // window it goes out as itself.
     markTemplateSent(device.deviceId, now)
+
     // A template does NOT reopen the window — it knocks. The owner's reply reopens it and the
     // normal inbound path then flushes the real queue as free-form text.
-    const res = await sendTemplate(waUserId, [knockSummary(live)])
+    const res = await sendTemplate(waUserId, [knockSummary(stillPending)])
     if (res.ok) {
-      log.info({ deviceId: device.deviceId, queued: live.length }, 'knocked on a shut window with a template')
+      log.info(
+        { deviceId: device.deviceId, queued: stillPending.length },
+        'knocked on a shut window with a template',
+      )
     } else {
       log.warn(
         { deviceId: device.deviceId, status: res.status, body: res.body.slice(0, 200) },

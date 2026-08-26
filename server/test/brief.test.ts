@@ -21,7 +21,7 @@ vi.mock('../src/services/google.js', async (orig) => {
   return { ...actual, hasGoogle: hasGoogleMock, tryListCalendarEvents: listEventsMock }
 })
 
-import { and, eq } from 'drizzle-orm'
+import { and, asc, eq } from 'drizzle-orm'
 import { briefFallback } from '../src/agent/brief.js'
 import { config } from '../src/config.js'
 import { MIN_RUNG_GAP_MS } from '../src/lib/nagLadder.js'
@@ -173,7 +173,14 @@ describe('delivery', () => {
     vi.setSystemTime(evening)
     expect(await runBrief(device, evening)).toBe(true)
 
-    const rows = briefRows('447700900007')
+    // Every state, not just PENDING: with the window open these are DELIVERED rather than queued,
+    // and the question here is which keys were written, not what is still waiting.
+    const rows = db
+      .select()
+      .from(outbox)
+      .where(and(eq(outbox.waUserId, '447700900007'), eq(outbox.kind, 'brief')))
+      .orderBy(asc(outbox.createdAt))
+      .all()
     expect(rows.map((r) => r.dedupeKey)).toEqual(['brief:2026-08-03:morning', 'brief:2026-08-03:evening'])
   })
 

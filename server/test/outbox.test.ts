@@ -9,12 +9,16 @@ vi.mock('../src/services/whatsapp.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>
   return { ...actual, sendText: sendMock, sendTemplate: templateMock }
 })
+// The FCM transport, mocked for the same reason WhatsApp is: these tests are about which transport
+// a row takes and what state it ends in, not about Firebase. Left unmocked, every push in this file
+// would fail against real credentials that do not exist and the phone tier would look unreachable.
+vi.mock('../src/fcm/sender.js', () => ({ sendData: vi.fn(async () => ({ ok: true as const })) }))
 
 import { DateTime } from 'luxon'
 import { eq } from 'drizzle-orm'
 import { config } from '../src/config.js'
 import { db, ensureSchema } from '../src/db/client.js'
-import { outbox } from '../src/db/schema.js'
+import { devices, outbox } from '../src/db/schema.js'
 import {
   clearInboundWindow,
   getDevice,
@@ -130,6 +134,11 @@ describe('outbox', () => {
 
   it('marks a genuinely bad message FAILED rather than retrying forever', async () => {
     const device = makeDevice('dev_o4')
+    // The window has to be OPEN for WhatsApp to be attempted at all now: a shut one no longer
+    // reaches `sendText`, it goes straight to the phone tier. Without this the row comes back
+    // PENDING because the push had nowhere to go, and the assertion below would be about the
+    // wrong thing entirely.
+    markInbound(device.deviceId)
     sendMock.mockResolvedValue({ ok: false, permanent: true, status: 400, metaCode: 100, outOfWindow: false, body: 'bad' })
     enqueueOutbound({ waUserId: '4480', deviceId: device.deviceId, kind: 'nudge', body: 'x' })
     await flushOutbox('4480', device.deviceId)
@@ -189,6 +198,116 @@ describe('outbox', () => {
  * PURE policy: the template is passed in rather than read from config, and the quiet window is
  * handed over explicitly, so every rule is assertable without an environment or a DB row.
  */
+describe('the phone tier, when the WhatsApp window is genuinely shut', () => {
+  /**
+   * `pushOutboxRow` had exactly one call site — inside the `res.outOfWindow` branch of `flushOutbox`
+   * — and all three callers of `flushOutbox` refused to call it unless `windowOpen()` was already
+   * true. So the FCM tier only ever fired when our own window belief was WRONG, and never in the
+   * case SETUP.md says it exists for: after a day of the owner's silence every brief, review and
+   * chase sat PENDING until its TTL burned, with the phone online the whole time.
+   *
+   * The existing 131047 test passes for the wrong reason — `makeDevice` builds devices at appVersion
+   * 1.0.0 with no heartbeat, so `pushReachable` is false for every one of them and the assertion is
+   * really about the push having FAILED. This builds a genuinely reachable one.
+   */
+  const reachable = (deviceId: string): Device => {
+    const device = makeDevice(deviceId, 'tok_push')
+    db.update(devices)
+      .set({ lastHeartbeatAt: Date.now() - 60_000, appVersion: '1.2.0' })
+      .where(eq(devices.deviceId, deviceId))
+      .run()
+    return getDevice(deviceId)!
+  }
+
+  it('delivers over FCM instead of leaving the queue to expire', async () => {
+    const device = reachable('dev_push1')
+    // No markInbound: the window has never been open, which is the whole point.
+    await enqueueAndTryFlush({
+      waUserId: '4491',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'three things today',
+    })
+
+    const rows = db.select().from(outbox).where(eq(outbox.waUserId, '4491')).all()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.state).toBe('SENT')
+    expect(rows[0]!.deliveredVia).toBe('push')
+    // And WhatsApp was never attempted — there was no window to attempt it through.
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('reports back whether YOUR row went out, not whether anything did', async () => {
+    const device = reachable('dev_push2')
+    const ok = await enqueueAndTryFlush({
+      waUserId: '4492',
+      deviceId: device.deviceId,
+      kind: 'nudge',
+      body: 'bins',
+      reminderId: 'rem_p2',
+    })
+    expect(ok).toBe(true)
+  })
+
+  it('still leaves the row queued when the phone is unreachable too', async () => {
+    const device = makeDevice('dev_push3') // 1.0.0, no heartbeat
+    const ok = await enqueueAndTryFlush({
+      waUserId: '4493',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'x',
+    })
+    expect(ok).toBe(false)
+    expect(pendingFor('4493')).toHaveLength(1)
+  })
+
+  it('sweeps the queue to the phone without waiting for the owner to say anything', async () => {
+    const device = reachable('dev_push4')
+    linkWhatsapp(device.deviceId, '4494')
+    enqueueOutbound({ waUserId: '4494', deviceId: device.deviceId, kind: 'brief', body: 'morning' })
+
+    await sweepOutbox(Date.now())
+
+    expect(pendingFor('4494')).toHaveLength(0)
+    expect(db.select().from(outbox).where(eq(outbox.waUserId, '4494')).all()[0]!.deliveredVia).toBe('push')
+  })
+})
+
+describe('one bad send must not empty the queue', () => {
+  it('leaves every row PENDING on an account-level failure', async () => {
+    // `graphFetch` classes every non-429 4xx as permanent with no retry, and this branch used to
+    // stamp FAILED — terminal — and then `continue`, walking the whole queue and doing the same to
+    // every row behind it. One expired token discarded the day's brief, every queued chase and any
+    // arm-ack warning inside a single five-minute tick.
+    const device = makeDevice('dev_burn1')
+    markInbound(device.deviceId)
+    sendMock.mockResolvedValue({ ok: false, permanent: true, status: 401, outOfWindow: false, body: 'bad token' })
+    for (const body of ['one', 'two', 'three']) {
+      enqueueOutbound({ waUserId: '4495', deviceId: device.deviceId, kind: 'nudge', body })
+    }
+
+    await flushOutbox('4495', device.deviceId)
+
+    expect(pendingFor('4495')).toHaveLength(3)
+    expect(sendMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retires a genuinely bad message but still stops the pass', async () => {
+    const device = makeDevice('dev_burn2')
+    markInbound(device.deviceId)
+    sendMock.mockResolvedValue({ ok: false, permanent: true, status: 400, metaCode: 100, outOfWindow: false, body: 'bad' })
+    for (const body of ['one', 'two']) {
+      enqueueOutbound({ waUserId: '4496', deviceId: device.deviceId, kind: 'nudge', body })
+    }
+
+    await flushOutbox('4496', device.deviceId)
+
+    // The head is retired; the one behind it keeps its place rather than being burned with it.
+    expect(pendingFor('4496')).toHaveLength(1)
+    expect(sendMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('shouldKnock', () => {
   const TEMPLATE = { name: 'otto_catch_up', lang: 'en' }
   const NOW = Date.UTC(2026, 6, 1, 12, 0, 0)

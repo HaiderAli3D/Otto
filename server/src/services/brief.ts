@@ -13,7 +13,7 @@ import { getDevice, type Device } from './devices.js'
 import { hasGoogle, tryListCalendarEvents } from './google.js'
 import { cancelJobsForDevice, cancelNudges, enqueueJob, ensureSingletonJob } from './jobs.js'
 import {
-  enqueueAndTryFlush,
+  enqueueAndFlushRow,
   heldByQuietHours,
   markSuperseded,
   pendingFor,
@@ -397,7 +397,7 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
     holdNudgesCoveredByBrief(current, listReminders(current.deviceId, { state: 'open' }), nowMillis)
   }
 
-  await enqueueAndTryFlush({
+  const outcome = await enqueueAndFlushRow({
     waUserId,
     deviceId: device.deviceId,
     kind: 'brief',
@@ -416,10 +416,23 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
     dedupeKey: `brief:${localDateKey(runAtMillis, zone)}:${slot}`,
     ttlMs: slot === 'morning' ? MORNING_TTL_MS : EVENING_TTL_MS,
   })
-  // Stamped on QUEUEING, not on sending. The row now exists and will go out on next contact if the
-  // window is shut; a marker that waited for delivery would let tomorrow's run queue a second one.
+  // Stamped when the row SURVIVED — delivered, or queued and still alive. Not merely on having
+  // written it.
+  //
+  // The distinction is the commitment gate, which DROPS a proactive row rather than holding it. A
+  // standing 09:00 meeting therefore killed the morning brief and this stamped the day as done
+  // anyway, so `sameLocalDay` blocked every retry and the brief silently stopped arriving on
+  // weekdays. `services/commitments.ts` names this failure in the comment above MAX_COMMITMENT_MS
+  // and bounds it only for events over four hours; a one-hour standup is squarely inside it.
+  //
+  // Still stamped for a merely QUEUED row, which is the original reasoning and still right: it will
+  // go out on next contact, and waiting for delivery would let tomorrow's run write a second one.
+  if (outcome.retired) {
+    log.warn({ deviceId: device.deviceId, slot }, 'brief was retired before it could be read; not marking it sent')
+    return false
+  }
   markBriefSent(device.deviceId, slot, runAtMillis)
-  log.info({ deviceId: device.deviceId, slot }, 'brief queued')
+  log.info({ deviceId: device.deviceId, slot, sent: outcome.sent }, 'brief queued')
   return true
 }
 
