@@ -4,12 +4,14 @@ import { syncData } from '../fcm/commands.js'
 import { sendData } from '../fcm/sender.js'
 import { log } from '../lib/log.js'
 import { advanceRecurrence, listArmed, recordEvent } from '../services/alarms.js'
+import { rescheduleBriefChain } from '../services/brief.js'
 import { verifyRequestSig } from '../services/deviceAuth.js'
 import { getDevice, latchAuth, markActivity, setHeartbeat, setTimezone, setToken } from '../services/devices.js'
 import { recordDeviceLocation } from '../services/location.js'
 import { completeReminder, onReminderAlarmEvent, snoozeReminder } from '../services/reminders.js'
 import { isValidZone } from '../services/time.js'
 import { scheduleWakeCheck } from '../services/wakeCheck.js'
+import { rescheduleWeeklyReviewChain } from '../services/weeklyReview.js'
 
 /**
  * The four endpoints the Android app calls (OttoApi.kt). Mounted at the origin root; the app's
@@ -19,14 +21,33 @@ import { scheduleWakeCheck } from '../services/wakeCheck.js'
  * than wipe alarms.
  */
 
-/** The app reports its IANA zone with register/heartbeat; a bad zone is ignored, never a 4xx. */
+/**
+ * The app reports its IANA zone with register/heartbeat; a bad zone is ignored, never a 4xx.
+ *
+ * A CHANGE also has to move the two standing wall-clock chains. Both the brief and the weekly review
+ * store an absolute instant computed in the zone that was current when the row was written, and
+ * `slotForRunAt` matches that instant back against the configured boundary by a round trip through
+ * luxon — so after the owner moves timezone the pending row is no longer a boundary in the new zone,
+ * reads as `null`, and the brief is skipped for the day. Silently, once per move, on the one morning
+ * they are most likely to be somewhere unfamiliar and want it.
+ *
+ * `setPreferences` already does exactly this whenever the times change; a zone change moves the same
+ * instants for a different reason and had no equivalent.
+ */
 function applyTimezone(deviceId: string, timezone: string | undefined): void {
   if (!timezone) return
   if (!isValidZone(timezone)) {
     log.warn({ deviceId, timezone }, 'Ignoring invalid timezone from device')
     return
   }
+  const before = getDevice(deviceId)
+  if (before?.timezone === timezone) return
   setTimezone(deviceId, timezone)
+  const after = getDevice(deviceId)
+  if (after === undefined) return
+  rescheduleBriefChain(after)
+  rescheduleWeeklyReviewChain(after)
+  log.info({ deviceId, from: before?.timezone, to: timezone }, 'device timezone changed; standing chains moved')
 }
 
 export async function deviceRoutes(app: FastifyInstance): Promise<void> {

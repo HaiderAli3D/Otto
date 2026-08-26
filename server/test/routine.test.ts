@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { DateTime } from 'luxon'
+import { minuteInQuietHours, parseQuietHours } from '../src/lib/quietHours.js'
 import {
   DEFAULT_ROUTINE,
   bedEndHour,
   bedEndMinute,
+  briefAnchorHour,
+  briefAnchorMinute,
   dayStartHour,
   dayStartMinute,
   describeRoutine,
@@ -27,18 +30,45 @@ describe('parseRoutine', () => {
     expect(formatWindow(r.wake)).toBe('07:00-09:00')
   })
 
-  it('is all-or-nothing — half a routine says nothing about when their day starts', () => {
-    // Deliberate: `dayStartHour` reads only the wake window, so a bed-window-only routine would
-    // silently behave like no routine while looking configured. Callers must be able to tell.
+  it('takes a wake window on its own — that half is the one everything reads', () => {
+    // This used to be all-or-nothing, and it made "I get up at 7" a write-only sentence: stored,
+    // confirmed, and then read by nothing, because `routineFor` returned null and the prompt line
+    // was omitted. `dayStartHour` and `briefAnchorHour` both read the WAKE half, so it is enough.
+    const wakeOnly = parseRoutine(null, '10:00-14:00')!
+    expect(wakeOnly).not.toBeNull()
+    expect(formatWindow(wakeOnly.wake)).toBe('10:00-14:00')
+    expect(dayStartHour(wakeOnly)).toBe(14)
+    expect(briefAnchorHour(wakeOnly)).toBe(10)
+  })
+
+  it('flags a bed window it supplied itself, so nothing states a bedtime the owner never gave', () => {
+    const wakeOnly = parseRoutine(null, '10:00-14:00')!
+    expect(wakeOnly.bedStated).toBe(false)
+    // Filled from the default so `wakingDayEndsAt` and the leave-by day start have a real answer…
+    expect(formatWindow(wakeOnly.bed)).toBe(formatWindow(DEFAULT_ROUTINE.bed))
+    // …and the two callers that must not invent one can tell that it is not theirs.
+    expect(impliedQuietHours(wakeOnly)).toBeNull()
+    expect(describeRoutine(wakeOnly)).not.toContain('goes to bed')
+    expect(describeRoutine(wakeOnly)).toContain('have not said when they go to bed')
+
+    expect(parseRoutine('02:00-04:00', '10:00-14:00')!.bedStated).toBe(true)
+  })
+
+  it('still says nothing when the WAKE half is missing or unusable', () => {
+    // A bed window alone tells us nothing about when their day starts, which is the only thing the
+    // rest of the system consumes — so this half stays all-or-nothing.
     expect(parseRoutine('02:00-04:00', null)).toBeNull()
-    expect(parseRoutine(null, '10:00-14:00')).toBeNull()
     expect(parseRoutine(null, null)).toBeNull()
   })
 
   it('never throws on the free text an owner typed into a chat message', () => {
     for (const junk of ['', 'off', 'lateish', '25:00-04:00', '02:00', '02:00-02:00', 'none']) {
-      expect(parseRoutine(junk, '10:00-14:00')).toBeNull()
+      // Junk in the WAKE slot is still no routine at all.
       expect(parseRoutine('02:00-04:00', junk)).toBeNull()
+      // Junk in the BED slot degrades to a wake-only routine rather than throwing it all away.
+      const r = parseRoutine(junk, '10:00-14:00')
+      expect(r).not.toBeNull()
+      expect(r!.bedStated).toBe(false)
     }
   })
 })
@@ -123,16 +153,34 @@ describe('wakingDayEndsAt', () => {
 })
 
 describe('impliedQuietHours', () => {
-  it('runs from the latest bedtime to the point they are certainly up', () => {
-    // END at wake.END, the same edge dayStartHour reads. Someone who says they are up at noon
-    // means nothing before noon — an end at 11:00 would satisfy the symmetry and miss the point.
-    expect(impliedQuietHours(NIGHT_OWL)).toBe('02:00-12:00')
+  it('runs from the latest bedtime to the EARLIEST they might be up', () => {
+    // END at wake.START, the same edge briefAnchorHour reads — deliberately NOT dayStartHour's edge.
+    // Ending at wake.END reads as the safer choice and is not: `planRungs` drops any lead rung the
+    // window would push past its own deadline, so a window ending at noon silently deleted every
+    // advance warning on anything due in the owner's own morning. Ending at 11:00 costs at most one
+    // message landing while they are still dozing.
+    expect(impliedQuietHours(NIGHT_OWL)).toBe('02:00-11:00')
+  })
+
+  it('leaves the whole run-up intact for something due in their own morning', () => {
+    // The regression this edge exists to prevent, asserted where the edge is chosen rather than only
+    // in the ladder's own tests: a deadline inside the wake range must not sit inside the window.
+    const q = parseQuietHours(impliedQuietHours(NIGHT_OWL)!)
+    expect(minuteInQuietHours(11 * 60 + 30, q)).toBe(false)
+    expect(minuteInQuietHours(3 * 60, q)).toBe(true)
   })
 
   it('reproduces the old server-wide default for the old default routine', () => {
     // DEFAULT_ROUTINE is bed 23:00-01:00, wake 07:00-09:00 — so an owner who happened to state
-    // exactly that gets 01:00-09:00, close to QUIET_HOURS_DEFAULT and never wilder than it.
-    expect(impliedQuietHours(DEFAULT_ROUTINE)).toBe('01:00-09:00')
+    // exactly that gets 01:00-07:00, which is QUIET_HOURS_DEFAULT's own end and never wilder.
+    expect(impliedQuietHours(DEFAULT_ROUTINE)).toBe('01:00-07:00')
+  })
+
+  it('derives nothing at all from a routine whose bedtime the owner never gave', () => {
+    // There is no stated hour to start the window from, and DEFAULT_ROUTINE's bedtime is this
+    // module's assumption rather than theirs. A wake-only routine sets the day start and the brief;
+    // it silences nothing.
+    expect(impliedQuietHours(parseRoutine(null, '11:00-12:00')!)).toBeNull()
   })
 
   it('is storage form, hyphen not en dash, so it parses back', () => {
@@ -142,12 +190,12 @@ describe('impliedQuietHours', () => {
   })
 
   it('is null when the window would be degenerate', () => {
-    // bed.end === wake.end is ambiguous between a zero-length window and a 24h one. Better to
+    // bed.end === wake.start is ambiguous between a zero-length window and a 24h one. Better to
     // derive nothing than to write a string the parser will reject at every read site.
-    expect(impliedQuietHours(parseRoutine('01:00-02:00', '00:00-02:00')!)).toBeNull()
+    expect(impliedQuietHours(parseRoutine('01:00-02:00', '02:00-04:00')!)).toBeNull()
   })
 
   it('carries a non-zero minute through both edges', () => {
-    expect(impliedQuietHours(parseRoutine('01:00-02:30', '11:00-12:15')!)).toBe('02:30-12:15')
+    expect(impliedQuietHours(parseRoutine('01:00-02:30', '11:15-12:15')!)).toBe('02:30-11:15')
   })
 })
