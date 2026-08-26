@@ -32,6 +32,40 @@ Pick the sensible option, say in one line what you picked, and keep going.
 If something genuinely blocks the sequence — a merge conflict, a failing deploy, a missing secret —
 fix it if you can, and if you cannot, finish everything else and say exactly what is left.
 
+## Changing the server's schema
+
+`ensureSchema()` in [`server/src/db/client.ts`](server/src/db/client.ts) is the whole migration
+mechanism — no migrations directory, no drizzle-kit step. Adding a column is **two edits**: the
+field in `db/schema.ts`, and one `ensureColumn(table, column, ddl)` line beside the ones already
+there.
+
+Make it **nullable** and fall back at read time (`?? theOldColumn`). SQLite accepts
+`ADD COLUMN ... NOT NULL` only with a constant default, and a nullable column needs no backfill —
+so existing rows keep the behaviour they had and nothing re-indexes on deploy.
+
+Verify against a database built with the OLD schema before shipping: create the previous table by
+hand in a scratch file, run `ensureSchema()` over it, and confirm pre-existing rows still read back
+and that a second boot is a no-op. The production volume is the only copy of the owner's data.
+
+## Proving a change, and tests that pin the wrong behaviour
+
+**Prove behaviour by running it, not by reading it.** A throwaway `tsx` script that calls
+`ensureSchema()` against `DATABASE_PATH=':memory:'` and drives the real services turns a hypothesis
+into evidence in a minute. The worst defects here are interactions between two individually-correct
+modules, and no amount of reading finds those.
+
+**A test that pins a defect gets changed in the same commit as the fix**, with the commit message
+naming which assertion flipped and why. This suite stayed green through every bug it had; green is
+not evidence on its own.
+
+Two harness facts that make assertions pass for the wrong reason:
+
+- **One in-memory DB per test FILE**, shared by every test in it. Device ids, WhatsApp numbers and
+  outbox dedupe keys leak between tests — reuse an id and the next test inherits its rows.
+- **`makeDevice` is not push-reachable**: appVersion `1.0.0`, no heartbeat, so `pushReachable()` is
+  false for every device it builds. Anything about the FCM tier needs `reachable()` from
+  `test/push.test.ts`, or it asserts the failure path while reading like the success one.
+
 ## Deploying the server
 
 ```bash
