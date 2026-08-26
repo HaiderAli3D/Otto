@@ -34,6 +34,65 @@ beforeEach(() => {
   sent.length = 0
 })
 
+describe('which device events count as the owner being awake', () => {
+  /**
+   * `lastActivityAt` has exactly one consumer — the wake-check stand-down — and the app's NUDGE
+   * vocabulary is mostly not the owner. The sharpest form was self-inflicted: the ladder's own
+   * "You up?" is delivered as a push, the phone posts it and reports SHOWN, and the next round
+   * reads that as the answer. Nobody wakes them, and no record row says anything went wrong.
+   */
+  const postEvent = async (app: Awaited<ReturnType<typeof makeApp>>, deviceId: string, event: string) =>
+    app.inject({
+      method: 'POST',
+      url: `/devices/${deviceId}/events`,
+      payload: { deviceId, kind: 'NUDGE', refId: 'rem_x', event, atMillis: Date.now() },
+    })
+
+  it('ignores the machine-generated ones', async () => {
+    const app = await makeApp()
+    makeDevice('dev_ev1')
+    for (const event of ['SHOWN', 'EXPIRED']) {
+      const res = await postEvent(app, 'dev_ev1', event)
+      expect(res.statusCode).toBe(204)
+      expect(getDevice('dev_ev1')?.lastActivityAt).toBeNull()
+    }
+  })
+
+  it('ignores a bare DISMISSED, which the app also sends for a withdrawal Otto asked for', async () => {
+    const app = await makeApp()
+    makeDevice('dev_ev2')
+    expect((await postEvent(app, 'dev_ev2', 'DISMISSED')).statusCode).toBe(204)
+    expect(getDevice('dev_ev2')?.lastActivityAt).toBeNull()
+  })
+
+  it('counts a tap', async () => {
+    const app = await makeApp()
+    makeDevice('dev_ev3')
+    expect((await postEvent(app, 'dev_ev3', 'DEFERRED')).statusCode).toBe(204)
+    expect(getDevice('dev_ev3')?.lastActivityAt).not.toBeNull()
+  })
+
+  it('never moves the column backwards, however late a report drains', async () => {
+    // The app drains an append-only outbox with retries, so reports arrive out of order. A tap from
+    // yesterday landing after one from this morning would hand the ladder a stand-down instant
+    // older than the dismissal it is checking on.
+    const app = await makeApp()
+    makeDevice('dev_ev4')
+    const now = Date.now()
+    await app.inject({
+      method: 'POST',
+      url: '/devices/dev_ev4/events',
+      payload: { deviceId: 'dev_ev4', kind: 'NUDGE', refId: 'rem_x', event: 'DONE', atMillis: now },
+    })
+    await app.inject({
+      method: 'POST',
+      url: '/devices/dev_ev4/events',
+      payload: { deviceId: 'dev_ev4', kind: 'NUDGE', refId: 'rem_x', event: 'DONE', atMillis: now - 86_400_000 },
+    })
+    expect(getDevice('dev_ev4')?.lastActivityAt).toBe(now)
+  })
+})
+
 describe('timezone ingestion', () => {
   it('token registration stores a valid IANA zone', async () => {
     const app = await makeApp()

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { asc, eq, isNotNull } from 'drizzle-orm'
+import { and, asc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm'
 import { config } from '../config.js'
 import { db } from '../db/client.js'
 import { devices, processedMessages } from '../db/schema.js'
@@ -80,7 +80,17 @@ export function markInbound(deviceId: string, atMillis: number = Date.now()): vo
  * as a reply does.
  */
 export function markActivity(deviceId: string, atMillis: number = Date.now()): void {
-  db.update(devices).set({ lastActivityAt: atMillis }).where(eq(devices.deviceId, deviceId)).run()
+  // MONOTONIC. The app drains an append-only outbox under NetworkType.CONNECTED with Result.retry(),
+  // so reports arrive late and out of order — a tap from yesterday landing after one from this
+  // morning would otherwise drag the column backwards and hand the wake-check ladder a stand-down
+  // instant older than the dismissal it is checking on. One guarded UPDATE rather than a
+  // read-then-write, for the same reason every other claim in this codebase is.
+  db.update(devices)
+    .set({ lastActivityAt: atMillis })
+    .where(
+      and(eq(devices.deviceId, deviceId), or(isNull(devices.lastActivityAt), lt(devices.lastActivityAt, atMillis))),
+    )
+    .run()
 }
 
 /**

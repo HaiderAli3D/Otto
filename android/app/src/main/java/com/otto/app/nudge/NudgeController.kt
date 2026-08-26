@@ -60,9 +60,12 @@ class NudgeController @Inject constructor(
     /** The server withdrew a nudge — the reminder was completed or cancelled somewhere else. */
     suspend fun cancel(nudgeId: String) {
         val existing = repository.getById(nudgeId) ?: return
-        // No outbox event: the server already knows, and reporting a cancellation back to whoever
-        // asked for it is a loop that says nothing.
-        repository.resolve(nudgeId, NudgeState.CANCELLED, DeviceEvents.NUDGE_DISMISSED)
+        // Reported as WITHDRAWN, not DISMISSED. The comment here used to say no event was written
+        // at all, which was never true — `resolve` always writes one — and writing the same event a
+        // swipe writes made a withdrawal Otto asked for indistinguishable from the owner clearing
+        // it. The server reads that column to decide whether the owner is awake, so mid-ladder the
+        // wake-check stood down on its own doing.
+        repository.resolve(nudgeId, NudgeState.CANCELLED, DeviceEvents.NUDGE_WITHDRAWN)
         clearFromScreen(existing)
         OttoLog.i("Cancelled nudge $nudgeId")
     }

@@ -85,4 +85,18 @@ class NudgeContractTest {
         val channels = NudgeLevel.entries.map { channelIdFor(it) }
         assertEquals(NudgeLevel.entries.size, channels.distinct().size)
     }
+
+    /**
+     * The server reads these two apart to decide whether the owner is awake: an owner's swipe is
+     * evidence they are, and a withdrawal Otto itself asked for is evidence of nothing. They used
+     * to be the same string, so mid-ladder the wake-check stood down on its own doing — and the
+     * only comment on it claimed no event was written at all.
+     */
+    @Test
+    fun `a withdrawal the server asked for is not reported as a swipe`() {
+        assertTrue(
+            "WITHDRAWN and DISMISSED must stay distinct — the server's activity allow-list depends on it",
+            com.otto.app.data.DeviceEvents.NUDGE_WITHDRAWN != com.otto.app.data.DeviceEvents.NUDGE_DISMISSED,
+        )
+    }
 }
