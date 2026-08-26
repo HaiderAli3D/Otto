@@ -36,6 +36,17 @@ import { cancelWakeChecks, runWakeCheck, scheduleWakeCheck } from '../src/servic
 import { makeApp, makeDevice } from './helpers.js'
 
 const FAR_FUTURE = Date.now() + 365 * 24 * 3_600_000
+
+/**
+ * Run a rung as the scheduler would: at the instant the row says it is due.
+ *
+ * These tests place a dismissal in the past so the ladder is immediately walkable, then call
+ * `runWakeCheck` back to back in real time — so measured against a real clock every rung looks
+ * catastrophically late, which is exactly the state `runWakeCheck` now stands down from. Passing the
+ * row's own `runAtMillis` says "the scheduler fired this on time", which is the case under test.
+ * A test that wants the late case says so explicitly (see 'a ladder left behind by a restart').
+ */
+const runOnTime = (job: Job): Promise<number | null> => runWakeCheck(job, job.runAtMillis)
 const WA_NUMBER = '447700900321'
 
 beforeEach(() => {
@@ -129,8 +140,8 @@ describe('scheduling the ladder', () => {
 
     expect(scheduleReportedAt(alarmId, device, dismissedAt)).toBe(true)
     const originalJobId = wakeJobs()[0]!.id
-    await runWakeCheck(wakeJobs()[0]!)
-    await runWakeCheck(wakeJobs()[0]!)
+    await runOnTime(wakeJobs()[0]!)
+    await runOnTime(wakeJobs()[0]!)
     expect(sends).toHaveLength(2)
 
     // The duplicate report. Same alarm, same instant, and reported just as promptly — so the latch
@@ -140,7 +151,7 @@ describe('scheduling the ladder', () => {
     expect(wakeJobs()[0]!.id).toBe(originalJobId)
 
     // The ladder carries on from where it was rather than starting over.
-    await runWakeCheck(wakeJobs()[0]!)
+    await runOnTime(wakeJobs()[0]!)
     expect(sends.map((s) => s.body)).toEqual([
       'You up?',
       'Still nothing. Are you up?',
@@ -160,7 +171,7 @@ describe('scheduling the ladder', () => {
     for (let round = 0; round <= MAX_WAKE_ROUNDS; round++) {
       const job = wakeJobs()[0]
       if (!job) break
-      await runWakeCheck(job)
+      await runOnTime(job)
     }
     db.delete(jobsTable).run() // the scheduler settles a null outcome by deleting the row
     expect(armed).toHaveLength(1)
@@ -168,6 +179,28 @@ describe('scheduling the ladder', () => {
     expect(scheduleReportedAt(alarmId, device, dismissedAt)).toBe(false)
     expect(wakeJobs()).toHaveLength(0)
     expect(armed).toHaveLength(1)
+  })
+
+  it('stands a ladder down rather than replaying it after a restart outlasted it', async () => {
+    // Every rung is derived from the DISMISSAL rather than from now, so a process down longer than
+    // the ladder's own span comes back with the whole remainder already in the past. That used to
+    // walk all three rounds on consecutive fifteen-second ticks and ring a real alarm within a
+    // minute of boot — three messages and a phone at full volume hours after the owner got up,
+    // plus WAKE_CHECK_FAILED on the permanent record, read back to them as "went back to sleep".
+    const device = reachableDevice('dev_wc_stale')
+    const alarmId = await wakeAlarm(device, 'alm_wc_stale', true)
+    const dismissedAt = Date.now() - 5 * 60_000
+    scheduleReportedAt(alarmId, device, dismissedAt)
+    const job = wakeJobs()[0]!
+
+    // The scheduler comes back three hours late.
+    const next = await runWakeCheck(job, dismissedAt + 3 * 3_600_000)
+
+    expect(next).toBeNull()
+    expect(sends).toHaveLength(0)
+    expect(armed).toHaveLength(0)
+    // And nothing on the record: they were never in a position to answer a question nobody sent.
+    expect(ownerRecord(device.deviceId).sleptThroughAfterDismiss).toBe(0)
   })
 
   it('a genuinely new dismissal of the same alarm still replaces the chain', async () => {
@@ -234,7 +267,7 @@ describe('running the ladder', () => {
     const dismissedAt = Date.now()
     scheduleWakeCheck(alarmId, device, dismissedAt)
 
-    const next = await runWakeCheck(wakeJobs()[0]!)
+    const next = await runOnTime(wakeJobs()[0]!)
 
     expect(sends).toEqual([{ to: WA_NUMBER, body: 'You up?' }])
     expect(next).toBe(wakeCheckAt(1, dismissedAt))
@@ -255,7 +288,7 @@ describe('running the ladder', () => {
     expect(wakeJobs()).toHaveLength(0)
 
     // And the handler's own re-check, for an inbound that lands while a tick is in flight.
-    expect(await runWakeCheck(job)).toBeNull()
+    expect(await runOnTime(job)).toBeNull()
     expect(sends).toHaveLength(0)
   })
 
@@ -269,12 +302,12 @@ describe('running the ladder', () => {
 
     let job: Job | undefined = wakeJobs()[0]!
     for (let round = 0; round < MAX_WAKE_ROUNDS; round++) {
-      const next = await runWakeCheck(job!)
+      const next = await runOnTime(job!)
       expect(next).not.toBeNull()
       job = wakeJobs()[0]
     }
     // One more tick: the rounds are spent, so this one escalates.
-    expect(await runWakeCheck(job!)).toBeNull()
+    expect(await runOnTime(job!)).toBeNull()
 
     expect(sends).toHaveLength(MAX_WAKE_ROUNDS)
     const backups = db
@@ -298,7 +331,7 @@ describe('running the ladder', () => {
     let job: Job | undefined = wakeJobs()[0]!
     for (let round = 0; round <= MAX_WAKE_ROUNDS; round++) {
       if (!job) break
-      await runWakeCheck(job)
+      await runOnTime(job)
       job = wakeJobs()[0]
     }
 
@@ -315,7 +348,7 @@ describe('running the ladder', () => {
     scheduleWakeCheck(alarmId, device, Date.now())
     clearInboundWindow(device.deviceId)
 
-    expect(await runWakeCheck(wakeJobs()[0]!)).toBeNull()
+    expect(await runOnTime(wakeJobs()[0]!)).toBeNull()
 
     expect(sends).toHaveLength(0)
     expect(outboxRows(device.deviceId)).toHaveLength(0)
@@ -333,7 +366,7 @@ describe('running the ladder', () => {
     scheduleWakeCheck(alarmId, device, Date.now())
     clearInboundWindow(device.deviceId)
 
-    expect(await runWakeCheck(wakeJobs()[0]!)).toBeNull()
+    expect(await runOnTime(wakeJobs()[0]!)).toBeNull()
 
     expect(sends).toHaveLength(0)
     expect(armed).toHaveLength(1) // still rung — a shut window is no reason to leave them asleep
@@ -347,10 +380,10 @@ describe('running the ladder', () => {
     const alarmId = await wakeAlarm(device, 'alm_wc14', true)
     scheduleReportedAt(alarmId, device, Date.now() - 60 * 60_000)
 
-    await runWakeCheck(wakeJobs()[0]!)
+    await runOnTime(wakeJobs()[0]!)
     expect(sends).toHaveLength(1)
     clearInboundWindow(device.deviceId)
-    expect(await runWakeCheck(wakeJobs()[0]!)).toBeNull()
+    expect(await runOnTime(wakeJobs()[0]!)).toBeNull()
 
     expect(ownerRecord(device.deviceId).sleptThroughAfterDismiss).toBe(1)
   })
@@ -406,7 +439,7 @@ describe('quiet hours never suppress a wake-check', () => {
     const alarmId = await wakeAlarm(device, 'alm_wc10', true)
     scheduleWakeCheck(alarmId, device, Date.now())
 
-    await runWakeCheck(wakeJobs()[0]!)
+    await runOnTime(wakeJobs()[0]!)
 
     expect(sends).toEqual([{ to: WA_NUMBER, body: 'You up?' }])
   })

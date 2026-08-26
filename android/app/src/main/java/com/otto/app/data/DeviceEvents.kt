@@ -34,6 +34,18 @@ object DeviceEvents {
      */
     const val NUDGE_DISMISSED = "DISMISSED"
 
+    /**
+     * The SERVER withdrew it — the reminder was completed or cancelled somewhere else.
+     *
+     * Split out from [NUDGE_DISMISSED] because the server cannot otherwise tell the two apart, and
+     * it reads that column to decide whether the owner is awake: `lastActivityAt` gates the
+     * wake-check stand-down, so a nudge Otto itself withdrew mid-ladder looked exactly like the
+     * owner clearing one, and the ladder stood down on its own doing. The comment in
+     * `NudgeController.cancel` claimed no event was written at all; `NudgeRepository.resolve`
+     * always writes one.
+     */
+    const val NUDGE_WITHDRAWN = "WITHDRAWN"
+
     /** Its window closed before anyone saw it. */
     const val NUDGE_EXPIRED = "EXPIRED"
 

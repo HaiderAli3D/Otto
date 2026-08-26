@@ -18,5 +18,5 @@ import type { JobOutcome } from './types.js'
  * the webhook), so all three read as one feature instead of one being stranded under handlers/.
  */
 export async function runWakeCheck(job: Job): Promise<JobOutcome> {
-  return runRound(job)
+  return runRound(job, Date.now())
 }

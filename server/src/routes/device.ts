@@ -148,6 +148,20 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
    * the reminder here rather than merely logged — that is the whole point of putting buttons on a
    * lockscreen. `refId` for a nudge IS the reminder id (see fcm/commands.ts `nudgeData`).
    */
+  /**
+   * The NUDGE events that mean a PERSON did something.
+   *
+   * `SHOWN` and `EXPIRED` are written by the phone with nobody present — the first on every arriving
+   * push and on every boot re-show, the second when a nudge times out. `DISMISSED` is deliberately
+   * absent: the app reports it both for an owner's swipe and for a server-initiated CANCEL_NUDGE
+   * (`NudgeController.cancel`), so a withdrawal Otto itself asked for is indistinguishable on the
+   * wire from the owner clearing it. `NUDGE_WITHDRAWN` splits those two apart from app v1.3.0; until
+   * enough of the fleet is past it, treating a bare DISMISSED as owner activity would reinstate the
+   * same false signal for anyone older. Over-suppressing here costs an extra "you up?"; under-
+   * suppressing leaves someone asleep.
+   */
+  const OWNER_NUDGE_EVENTS = new Set(['DONE', 'SNOOZED', 'DEFERRED', 'OPENED'])
+
   app.post('/devices/:deviceId/events', async (req, reply) => {
     const { deviceId } = req.params as { deviceId: string }
     const body = z
@@ -173,7 +187,15 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       // column is a Meta transport fact — the 24h free-form window — and a notification button does
       // not reopen it. Claiming otherwise would have the outbox believing it could send free-form
       // text and eating a 131047 on the next proactive message.
-      markActivity(deviceId, body.atMillis)
+      //
+      // AN ALLOW-LIST, not the whole kind. This used to fire for every NUDGE-kind report, before the
+      // switch below looked at which event it was — and three of the six are machine-generated. The
+      // sharpest form was self-inflicted: the wake-check ladder's own "You up?" is delivered as a
+      // push, the phone posts it and reports SHOWN, and ten minutes later `runWakeCheck` reads its
+      // own delivery as the owner's answer (services/wakeCheck.ts, the `lastActivityAt` stand-down).
+      // Rounds cancelled, backup alarm never armed, and no record row written at all — nobody wakes
+      // them and nothing anywhere shows that something went wrong.
+      if (OWNER_NUDGE_EVENTS.has(body.event)) markActivity(deviceId, body.atMillis)
 
       switch (body.event) {
         case 'DONE':

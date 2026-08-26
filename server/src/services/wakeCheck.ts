@@ -133,7 +133,7 @@ export function cancelWakeChecks(deviceId: string): void {
  * escalated to a ringing backup alarm). Never touches its own job row's existence — the scheduler
  * settles it.
  */
-export async function runWakeCheck(job: Job): Promise<number | null> {
+export async function runWakeCheck(job: Job, nowMillis: number = Date.now()): Promise<number | null> {
   if (!job.alarmId || !job.deviceId) return null
   const payload = jobPayload<WakePayload>(job)
   const round = payload?.round ?? 0
@@ -141,6 +141,29 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
 
   const device = getDevice(job.deviceId)
   if (!device) return null
+
+  // The same staleness rule `scheduleWakeCheck` applies at the door, applied again on the way
+  // through — and it was missing here while every peer handler had one (`nagging.ts` STALE_NUDGE_MS,
+  // `brief.ts` STALE_BRIEF_MS, `weeklyReview.ts`).
+  //
+  // Every rung is derived from the DISMISSAL rather than from now, so a process that was down longer
+  // than the ladder's own span comes back with the entire remainder already in the past. Before the
+  // floor in `settle`, that walked the rest of the ladder on consecutive fifteen-second ticks and
+  // rang a real alarm within a minute of boot; with the floor it merely does the same thing fifteen
+  // seconds apart. Neither is a wake-check. Past its own span there is no rung left that could run
+  // at the time it was meant to, so the answer is to stand down rather than to catch up — the same
+  // conclusion, and the same constant, as the entry point.
+  //
+  // Deliberately NOT re-anchored on `now`: asking "you up?" three hours late is worse than not
+  // asking. And deliberately no record row, for the reason `escalate` documents at length — the
+  // owner was never in a position to answer a question nobody managed to send.
+  if (nowMillis - startedAt > STALE_DISMISSAL_MS) {
+    log.info(
+      { alarmId: job.alarmId, round, lateBy: nowMillis - startedAt },
+      'wake-check: the whole ladder is behind us; standing down rather than replaying it',
+    )
+    return null
+  }
 
   // Re-checked here as well as at the cancel hook: activity that lands mid-tick would otherwise
   // race the delete and get one more "you up?" after they already answered.
@@ -169,7 +192,7 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
   // This is also why the outbox gate needs no wake_check exemption: without this, every round would
   // be silently dropped there, the ladder would run out, and `escalate` would arm a backup alarm
   // that the commitment rule then holds — the owner asleep, and every safety net quietly removed.
-  if ((await commitmentAt(device, Date.now())) !== null) {
+  if ((await commitmentAt(device, nowMillis)) !== null) {
     log.info({ alarmId: job.alarmId, round }, 'wake-check: the owner is in a timed commitment, so they are up; standing down')
     return null
   }
@@ -184,7 +207,7 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
     // `round` doubles as "how many rounds actually went out": it is advanced immediately before
     // each send, and only after the window check below. escalate needs that to tell an unanswered
     // check apart from one that was never asked.
-    await escalate(device, job.alarmId, label, round)
+    await escalate(device, job.alarmId, label, round, nowMillis)
     return null
   }
 
@@ -223,8 +246,14 @@ export async function runWakeCheck(job: Job): Promise<number | null> {
  * only the row changes. A distinct kind keeps the audit trail while staying invisible to both
  * surfaces, which count by exact event string.
  */
-async function escalate(device: Device, alarmId: string, label: string, roundsDelivered: number): Promise<void> {
-  const now = Date.now()
+async function escalate(
+  device: Device,
+  alarmId: string,
+  label: string,
+  roundsDelivered: number,
+  nowMillis: number = Date.now(),
+): Promise<void> {
+  const now = nowMillis
   const backupAlarmId = newAlarmId()
   await armAlarm(device, {
     alarmId: backupAlarmId,

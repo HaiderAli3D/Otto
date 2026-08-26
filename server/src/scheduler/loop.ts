@@ -116,7 +116,19 @@ export async function runJob(job: Job): Promise<void> {
  */
 export function settle(job: Job, next: JobOutcome): void {
   if (next === null) return deleteJob(job.id)
-  rescheduleJob(job.id, 0, next)
+  // FLOORED AT THE NEXT TICK, never written into the past.
+  //
+  // A handler that derives its next instant from something other than `now` can hand back a time
+  // that has already gone by — `runWakeCheck` returns `wakeCheckAt(round, startedAt)`, measured from
+  // the dismissal, so any stall longer than a rung means the whole remainder of the ladder is
+  // already behind us. Written verbatim, the row is due again immediately and the scheduler walks
+  // the rest of the ladder on consecutive fifteen-second ticks: three messages and a real alarm
+  // ringing inside a minute, hours after the owner got up.
+  //
+  // The floor is a backstop, not the fix — a handler that has fallen this far behind should decide
+  // for itself whether the work is still worth doing, and `runWakeCheck` now does. What this
+  // guarantees is that no handler, present or future, can turn a delay into a burst.
+  rescheduleJob(job.id, 0, Math.max(next, Date.now() + TICK_MS))
 }
 
 /**
