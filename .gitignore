@@ -9,6 +9,7 @@
 # AI session scratch state (.remember/ also self-ignores via its own .gitignore)
 .loki/
 .remember/
+.claude.local.md
 
 # Editors / OS
 .idea/
