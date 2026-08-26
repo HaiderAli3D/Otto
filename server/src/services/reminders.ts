@@ -21,6 +21,8 @@ import type { Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
 import { withdrawNudge } from './push.js'
 import { nextOccurrence, sameWallClock } from './recurrence.js'
+import { formatWindow } from '../lib/routine.js'
+import { parseQuietHours, type QuietHours } from '../lib/quietHours.js'
 import { nagQuietHours, schedulingRoutine } from './settings.js'
 
 export type Reminder = typeof reminders.$inferSelect
@@ -38,6 +40,29 @@ export function timingKindOf(r: Reminder): TimingKind {
  * `plannedAtMillis` would silently re-prune the lead rungs against the current clock and start
  * skipping rungs; one that forgot `routine` would put every daily chase back at 09:00.
  */
+/**
+ * The quiet window this reminder's LADDER is planned against — pinned, not live.
+ *
+ * The two questions quiet hours answer are different and only one of them is a property of the
+ * schedule. "Which warnings are worth planning at all" is decided once, when the ladder is laid out,
+ * and must not move afterwards or `nagCount` stops meaning the same rung. "May this rung go out
+ * right now" is a delivery question and is still asked live, in `runNudge`, against whatever the
+ * owner's window is at that moment.
+ *
+ * Falls back to the live window when the column is null, which is every row written before it
+ * existed — so nothing re-indexes on deploy.
+ */
+function planQuietFor(device: Device, r: Reminder): QuietHours {
+  if (r.planQuietHours !== null) return parseQuietHours(r.planQuietHours)
+  return nagQuietHours(device, r.escalateWithAlarm)
+}
+
+/** The pin to store, in the storage form `parseQuietHours` reads back. */
+export function pinnedQuietSpec(device: Device, escalateWithAlarm: boolean): string {
+  const q = nagQuietHours(device, escalateWithAlarm)
+  return q === null ? 'off' : formatWindow({ startMinute: q.startMinute, endMinute: q.endMinute })
+}
+
 export function ladderParams(
   device: Device,
   r: Reminder,
@@ -50,7 +75,7 @@ export function ladderParams(
     dueAtMillis: r.dueAtMillis,
     zone: device.timezone,
     nowMillis,
-    quiet: nagQuietHours(device, r.escalateWithAlarm),
+    quiet: planQuietFor(device, r),
     kind: timingKindOf(r),
     plannedAtMillis: r.plannedAtMillis ?? r.createdAt,
     routine: schedulingRoutine(device),
@@ -86,7 +111,7 @@ export function resolvedPlanFor(device: Device, r: Reminder): ResolvedPlan {
     override: parseNagPlan(r.nagPlan),
     // Must match what `nextNagAt` sees, or the lead count reported to the evidence layer would
     // disagree with the rungs actually scheduled.
-    quiet: nagQuietHours(device, r.escalateWithAlarm),
+    quiet: planQuietFor(device, r),
   })
 }
 
@@ -201,6 +226,9 @@ export async function createReminder(
     // Where the series lives, fixed at creation. Equal to the due time for every reminder that is
     // not recurring, and read only when one is — see the column comment in db/schema.ts.
     seriesAnchorMillis: dueAtMillis,
+    // The window this ladder is planned against, pinned now so a later change to the owner's quiet
+    // hours cannot re-index a schedule that is already running.
+    planQuietHours: pinnedQuietSpec(device, escalateWithAlarm),
     timingKind,
     recurrence: params.recurrence ?? null,
     nagPolicy,
@@ -433,12 +461,39 @@ export async function updateReminder(
     escalateWithAlarm,
     alarmId,
     plannedAtMillis: replanned ? now : r.plannedAtMillis,
+    // Re-pinned alongside `plannedAtMillis`: a replan lays the ladder out again, so it is planned
+    // against the window in force NOW. Leaving the old pin would plan a fresh schedule against an
+    // out-of-date one, which is the mirror of the bug the pin exists to stop.
+    planQuietHours: replanned ? pinnedQuietSpec(device, escalateWithAlarm) : r.planQuietHours,
     nagCount: patch.resetChase === true ? 0 : r.nagCount,
     deferCount: deferred ? r.deferCount + 1 : r.deferCount,
     updatedAt: now,
   }
 
-  if (replanned) next.nextNagAtMillis = replan(device, next, now)
+  // A MOVED DUE TIME RE-ENTERS AT THE NEW DUE RUNG, not at the old cursor.
+  //
+  // `plannedAtMillis` is re-anchored above and `nagCount` is not, and the two are in tension by
+  // construction: the plan is laid out again from scratch while the index into it stays where the
+  // old ladder had got to. `rungInstant` maps index N to `leadAt[N]` and then to
+  // `chase[N - leadAt.length]`, so an index that used to point at a post-due chase rung now points
+  // past the whole new run-up AND past the new due instant. Push an overdue task from Friday to
+  // Monday after eight warnings have gone out and the first word arrives at 17:10 on Monday — after
+  // the new deadline, with nothing at all beforehand.
+  //
+  // `replan`'s existing clamp cannot catch it, because that only fires when `nextNagAt` returns
+  // null and a stale index usually still resolves to SOME rung. So the cursor is moved explicitly:
+  // `leadCountFor` is the rung sitting on the due instant, which is where a reminder that has
+  // already been chased should resume — it has had its warnings, and the new deadline is the next
+  // thing worth saying. `completeReminder`'s recurring roll makes the same move for the same
+  // reason, and `onReminderAlarmEvent` already uses this idiom.
+  //
+  // `nagCount` itself is untouched, so the persona's "chased N times" evidence stays honest about
+  // how often the owner has actually been asked.
+  if (replanned) {
+    const dueMoved = dueAtMillis !== r.dueAtMillis && dueAtMillis !== null
+    const cursor = dueMoved ? Math.min(next.nagCount, leadCountFor(device, next)) : next.nagCount
+    next.nextNagAtMillis = replan(device, next, now, cursor)
+  }
 
   db.update(reminders)
     .set({
@@ -481,8 +536,8 @@ export async function updateReminder(
  * post-due rung keeps an edit from ever ending a ladder by accident; ending one is what
  * `cancel_reminder` and `nagPolicy: 'off'` are for.
  */
-function replan(device: Device, r: Reminder, now: number): number | null {
-  const direct = nextNagAt(ladderParams(device, r, r.nagCount, now))
+function replan(device: Device, r: Reminder, now: number, cursor: number = r.nagCount): number | null {
+  const direct = nextNagAt(ladderParams(device, r, cursor, now))
   if (direct !== null) return direct
   // Undated rows fall through to the same clamp as dated ones. They used to be excluded here, which
   // turned this from a safety net into the bug it exists to prevent: an undated reminder whose
@@ -490,7 +545,7 @@ function replan(device: Device, r: Reminder, now: number): number | null {
   // response to being asked to chase harder. Its `leadCount` is 0, so it simply re-enters at rung 0.
   if (r.nagPolicy === 'off') return null
   const leadCount = leadCountFor(device, r)
-  if (r.nagCount <= leadCount) return null
+  if (cursor <= leadCount) return null
   return nextNagAt(ladderParams(device, r, leadCount, now))
 }
 

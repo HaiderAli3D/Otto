@@ -196,7 +196,12 @@ describe('a rung that lands inside a commitment', () => {
 })
 
 describe('a reminder whose due time fell inside a commitment', () => {
-  it('assumes it happened, closes it, and says so exactly once', async () => {
+  it('asks whether it got done, once, and leaves it open', async () => {
+    // This used to CLOSE the reminder on the assumption that the meeting was the thing. Nothing in
+    // the path consulted the timing kind, and `createReminder` defaults every dated reminder to
+    // `deadline` — so "send the invoice by 16:00" plus a 16:00 meeting marked the invoice done and
+    // invited the owner to correct it. Being stuck in a meeting when something was due is evidence
+    // it did NOT get done, and the one message available was spent saying the opposite.
     vi.setSystemTime(at('13:00'))
     const device = readyDevice()
     const r = await createReminder(device, { title: 'see the dentist', dueAtMillis: at('14:00'), timing: 'trigger' })
@@ -209,16 +214,20 @@ describe('a reminder whose due time fell inside a commitment', () => {
     await runNudge(r.reminderId)
 
     const after = getReminder(r.reminderId)!
-    expect(after.state).toBe('DONE')
+    // OPEN, so silence keeps the ladder running rather than ending it — the safe direction.
+    expect(after.state).toBe('OPEN')
     expect(sends).toHaveLength(1)
     expect(sends[0]!.body).toContain('see the dentist')
     expect(sends[0]!.body).toContain('Sync with Sam')
+    expect(sends[0]!.body).toContain('did that get done?')
 
-    // Stamped to the completion's OWN instant. services/signals.ts counts the record off
-    // completedAtMillis, and equality is what excludes an assumption from it.
-    expect(after.assumedAttendedAtMillis).toBe(after.completedAtMillis)
+    // The rung IS spent: a question is a message that reached them and can be answered, which is
+    // this codebase's rule for when a rung is spent.
+    expect(after.nagCount).toBe(r.nagCount + 1)
+    // And the asking is on the record, so the writer can tell it from an ordinary chase.
+    expect(after.assumedAttendedAtMillis).toBe(at('15:00'))
 
-    // Asked ONCE. The reminder is DONE, so a later rung returns at the top of runNudge.
+    // Asked ONCE: the dedupe key is the commitment, and the rung has moved on.
     await runNudge(r.reminderId)
     expect(sends).toHaveLength(1)
   })
@@ -238,11 +247,13 @@ describe('a reminder whose due time fell inside a commitment', () => {
     vi.setSystemTime(at('15:00'))
     await runNudge(r.reminderId)
 
-    // completeReminder does this, which is exactly why the close goes through it rather than
-    // writing state directly: a hand-rolled DONE would end a daily series for ever.
+    // A recurring reminder is not rolled forward either, and that is the point: nothing was
+    // completed, so there is no occurrence to advance past. It stays on today's due time with its
+    // ladder running, and the owner's answer decides what happens next.
     const after = getReminder(r.reminderId)!
     expect(after.state).toBe('OPEN')
-    expect(after.dueAtMillis).toBe(at('14:00', '11'))
+    expect(after.dueAtMillis).toBe(at('14:00'))
+    expect(after.completedCount).toBe(0)
     expect(sends).toHaveLength(1)
   })
 
