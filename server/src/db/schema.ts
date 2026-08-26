@@ -87,6 +87,20 @@ export const alarms = sqliteTable('alarms', {
   state: text('state').notNull().default('ARMED'),
   allowWhileIdle: integer('allow_while_idle', { mode: 'boolean' }).notNull().default(true),
   recurrence: text('recurrence'), // optional RRULE for recurring reminders
+  /**
+   * The wall clock the SERIES was set to, immune to what the phone reports back.
+   *
+   * `trigger_at_millis` cannot serve as the recurrence anchor, and used to: `recordEvent` adopts the
+   * phone's own trigger on ARMED so a later SYNC lists the alarm at its real time, and after a
+   * snooze that is the snoozed instant. `advanceRecurrence` then read the same column to compute
+   * tomorrow, so one snooze a morning walked a daily 06:30 to 07:33 inside a week and never unwound.
+   * One column cannot be both "where this occurrence actually is" and "where the series lives".
+   *
+   * Nullable, so every row written before this column existed falls back to `trigger_at_millis` at
+   * read time and no backfill is needed. Set by `armAlarm` and carried forward explicitly by
+   * `advanceRecurrence` — each occurrence is a new row, so it has to be propagated by hand.
+   */
+  seriesAnchorMillis: integer('series_anchor_millis'),
   // This alarm is a wake-up the wake-check feature follows up on ("are you actually up?"). Landed
   // with the rest of the Phase 0 migration so that feature branch adds no DDL of its own.
   wakeCheck: integer('wake_check', { mode: 'boolean' }).notNull().default(false),
@@ -182,6 +196,16 @@ export const reminders = sqliteTable(
     // column existed: it has zero lead rungs, so every one of them keeps the ladder it had.
     timingKind: text('timing_kind').notNull().default('trigger'),
     recurrence: text('recurrence'), // same RRULE subset as alarms
+    /**
+     * The wall clock the SERIES lives at. Same column, same reasoning, as `alarms`.
+     *
+     * `due_at_millis` is rewritten by every roll-forward, so on a spring-forward morning the
+     * occurrence luxon corrected to 02:30 became the anchor for the next one and the series stayed
+     * an hour late for good. Unlike the alarms table there is no phone-reported drift to guard
+     * against here — nothing outside this server writes a due time — so this exists purely for the
+     * DST gap. Nullable; falls back to `due_at_millis` for rows written before it.
+     */
+    seriesAnchorMillis: integer('series_anchor_millis'),
     nagPolicy: text('nag_policy').notNull().default('gentle'), // off | gentle | persistent | hard | relentless
     // When this schedule was last PLANNED — creation, a recurrence roll-forward, or any edit that
     // moved the due time. Lead rungs are pruned against this rather than against the current clock,

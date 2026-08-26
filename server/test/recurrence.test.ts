@@ -12,8 +12,16 @@ vi.mock('../src/fcm/sender.js', () => ({
 }))
 
 import { ensureSchema } from '../src/db/client.js'
-import { advanceRecurrence, armAlarm, cancelAlarm, getAlarm, listArmed } from '../src/services/alarms.js'
+import { and, eq } from 'drizzle-orm'
+import { db } from '../src/db/client.js'
+import { jobs } from '../src/db/schema.js'
+import { advanceRecurrence, armAlarm, cancelAlarm, getAlarm, listArmed, recordEvent } from '../src/services/alarms.js'
+import { getDevice, setTimezone } from '../src/services/devices.js'
 import { makeDevice } from './helpers.js'
+
+const ZONE = 'Europe/London'
+const recurringJobs = (alarmId: string) =>
+  db.select().from(jobs).where(and(eq(jobs.kind, 'recurring'), eq(jobs.alarmId, alarmId))).all()
 
 const zone = 'Europe/London'
 const at = (iso: string): number => DateTime.fromISO(iso, { zone }).toMillis()
@@ -73,6 +81,127 @@ describe('nextOccurrence', () => {
 
   it('returns null for an invalid rule', () => {
     expect(nextOccurrence('FREQ=SOMETIMES', at('2026-07-01T07:00:00'), zone, 0)).toBeNull()
+  })
+})
+
+describe('the series anchor survives what the phone reports', () => {
+  beforeEach(() => {
+    ensureSchema()
+    sent.length = 0
+  })
+
+  /**
+   * The defect this column exists for. `recordEvent` adopts the phone's own trigger on ARMED so a
+   * later SYNC lists the alarm at its real time, and after a snooze that is the snoozed instant.
+   * `advanceRecurrence` used to read the same column as the series anchor, so every occurrence
+   * re-anchored on the last snooze and a daily 06:30 walked to 07:33 inside a week.
+   */
+  it('does not drift when the owner snoozes every morning for a week', async () => {
+    const device = makeDevice('dev_drift')
+    setTimezone(device.deviceId, ZONE)
+    const start = DateTime.fromISO('2026-09-01T06:30', { zone: ZONE }).toMillis()
+
+    let alarmId = 'alm_drift'
+    await armAlarm(getDevice(device.deviceId)!, {
+      alarmId,
+      triggerAtMillis: start,
+      label: 'Wake up',
+      recurrence: 'FREQ=DAILY',
+    })
+
+    const rung: string[] = []
+    for (let day = 0; day < 7; day++) {
+      const alarm = getAlarm(alarmId)!
+      rung.push(DateTime.fromMillis(alarm.triggerAtMillis, { zone: ZONE }).toFormat('HH:mm'))
+      // Nine minutes of snooze, reported exactly as the app reports it.
+      const snoozed = alarm.triggerAtMillis + 9 * 60_000
+      recordEvent(device.deviceId, alarmId, 'ARMED', snoozed, '1.1.0', snoozed)
+      const res = await advanceRecurrence(alarmId)
+      expect(res.advanced).toBe(true)
+      alarmId = res.nextAlarmId!
+    }
+
+    expect(rung).toEqual(['06:30', '06:30', '06:30', '06:30', '06:30', '06:30', '06:30'])
+  })
+
+  it('still lets the phone move THIS occurrence, which is what the adoption is for', async () => {
+    // The fix must not turn the adoption off — a SYNC has to list the alarm where it really is.
+    const device = makeDevice('dev_adopt')
+    setTimezone(device.deviceId, ZONE)
+    const start = DateTime.fromISO('2026-09-01T06:30', { zone: ZONE }).toMillis()
+    await armAlarm(getDevice(device.deviceId)!, {
+      alarmId: 'alm_adopt',
+      triggerAtMillis: start,
+      label: 'Wake up',
+      recurrence: 'FREQ=DAILY',
+    })
+
+    const snoozed = start + 9 * 60_000
+    recordEvent(device.deviceId, 'alm_adopt', 'ARMED', snoozed, '1.1.0', snoozed)
+
+    expect(getAlarm('alm_adopt')?.triggerAtMillis).toBe(snoozed)
+    expect(getAlarm('alm_adopt')?.seriesAnchorMillis).toBe(start)
+  })
+
+  it('re-queues the advance backstop off the adopted trigger', async () => {
+    // The backstop was queued at the ORIGINAL trigger plus ten minutes, so a longer snooze let the
+    // series advance while the occurrence was still pending: the phone rings at 06:45 and the
+    // server has already moved on to tomorrow.
+    const device = makeDevice('dev_backstop')
+    setTimezone(device.deviceId, ZONE)
+    const start = DateTime.fromISO('2026-09-01T06:30', { zone: ZONE }).toMillis()
+    await armAlarm(getDevice(device.deviceId)!, {
+      alarmId: 'alm_backstop',
+      triggerAtMillis: start,
+      label: 'Wake up',
+      recurrence: 'FREQ=DAILY',
+    })
+
+    const snoozed = start + 15 * 60_000
+    recordEvent(device.deviceId, 'alm_backstop', 'ARMED', snoozed, '1.1.0', snoozed)
+
+    const backstops = recurringJobs('alm_backstop')
+    expect(backstops).toHaveLength(1)
+    expect(backstops[0]!.runAtMillis).toBeGreaterThan(snoozed)
+  })
+
+  it('returns to the configured wall clock the day after a spring-forward gap', async () => {
+    // 01:30 does not exist in Europe/London on 2027-03-28. luxon resolves it forward to 02:30, and
+    // that corrected instant used to become the next anchor — so the one-hour correction outlived
+    // the gap and the series was permanently an hour late.
+    const device = makeDevice('dev_dst')
+    setTimezone(device.deviceId, ZONE)
+    const start = DateTime.fromISO('2027-03-27T01:30', { zone: ZONE }).toMillis()
+    await armAlarm(getDevice(device.deviceId)!, {
+      alarmId: 'alm_dst',
+      triggerAtMillis: start,
+      label: 'Nightly',
+      recurrence: 'FREQ=DAILY',
+    })
+
+    // The clock has to move between advances: `advanceRecurrence` asks for the next occurrence after
+    // `Date.now()`, so without this both calls answer with the same day and the test proves nothing.
+    vi.useFakeTimers()
+    vi.setSystemTime(DateTime.fromISO('2027-03-27T02:00', { zone: ZONE }).toJSDate())
+
+    const first = await advanceRecurrence('alm_dst')
+    const gapDay = getAlarm(first.nextAlarmId!)!
+    // The gap day itself is corrected forward — there is no 01:30 to arm.
+    expect(DateTime.fromMillis(gapDay.triggerAtMillis, { zone: ZONE }).toFormat('yyyy-MM-dd HH:mm')).toBe(
+      '2027-03-28 02:30',
+    )
+    // But the ANCHOR did not move with it — that is the whole fix.
+    expect(gapDay.seriesAnchorMillis).toBe(start)
+
+    vi.setSystemTime(DateTime.fromISO('2027-03-28T03:00', { zone: ZONE }).toJSDate())
+    const second = await advanceRecurrence(first.nextAlarmId!)
+    const dayAfter = getAlarm(second.nextAlarmId!)!
+    expect(DateTime.fromMillis(dayAfter.triggerAtMillis, { zone: ZONE }).toFormat('yyyy-MM-dd HH:mm')).toBe(
+      '2027-03-29 01:30',
+    )
+    // And the clock is now carried by the anchor again, so the series is stable from here.
+    expect(dayAfter.seriesAnchorMillis).toBe(dayAfter.triggerAtMillis)
+    vi.useRealTimers()
   })
 })
 
