@@ -52,16 +52,29 @@ export function formatQuietHours(q: QuietHours): string {
   return `${hhmm(q.startMinute)}–${hhmm(q.endMinute)}`
 }
 
+/**
+ * Is this minute-of-day inside the window? Null window ⇒ never.
+ *
+ * Split out from `inQuietHours` so that a caller holding a wall-clock TIME rather than an instant —
+ * `setPreferences`, checking whether a configured brief hour is one the delivery gate would ever
+ * honour — asks the same implementation rather than growing a second copy of the rule below. Two
+ * copies of a midnight-spanning comparison is exactly the kind of thing that agrees for a year and
+ * then disagrees about one edge.
+ */
+export function minuteInQuietHours(minuteOfDay: number, q: QuietHours): boolean {
+  if (q === null) return false
+  // Spanning midnight is the DEFAULT case, not an edge — quiet hours are for sleeping. When
+  // start > end the window is the union of [start, midnight) and [midnight, end), so the test is
+  // an OR. The end is exclusive, which is what makes deferPastQuietHours idempotent.
+  if (q.startMinute > q.endMinute) return minuteOfDay >= q.startMinute || minuteOfDay < q.endMinute
+  return minuteOfDay >= q.startMinute && minuteOfDay < q.endMinute
+}
+
 /** Is this instant inside the window, judged by wall-clock time in `zone`? Null window ⇒ never. */
 export function inQuietHours(atMillis: number, zone: string, q: QuietHours): boolean {
   if (q === null) return false
   const dt = DateTime.fromMillis(atMillis, { zone })
-  const minute = dt.hour * 60 + dt.minute
-  // Spanning midnight is the DEFAULT case, not an edge — quiet hours are for sleeping. When
-  // start > end the window is the union of [start, midnight) and [midnight, end), so the test is
-  // an OR. The end is exclusive, which is what makes deferPastQuietHours idempotent.
-  if (q.startMinute > q.endMinute) return minute >= q.startMinute || minute < q.endMinute
-  return minute >= q.startMinute && minute < q.endMinute
+  return minuteInQuietHours(dt.hour * 60 + dt.minute, q)
 }
 
 /**

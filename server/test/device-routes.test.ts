@@ -14,8 +14,13 @@ import { computeSig } from '../src/fcm/signer.js'
 import { db } from '../src/db/client.js'
 import { jobs } from '../src/db/schema.js'
 import { armAlarm } from '../src/services/alarms.js'
-import { getDevice } from '../src/services/devices.js'
+import { scheduleBriefChain } from '../src/services/brief.js'
+import { getDevice, setTimezone } from '../src/services/devices.js'
 import { dueJobs } from '../src/services/jobs.js'
+import { and, eq } from 'drizzle-orm'
+
+const briefJob = (deviceId: string) =>
+  db.select().from(jobs).where(and(eq(jobs.kind, 'brief'), eq(jobs.deviceId, deviceId))).all()
 
 /** Let fire-and-forget sends settle before asserting on the capture array. */
 const flush = () => new Promise((resolve) => setImmediate(resolve))
@@ -51,6 +56,44 @@ describe('timezone ingestion', () => {
     })
     expect(res.statusCode).toBe(204)
     expect(getDevice('dev_tz2')?.timezone).toBe('America/New_York')
+  })
+
+  it('moves the standing brief chain when the zone actually changes', async () => {
+    // The pending row holds an absolute instant computed in the OLD zone, and `slotForRunAt` matches
+    // it back against the configured boundary by a round trip through luxon — so left alone it stops
+    // being a boundary in the new zone, reads as null, and the brief is skipped for the day.
+    const app = await makeApp()
+    const device = makeDevice('dev_tz4')
+    scheduleBriefChain(device, Date.now())
+    const before = briefJob('dev_tz4')[0]!
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/devices/dev_tz4/heartbeat',
+      payload: { appVersion: '1.0.0', atMillis: 123, timezone: 'America/New_York' },
+    })
+
+    expect(res.statusCode).toBe(204)
+    expect(briefJob('dev_tz4')).toHaveLength(1)
+    expect(briefJob('dev_tz4')[0]!.runAtMillis).not.toBe(before.runAtMillis)
+  })
+
+  it('leaves the chain alone when the reported zone is the one already stored', async () => {
+    // Every heartbeat carries the zone, so re-scheduling on each one would drag the row forward
+    // constantly and hand `ensureSingletonJob` a moving target for no reason.
+    const app = await makeApp()
+    const device = makeDevice('dev_tz5')
+    setTimezone('dev_tz5', 'Europe/London')
+    scheduleBriefChain({ ...device, timezone: 'Europe/London' }, Date.now())
+    const before = briefJob('dev_tz5')[0]!
+
+    await app.inject({
+      method: 'POST',
+      url: '/devices/dev_tz5/heartbeat',
+      payload: { appVersion: '1.0.0', atMillis: 123, timezone: 'Europe/London' },
+    })
+
+    expect(briefJob('dev_tz5')[0]!.runAtMillis).toBe(before.runAtMillis)
   })
 
   it('an invalid zone is ignored (204, timezone unchanged)', async () => {

@@ -1,11 +1,25 @@
 import { config, parseWeeklyReview } from '../config.js'
 import { nextBriefRunAt } from '../lib/briefSchedule.js'
 import { formatQuietHours, parseQuietHours } from '../lib/quietHours.js'
-import { dayStartHour, dayStartMinute, impliedQuietHours, parseRoutine } from '../lib/routine.js'
+import {
+  briefAnchorHour,
+  briefAnchorMinute,
+  dayStartHour,
+  dayStartMinute,
+  impliedQuietHours,
+  parseRoutine,
+} from '../lib/routine.js'
 import { log } from '../lib/log.js'
-import { rescheduleBriefChain } from './brief.js'
+import { briefWouldExpireUnsent, rescheduleBriefChain } from './brief.js'
 import type { Device } from './devices.js'
-import { getSettings, quietHoursFor, updateSettings, type DeviceSettings } from './settings.js'
+import {
+  DEFAULT_BRIEF_HOUR,
+  DEFAULT_BRIEF_MINUTE,
+  getSettings,
+  quietHoursFor,
+  updateSettings,
+  type DeviceSettings,
+} from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
 import { rescheduleWeeklyReviewChain } from './weeklyReview.js'
 
@@ -131,6 +145,30 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
     return v
   }
 
+  // Every field this tool understands. A key that is not here was either a typo or a setting the
+  // model invented, and both used to be dropped in silence while the call still returned success —
+  // so "stop messaging me after ten" saved as `quiet_hours` came back looking exactly like a change
+  // that had been applied, and the owner found out at ten. Same all-or-nothing shape as a bad value.
+  const KNOWN_FIELDS = new Set([
+    'briefEnabled',
+    'briefHour',
+    'briefMinute',
+    'eveningBriefEnabled',
+    'eveningBriefHour',
+    'eveningBriefMinute',
+    'quietHours',
+    'weeklyReview',
+    'bedWindow',
+    'wakeWindow',
+    'dailyMessageBudget',
+    'autoWakeAlarm',
+    'autoLeaveByAlarm',
+  ])
+  const unknown = Object.keys(input).filter((k) => !KNOWN_FIELDS.has(k))
+  if (unknown.length > 0) {
+    errors.push(`unknown setting${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}`)
+  }
+
   const patch: Partial<Omit<DeviceSettings, 'deviceId' | 'updatedAt'>> = {
     briefEnabled: flag(input.briefEnabled, 'briefEnabled'),
     briefHour: clock(input.briefHour, 23, 'briefHour'),
@@ -195,57 +233,162 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
 
   const before = getSettings(device.deviceId)
 
-  // Stating a routine moves the morning brief to the owner's actual morning — unless they set a
+  const routineBefore = parseRoutine(before.bedWindow, before.wakeWindow)
+  const routineNow = parseRoutine(
+    patch.bedWindow === undefined ? before.bedWindow : patch.bedWindow,
+    patch.wakeWindow === undefined ? before.wakeWindow : patch.wakeWindow,
+  )
+
+  // CHANGED, not merely mentioned. This used to test `patch.bedWindow !== undefined`, i.e. whether a
+  // routine field was PRESENT in the call — so re-saving both windows verbatim counted as a change,
+  // and the tool description tells the model to do exactly that ("Save BOTH windows together").
+  const routineChanged =
+    (patch.bedWindow !== undefined && patch.bedWindow !== before.bedWindow) ||
+    (patch.wakeWindow !== undefined && patch.wakeWindow !== before.wakeWindow)
+
+  // THE QUIET WINDOW IS SETTLED FIRST, because the brief has to be judged against it.
+  //
+  // Stating a routine seeds the window once, at write time, so "I'm up at noon and I go to bed
+  // around two" is the single sentence that settles all three anchors. A concrete string goes into
+  // the column and the routine plays no further part: `quietHoursFor` still reads the column and
+  // only the column, so `lib/routine.ts`'s rule holds exactly as written — nothing consults a
+  // routine to decide whether to SUPPRESS anything.
+  //
+  // Never overwrites a window the OWNER typed. Re-derived only when the stored value is still
+  // exactly what we derived from their PREVIOUS routine, so "I'm up at ten now" moves the window
+  // while "leave me alone until one" survives every later routine change. Literal "off" can never
+  // equal a derivation, which makes switching quiet hours off permanent by construction.
+  const quietStated = input.quietHours !== undefined
+  const oursBefore = routineBefore === null ? null : impliedQuietHours(routineBefore)
+  const quietIsOurs = before.quietHours === null || before.quietHours === oursBefore
+  if (routineNow !== null && routineChanged && !quietStated && quietIsOurs) {
+    const derived = impliedQuietHours(routineNow)
+    if (derived !== null) patch.quietHours = derived
+  }
+
+  // Turning the routine OFF has to take our derivation with it.
+  //
+  // Both derivations are gated on a routine EXISTING, so `{bedWindow:'off', wakeWindow:'off'}` used
+  // to leave the derived string sitting in the column with nothing that could ever remove it: the
+  // pin re-derives `oursBefore` from the STORED windows, and this same call has just erased them, so
+  // from the next call onward the machine's own guess is indistinguishable from a window the owner
+  // typed and survives every later change. They turn their routine off and stay silenced by a window
+  // they never chose.
+  //
+  // Cleared to NULL rather than to a literal, so `quietHoursFor` falls back to the server default —
+  // the state the device was in before a routine was ever stated.
+  if (
+    routineNow === null &&
+    routineChanged &&
+    !quietStated &&
+    before.quietHours !== null &&
+    before.quietHours === oursBefore
+  ) {
+    patch.quietHours = null
+  }
+
+  const settledQuietSpec = patch.quietHours === undefined ? before.quietHours : patch.quietHours
+  const effectiveQuiet = parseQuietHours(settledQuietSpec === null ? config.quietHoursDefault : settledQuietSpec)
+
+  // Stating a routine moves the morning brief to the START of their wake window — unless they set a
   // brief time in the same breath, in which case they have said where they want it and that wins.
   //
   // Without this, "I don't get up till lunchtime" leaves the brief at 07:00 and the owner has to
   // know to ask for a second change. The write goes through `updateSettings` like any other, so the
   // BRIEF_TIMING_FIELDS check below sees it and moves the pending job for free.
-  const routineNow = parseRoutine(
-    patch.bedWindow === undefined ? before.bedWindow : patch.bedWindow,
-    patch.wakeWindow === undefined ? before.wakeWindow : patch.wakeWindow,
-  )
-  const routineChanged = patch.bedWindow !== undefined || patch.wakeWindow !== undefined
+  //
+  // PINNED the way the quiet window above is pinned, and for the same reason. `briefTimeStated` only
+  // ever looked at the CURRENT call, so a brief time chosen in an earlier conversation was
+  // overwritten by any later mention of their sleeping hours — including a bed-window-only change,
+  // which cannot move the brief anchor at all, since `briefAnchorHour` reads the wake half alone.
+  // The owner set 06:30 on Monday, mentioned on Friday that they had been going to bed later, and
+  // from Saturday were briefed at the top of their wake window with nothing having said so.
+  //
+  // So: re-derive only when the stored time is still exactly what we derived from their PREVIOUS
+  // routine, or is the untouched schema default. Anything else is a time they chose, and it stands.
   const briefTimeStated = input.briefHour !== undefined || input.briefMinute !== undefined
-  if (routineNow !== null && routineChanged && !briefTimeStated) {
-    patch.briefHour = dayStartHour(routineNow)
-    patch.briefMinute = dayStartMinute(routineNow)
+  const briefIsOurs =
+    (before.briefHour === DEFAULT_BRIEF_HOUR && before.briefMinute === DEFAULT_BRIEF_MINUTE) ||
+    (routineBefore !== null &&
+      before.briefHour === briefAnchorHour(routineBefore) &&
+      before.briefMinute === briefAnchorMinute(routineBefore))
+  if (routineNow !== null && routineChanged && !briefTimeStated && briefIsOurs) {
+    patch.briefHour = briefAnchorHour(routineNow)
+    patch.briefMinute = briefAnchorMinute(routineNow)
   }
 
-  // Stating a routine ALSO seeds the quiet window, once, at write time — so "I'm up at noon and I go
-  // to bed around two" is the single sentence that moves all three anchors: the hour Otto picks for
-  // itself, the brief, and the hours it is allowed to speak first in. Without it the owner has to
-  // know to make three separate changes, and the one they forget is the one that wakes them.
+  // A brief buried deep enough inside quiet hours is one the owner is promised and never gets.
   //
-  // A concrete string goes into the column and the routine plays no further part. `quietHoursFor`
-  // still reads the column and only the column, so `lib/routine.ts`'s rule holds exactly as written:
-  // nothing consults the routine to decide whether to SUPPRESS anything. This is the same move the
-  // brief auto-move above makes with briefHour, one field further along.
+  // Being inside the window is not the problem — `heldByQuietHours` holds the row and it goes out
+  // when the window lifts. Expiring first is: `flushOutbox` retires it EXPIRED, `markBriefSent` has
+  // already stamped the day, and `sameLocalDay` blocks the retry. On stock defaults an evening brief
+  // at 23:00 waits eight hours against a three-hour fuse and has never once been delivered.
   //
-  // Never overwrites a window the OWNER typed. Re-derived only when the stored value is still
-  // exactly what we derived from their PREVIOUS routine, so "I'm up at ten now" moves the window
-  // while "leave me alone until one" survives every later routine change. Literal "off" can never
-  // equal a derivation, which makes switching quiet hours off permanent by construction — the
-  // property `quietHoursFor` is careful to preserve at the other end.
-  const quietStated = input.quietHours !== undefined
-  if (routineNow !== null && routineChanged && !quietStated) {
-    const derived = impliedQuietHours(routineNow)
-    const oursBefore = (() => {
-      const routineBefore = parseRoutine(before.bedWindow, before.wakeWindow)
-      return routineBefore === null ? null : impliedQuietHours(routineBefore)
-    })()
-    if (derived !== null && (before.quietHours === null || before.quietHours === oursBefore)) {
-      patch.quietHours = derived
+  // REJECT what they just said; ADAPT what they did not. A time the owner states in this call is an
+  // instruction we can query, and refusing it names the conflict while they are here to fix it. A
+  // time they are merely carrying — the untouched default, or one we derived ourselves — must not
+  // make their instruction fail: "leave me alone until one" would otherwise be refused on account of
+  // a 07:00 brief nobody had thought about. That one is moved to the first minute it could actually
+  // be delivered, and `effective()` hands the new value back for Otto to confirm from.
+  const briefTrouble = (
+    slot: 'morning' | 'evening',
+    enabled: boolean,
+    hour: number,
+    minute: number,
+    stated: boolean,
+    label: string,
+  ): { error: string } | { hour: number; minute: number } | null => {
+    if (!enabled || effectiveQuiet === null) return null
+    if (!briefWouldExpireUnsent(hour, minute, slot, effectiveQuiet)) return null
+    if (stated) {
+      return {
+        error:
+          `${label} at ${hhmm(hour, minute)} sits so far inside quiet hours ` +
+          `(${formatQuietHours(effectiveQuiet)}) that it would expire before the window lifts, and never ` +
+          'arrive — pick a time closer to the end of the window, or move the window',
+      }
     }
+    return { hour: Math.floor(effectiveQuiet.endMinute / 60), minute: effectiveQuiet.endMinute % 60 }
+  }
+
+  const morningTrouble = briefTrouble(
+    'morning',
+    patch.briefEnabled ?? before.briefEnabled,
+    patch.briefHour ?? before.briefHour,
+    patch.briefMinute ?? before.briefMinute,
+    briefTimeStated,
+    'a morning brief',
+  )
+  if (morningTrouble !== null && 'error' in morningTrouble) return morningTrouble
+  if (morningTrouble !== null) {
+    patch.briefHour = morningTrouble.hour
+    patch.briefMinute = morningTrouble.minute
+  }
+
+  // `eveningBriefEnabled: true` counts as stating it: turning a slot on is the moment the owner is
+  // asking for it, and silently relocating the thing they just switched on would be the same lie in
+  // a different place.
+  const eveningStated =
+    input.eveningBriefHour !== undefined || input.eveningBriefMinute !== undefined || input.eveningBriefEnabled === true
+  const eveningTrouble = briefTrouble(
+    'evening',
+    patch.eveningBriefEnabled ?? before.eveningBriefEnabled,
+    patch.eveningBriefHour ?? before.eveningBriefHour,
+    patch.eveningBriefMinute ?? before.eveningBriefMinute,
+    eveningStated,
+    'an evening brief',
+  )
+  if (eveningTrouble !== null && 'error' in eveningTrouble) return eveningTrouble
+  if (eveningTrouble !== null) {
+    patch.eveningBriefHour = eveningTrouble.hour
+    patch.eveningBriefMinute = eveningTrouble.minute
   }
 
   // Two enabled slots at the same minute is a brief the owner is promised and never gets.
   // `slotForRunAt` resolves that clash to morning by design, so the evening one has no instant it can
   // ever be read off — while `effective()` below would still hand back `eveningBriefEnabled: true`
   // with a time, and the prompt tells Otto to confirm from exactly those values. Judged on the
-  // MERGED state, not on the patch: dropping the morning brief onto an evening slot configured weeks
-  // ago is the same collision from the other side. Rejecting is better than silently moving one of
-  // them, because the owner is right here and can be asked.
+  // MERGED state, and LAST, so a clamp above cannot create a collision this never looked at.
   const settled: DeviceSettings = { ...before, ...stripUndefined(patch) }
   if (
     settled.briefEnabled &&

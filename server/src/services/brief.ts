@@ -4,6 +4,7 @@ import { composeBrief, type BriefInput } from '../agent/brief.js'
 import { db } from '../db/client.js'
 import { reminders } from '../db/schema.js'
 import { nextBriefRunAt, slotForRunAt, type BriefSlot } from '../lib/briefSchedule.js'
+import { minuteInQuietHours, type QuietHours } from '../lib/quietHours.js'
 import { log } from '../lib/log.js'
 import { MIN_RUNG_GAP_MS } from '../lib/nagLadder.js'
 import { wakingDayEndsAt } from '../lib/routine.js'
@@ -38,8 +39,39 @@ const STALE_BRIEF_MS = 3 * 60 * 60 * 1000
  * that opens with "tomorrow starts with…" — is worse than no brief at all. flushOutbox retires an
  * expired row without sending it, so the TTL is the whole mechanism.
  */
-const MORNING_TTL_MS = 4 * 60 * 60 * 1000
-const EVENING_TTL_MS = 3 * 60 * 60 * 1000
+export const MORNING_TTL_MS = 4 * 60 * 60 * 1000
+export const EVENING_TTL_MS = 3 * 60 * 60 * 1000
+
+/**
+ * Would a brief configured for this wall-clock time be retired unsent by its own TTL?
+ *
+ * Lives here rather than in `setPreferences` because the answer is made of the two TTLs above, and a
+ * caller that had to import them in order to reason about them would be free to get the arithmetic
+ * subtly different. `setPreferences` asks the question; this module owns the answer.
+ *
+ * Being inside the window is NOT on its own a problem: `heldByQuietHours` holds the row and
+ * `flushOutbox` sends it the moment the window lifts, so a 06:30 brief under a 22:00–07:00 window
+ * arrives at 07:00, half an hour late and perfectly useful. What is fatal is the row expiring first
+ * — and then `markBriefSent` has already stamped the day, so `sameLocalDay` blocks the retry and the
+ * brief silently never arrives again. On stock defaults an evening brief at 23:00 waits eight hours
+ * against a three-hour fuse: it has never once been delivered.
+ *
+ * Minutes-of-day arithmetic, wrapping at midnight, because a window and a brief time are both
+ * recurring wall-clock rules rather than instants — the same reasoning `QuietHours` is stored under.
+ */
+export function briefWouldExpireUnsent(
+  hour: number,
+  minute: number,
+  slot: BriefSlot,
+  quiet: QuietHours,
+): boolean {
+  if (quiet === null) return false
+  const at = hour * 60 + minute
+  if (!minuteInQuietHours(at, quiet)) return false
+  const waitMinutes = (quiet.endMinute - at + 24 * 60) % (24 * 60)
+  const ttlMinutes = (slot === 'morning' ? MORNING_TTL_MS : EVENING_TTL_MS) / 60_000
+  return waitMinutes >= ttlMinutes
+}
 
 /**
  * Hard ceiling on reminders handed to the composer. The prompt already says three or four items, but
@@ -326,7 +358,7 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
     return false
   }
   const lastSent = slot === 'morning' ? settings.lastBriefAt : settings.lastEveningBriefAt
-  if (sameLocalDay(lastSent, nowMillis, zone)) {
+  if (sameLocalDay(lastSent, runAtMillis, zone)) {
     log.debug({ deviceId: device.deviceId, slot }, 'brief: already delivered this local day')
     return false
   }
@@ -375,12 +407,18 @@ export async function runBrief(device: Device, runAtMillis: number, nowMillis: n
     // table comment) and matches the existing `digest:<date>` key exactly, but the day a second
     // device pairs, its brief would be silently rejected as a duplicate of the first device's.
     // Add the deviceId here at the same time as multi-device support, not after.
-    dedupeKey: `brief:${localDateKey(nowMillis, zone)}:${slot}`,
+    // Keyed on the SLOT's own instant, not on the moment the job happened to run. The two are the
+    // same day almost always and differ exactly when it matters: a brief scheduled for 23:30 that a
+    // busy tick delivers at 00:02 gets tomorrow's key, and `markBriefSent` then stamps tomorrow —
+    // so tomorrow's brief reads as already sent and is skipped, while today's went out twice under
+    // two different keys. STALE_BRIEF_MS bounds the drift to three hours, which is plenty to cross
+    // midnight for any evening slot after 21:00.
+    dedupeKey: `brief:${localDateKey(runAtMillis, zone)}:${slot}`,
     ttlMs: slot === 'morning' ? MORNING_TTL_MS : EVENING_TTL_MS,
   })
   // Stamped on QUEUEING, not on sending. The row now exists and will go out on next contact if the
   // window is shut; a marker that waited for delivery would let tomorrow's run queue a second one.
-  markBriefSent(device.deviceId, slot, nowMillis)
+  markBriefSent(device.deviceId, slot, runAtMillis)
   log.info({ deviceId: device.deviceId, slot }, 'brief queued')
   return true
 }

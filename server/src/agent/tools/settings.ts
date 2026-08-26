@@ -56,19 +56,22 @@ export const settingsTools: ToolDef[] = [
             'When the owner GOES TO BED, as a range "HH:MM-HH:MM" local (earliest to latest), or ' +
             '"off". e.g. "02:00-04:00" for someone who turns in somewhere between 2 and 4am. This ' +
             'does NOT stop you messaging them — quietHours is the only thing that holds anything ' +
-            'back. It is context you judge against, and half of what sets their morning.',
+            'back. Optional: the wake window alone is a complete answer. What this adds is the ' +
+            'START of their quiet hours, so without it nothing is derived and the server default ' +
+            'window stands.',
         },
         wakeWindow: {
           type: 'string',
           description:
             'When the owner GETS UP, as a range "HH:MM-HH:MM" local, or "off". e.g. ' +
-            '"10:00-14:00". The END of this range is what "morning" means for them: it is the hour ' +
-            'any daily chase you schedule lands on, and setting it moves their brief there too ' +
-            'unless you set a brief time in the same call. It also sets their quiet hours — latest ' +
-            'bedtime to the point they are certainly up — unless they have named a window ' +
-            'themselves, which always wins. So "I am up at noon and in bed by two" is one call and ' +
-            'settles all of it. Save BOTH windows together — one on its own tells you nothing about ' +
-            'when their day starts and is ignored.',
+            '"10:00-14:00". This one range settles three different things, and they do NOT all use ' +
+            'the same edge. The END is what "morning" means for them and is the hour any daily ' +
+            'chase you schedule lands on. The START is where their brief goes, because a brief ' +
+            'opens their day rather than arriving in the middle of it — and it is also where their ' +
+            'quiet hours end, so nothing you schedule for their morning is silently pushed past it. ' +
+            'A brief time set in the same call wins, and so does a quiet window they name ' +
+            'themselves. Save this one even if they say nothing about bedtime: it is the half ' +
+            'everything reads. Never invent a bedtime to go with it.',
         },
         dailyMessageBudget: {
           type: 'number',

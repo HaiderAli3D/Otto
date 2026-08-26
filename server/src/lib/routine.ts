@@ -23,7 +23,16 @@ import { parseQuietHours } from './quietHours.js'
  */
 export type Window = { startMinute: number; endMinute: number }
 
-export type Routine = { bed: Window; wake: Window }
+/**
+ * `bedStated` is the difference between a bed window the OWNER gave and one this module supplied.
+ *
+ * Load-bearing rather than bookkeeping. Two things must never act on a bedtime nobody mentioned:
+ * `impliedQuietHours`, which would go silent from an invented hour, and `describeRoutine`, which
+ * would tell Otto a confident bedtime it will then be caught having made up. Everything else — the
+ * day end, the leave-by day start — wants a usable answer more than it wants a stated one, and gets
+ * the default's bed window without having to branch.
+ */
+export type Routine = { bed: Window; wake: Window; bedStated: boolean }
 
 /**
  * The routine assumed for a device that has never stated one.
@@ -36,24 +45,38 @@ export type Routine = { bed: Window; wake: Window }
 export const DEFAULT_ROUTINE: Routine = {
   bed: { startMinute: 23 * 60, endMinute: 1 * 60 },
   wake: { startMinute: 7 * 60, endMinute: 9 * 60 },
+  // `true` because this window is a real answer for the callers that read it (`wakingDayEndsAt` and
+  // friends), not a placeholder they must guard. Nothing ever derives quiet hours or prose from the
+  // default routine — both of those paths start from `routineFor`, which returns only stated ones.
+  bedStated: true,
 }
 
 /**
- * Parse the two stored specs into a routine, or null if either is absent/unusable.
+ * Parse the two stored specs into a routine, or null when the WAKE window is absent/unusable.
  *
- * All-or-nothing on purpose: a bed window with no wake window tells us nothing about when their day
- * starts, which is the only thing the rest of the system actually consumes. Half a routine that
- * silently behaved like a whole one would move every morning rung on the strength of a guess.
+ * The wake window alone is a routine, and the bed window is optional. This used to be
+ * all-or-nothing, which made "I get up at 7" a write-only sentence: the value was stored, Otto
+ * confirmed it, and then nothing read it. `routineFor` returned null, `schedulingRoutine` fell back
+ * to the default 09:00 day start, and `describeRoutine` was never called — so the wake time was
+ * absent from the next turn's prompt and Otto could not even recall having been told. Every
+ * consumer that matters reads the WAKE half (`dayStartHour`, `briefAnchorHour`), so a stated wake
+ * window is enough to be useful and refusing it was the whole bug.
+ *
+ * A missing bed window is filled from `DEFAULT_ROUTINE` and flagged with `bedStated: false`, so
+ * callers that need a usable day end get one and the two callers that must not invent a bedtime can
+ * tell. A bed window with no wake window is still null — it says nothing about when their day
+ * starts, which is the thing the rest of the system actually consumes.
  *
  * Reuses `parseQuietHours` rather than growing a second HH:MM parser — it already treats a
  * midnight-spanning range as the normal case (which a bedtime of 23:00–01:00 is), already rejects
  * `start === end`, and already never throws on text the owner typed into a chat message.
  */
 export function parseRoutine(bedSpec: string | null | undefined, wakeSpec: string | null | undefined): Routine | null {
-  const bed = parseQuietHours(bedSpec)
   const wake = parseQuietHours(wakeSpec)
-  if (bed === null || wake === null) return null
-  return { bed, wake }
+  if (wake === null) return null
+  const bed = parseQuietHours(bedSpec)
+  if (bed === null) return { bed: DEFAULT_ROUTINE.bed, wake, bedStated: false }
+  return { bed, wake, bedStated: true }
 }
 
 /**
@@ -74,6 +97,31 @@ export function dayStartHour(r: Routine): number {
 
 export function dayStartMinute(r: Routine): number {
   return r.wake.endMinute % 60
+}
+
+/**
+ * The wall clock the owner's BRIEF lands on — the START of the wake window.
+ *
+ * Deliberately the opposite edge from `dayStartHour`, and the two must not be re-merged. The
+ * distinction is which side of the coin flip each one is willing to be on:
+ *
+ * - `dayStartHour` is Otto picking an instant for ITSELF with nothing to anchor to — a daily tail
+ *   rung, a catch-up. It reads the END because a self-chosen chase that lands while they are still
+ *   asleep is simply wasted, and there is no cost to waiting until they are certainly up.
+ * - The brief is a STANDING APPOINTMENT the owner is promised, and it opens their day. Landing it at
+ *   the latest hour they might rise means someone who says "I'm up between 7 and 9" is briefed at
+ *   09:00 — two hours into a morning the brief was supposed to start. They can read it late; they
+ *   cannot read it early.
+ *
+ * Sharing one edge is what made a perfectly ordinary sentence move the brief two hours and read as
+ * Otto breaking. See `impliedQuietHours`, which ends on this same edge for the same reason.
+ */
+export function briefAnchorHour(r: Routine): number {
+  return Math.floor(r.wake.startMinute / 60)
+}
+
+export function briefAnchorMinute(r: Routine): number {
+  return r.wake.startMinute % 60
 }
 
 /** The hour and minute of the LATEST bedtime — the edge at which their waking day ends. */
@@ -100,19 +148,27 @@ export function wakingDayEndsAt(r: Routine, zone: string, nowMillis: number): nu
 }
 
 /**
- * The quiet window a routine IMPLIES, in storage form (`"02:00-12:00"`), or null if degenerate.
+ * The quiet window a routine IMPLIES, in storage form (`"02:00-07:00"`), or null when it cannot say.
  *
- * Latest bedtime to the point they are certainly up. Both edges mirror `dayStartHour`'s reasoning
- * above rather than inventing their own:
+ * Latest bedtime to the EARLIEST they might be up:
  *
  * - START at `bed.end`, the LATEST they go to bed, because going silent at the earliest would mute
  *   an hour they are reliably awake and happy to be reached in.
- * - END at `wake.end`, the same edge `dayStartHour` reads, because a window that lifted at the
- *   EARLIEST they might be up would let Otto speak first into a coin flip. Someone who says they
- *   are up at noon means nothing before noon.
+ * - END at `wake.start`, the same edge `briefAnchorHour` reads. This used to be `wake.end`, on the
+ *   argument that lifting at the earliest would let Otto speak first into a coin flip. That
+ *   argument was wrong in one direction and expensive in the other. Quiet hours are not only a
+ *   licence to speak — `planRungs` drops any warning the window would push past its own deadline,
+ *   so an owner who said "up between 7 and 9" silently lost EVERY advance warning on an 08:00
+ *   deadline: ten rungs, all deferred to 09:00, all after the thing. Ending at the earliest they
+ *   might be up costs at most one message landing while they are still dozing; ending at the latest
+ *   cost them the entire run-up on anything due in their own morning.
  *
- * Null on the degenerate case — `parseQuietHours` rejects `start === end` as ambiguous between a
- * zero-length window and a 24-hour one, and nobody means either. Checked by parsing back what we
+ * Null when the bed window was never stated (`bedStated: false`), because there is nothing to start
+ * the window from and `DEFAULT_ROUTINE`'s bedtime is this module's assumption rather than theirs.
+ * A wake-only routine still sets the day start and the brief; it just does not silence anything.
+ *
+ * Also null on the degenerate case — `parseQuietHours` rejects `start === end` as ambiguous between
+ * a zero-length window and a 24-hour one, and nobody means either. Checked by parsing back what we
  * just formatted rather than by comparing minutes, so this can never disagree with the parser that
  * everything downstream actually uses.
  *
@@ -120,7 +176,8 @@ export function wakingDayEndsAt(r: Routine, zone: string, nowMillis: number): nu
  * for the owner, and feeding it back to `parseQuietHours` would silently produce null.
  */
 export function impliedQuietHours(r: Routine): string | null {
-  const spec = formatWindow({ startMinute: r.bed.endMinute, endMinute: r.wake.endMinute })
+  if (!r.bedStated) return null
+  const spec = formatWindow({ startMinute: r.bed.endMinute, endMinute: r.wake.startMinute })
   return parseQuietHours(spec) === null ? null : spec
 }
 
@@ -144,9 +201,22 @@ export function formatWindow(w: Window): string {
  */
 export function describeRoutine(r: Routine): string {
   const dayStart = hhmm(r.wake.endMinute)
+  // The bed half is omitted entirely when they never gave one, rather than rendered from
+  // `DEFAULT_ROUTINE`. `parseRoutine` fills that window so the scheduling callers have a usable day
+  // end, but stating it here would have Otto tell the owner a bedtime they never mentioned — and
+  // then act on it, and then be caught having invented it. Saying less is the only honest option.
+  const sleep = r.bedStated
+    ? [
+        `the owner goes to bed between ${hhmm(r.bed.startMinute)} and ${hhmm(r.bed.endMinute)}`,
+        `and gets up between ${hhmm(r.wake.startMinute)} and ${hhmm(r.wake.endMinute)}.`,
+      ]
+    : [
+        `the owner gets up between ${hhmm(r.wake.startMinute)} and ${hhmm(r.wake.endMinute)}.`,
+        `They have not said when they go to bed — do not assume, and ask if it matters.`,
+      ]
   return [
-    `Routine: the owner goes to bed between ${hhmm(r.bed.startMinute)} and ${hhmm(r.bed.endMinute)}`,
-    `and gets up between ${hhmm(r.wake.startMinute)} and ${hhmm(r.wake.endMinute)}.`,
+    `Routine:`,
+    ...sleep,
     `Their day starts at ${dayStart} — that is what "morning" means for them, and any hour inside`,
     `their sleep is the middle of their night however ordinary it looks on a clock.`,
     `Nothing stops you reaching them at any hour; judge each one yourself.`,

@@ -15,12 +15,23 @@ export type DeviceSettings = typeof deviceSettings.$inferSelect
  *
  * `updatedAt: 0` rather than `Date.now()`: a synthesised row must not claim it was just written.
  */
+/**
+ * The morning brief's out-of-the-box time, named rather than repeated.
+ *
+ * Three places have to agree on it: the column default in schema.ts, the synthesised row below, and
+ * `setPreferences`, which treats "still exactly the default" as "the owner has never chosen a brief
+ * time" and therefore as safe to move when they state a routine. A fourth literal 7 drifting from
+ * the other three would silently turn a brief the owner had chosen into one Otto felt free to move.
+ */
+export const DEFAULT_BRIEF_HOUR = 7
+export const DEFAULT_BRIEF_MINUTE = 0
+
 function defaults(deviceId: string): DeviceSettings {
   return {
     deviceId,
     briefEnabled: true,
-    briefHour: 7,
-    briefMinute: 0,
+    briefHour: DEFAULT_BRIEF_HOUR,
+    briefMinute: DEFAULT_BRIEF_MINUTE,
     eveningBriefEnabled: false,
     eveningBriefHour: 21,
     eveningBriefMinute: 0,
