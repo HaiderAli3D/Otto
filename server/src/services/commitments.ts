@@ -154,9 +154,15 @@ export async function commitmentAt(device: Device, atMillis: number): Promise<Co
  * The one sentence the post-event check-in sends.
  *
  * Deterministic, like `nudgeTextFor` — this fires from a scheduler on a machine that may have no
- * working model credentials, and it has to state the assumption plainly enough that "no" is an
- * obvious answer. It is the only place Otto admits to having assumed something.
+ * working model credentials, and it has to be answerable in one word.
+ *
+ * It ASKS. It used to announce that the reminder had been marked done, and nothing in that path
+ * consulted the timing kind while `createReminder` defaults every dated reminder to `deadline` — so
+ * "send the invoice by 16:00" plus a 16:00 meeting closed the invoice and invited the owner to
+ * correct it. Being in a meeting when something was due is evidence it did not get done. The
+ * question costs the same single message, cannot be wrong, and leaves the reminder open so silence
+ * keeps the ladder running rather than ending it.
  */
-export function assumedAttendedText(title: string, commitmentSummary: string): string {
-  return `Marked "${title}" done — you were at ${commitmentSummary}. Tell me if you weren't.`
+export function attendedCheckInText(title: string, commitmentSummary: string): string {
+  return `You were at ${commitmentSummary} when "${title}" was due — did that get done?`
 }

@@ -30,7 +30,7 @@ import { enqueueOutbound, nudgeHistory } from '../src/services/outbox.js'
 import { createReminder, getReminder, leadCountFor } from '../src/services/reminders.js'
 import { updateSettings } from '../src/services/settings.js'
 import { reminderEvidence } from '../src/services/signals.js'
-import { TACK_ON_COOLDOWN_MS, TACK_ON_HORIZON_MS, tackOnCandidate } from '../src/services/tackOn.js'
+import { TACK_ON_COOLDOWN_MS, TACK_ON_HORIZON_MS, chaseInReply, tackOnCandidate } from '../src/services/tackOn.js'
 import { fakeModel, fnCall, say } from './fakeModel.js'
 import { makeDevice } from './helpers.js'
 
@@ -351,8 +351,17 @@ describe('chase_in_reply', () => {
     expect(parsed.reminder).toContain('only reaches them if you actually say it')
   })
 
-  it('supersedes a nudge already queued for the same reminder', async () => {
-    // What makes "replace" true even when a nudge is sitting PENDING because the window was shut.
+  it('leaves a nudge that is already queued alone rather than dropping it', async () => {
+    // This used to call `supersedePending`, so that a reply saying the thing REPLACED a message
+    // waiting to say it. The trouble is the ordering: the rung is spent, and the queued row dropped,
+    // before the reply exists — and nothing verifies the model then actually mentions it. A turn
+    // that called the tool and wrote a reply without the tack-on left the owner with no message at
+    // all, the rung burned, and `nagCount` claiming they had been asked.
+    //
+    // Dropping a message that is already written and waiting is the one irreversible half of this
+    // operation, and it is not worth what it buys: a queued nudge saying the same thing is a
+    // repetition, which the owner can shrug off; silence about something they asked to be chased on
+    // is the failure this whole feature exists to prevent.
     const { device, reminderId } = await ready('dev_t18')
     enqueueOutbound({
       waUserId: device.whatsappNumber!,
@@ -371,7 +380,30 @@ describe('chase_in_reply', () => {
     __setModelClient(client)
     await runAgentTurn({ waUserId: device.whatsappNumber!, device, content: 'hello' })
 
-    expect(nudgeHistory(reminderId, 10)).toHaveLength(0)
+    expect(nudgeHistory(reminderId, 10)).toHaveLength(1)
+  })
+
+  it('refuses a reminder that is not this turn\'s tack-on', async () => {
+    // Every clause in `tackOnCandidate` removes a case where tacking on would ADD a message rather
+    // than move one, and none of it was enforced here — the tool took any open reminder id and
+    // spent its rung, so all of it rested on the model picking the id it had been given three
+    // thousand tokens earlier.
+    // A device id of its own: this file shares one database across the whole suite, and
+    // `reachableDevice` derives the WhatsApp number from the id, so reusing one leaks reminders
+    // into the next test's candidate set.
+    const { device, reminderId } = await ready('dev_t19b')
+    const other = await createReminder(device, {
+      title: 'something else entirely',
+      dueAtMillis: Date.now() + 30 * 60_000,
+    })
+
+    const res = chaseInReply(device, other.reminderId)
+
+    expect('error' in res).toBe(true)
+    expect((res as { error: string }).error).toContain("not this turn's tack-on")
+    // Neither ladder moved: not the one it refused, and not the one it was actually offered.
+    expect(getReminder(other.reminderId)!.nagCount).toBe(0)
+    expect(getReminder(reminderId)!.nagCount).toBe(1)
   })
 
   it('refuses a second call in the same reply, and moves only one reminder', async () => {

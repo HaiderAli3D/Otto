@@ -206,6 +206,22 @@ export const reminders = sqliteTable(
      * DST gap. Nullable; falls back to `due_at_millis` for rows written before it.
      */
     seriesAnchorMillis: integer('series_anchor_millis'),
+    /**
+     * The quiet window that was in force when this ladder was PLANNED, in storage form.
+     *
+     * `planRungs` drops any lead rung the window would push past its own deadline, and it read that
+     * window LIVE on every re-entry — so the surviving set, and therefore the mapping from
+     * `nag_count` to a rung, moved whenever the owner's quiet hours changed. The comment above that
+     * filter claims the mapping "stays stable across every re-entry"; it did not. Changing quiet
+     * hours re-indexed every live ladder in the database, replaying warnings after a deadline or
+     * thinning the chase that follows it.
+     *
+     * Nullable, and null means "use the live window" — which is exactly the old behaviour, so every
+     * reminder written before this column keeps the ladder it already had and nothing re-indexes on
+     * deploy. Only the PLAN is pinned: whether a rung may be DELIVERED right now is still judged
+     * against the owner's current window, in `runNudge`, where it belongs.
+     */
+    planQuietHours: text('plan_quiet_hours'),
     nagPolicy: text('nag_policy').notNull().default('gentle'), // off | gentle | persistent | hard | relentless
     // When this schedule was last PLANNED — creation, a recurrence roll-forward, or any edit that
     // moved the due time. Lead rungs are pruned against this rather than against the current clock,

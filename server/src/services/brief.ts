@@ -282,9 +282,24 @@ function remindersForBrief(open: Reminder[]): Reminder[] {
   return [...open].sort(byDue).slice(0, MAX_REMINDERS)
 }
 
-/** Is this rung about to fire in the same breath as the brief? One predicate, two callers. */
+/**
+ * Is this rung about to fire in the same breath as the brief? One predicate, two callers.
+ *
+ * The rung sitting on the owner's OWN due time is excluded, and that instant is the one thing the
+ * rest of this codebase refuses to move: `nextNagAt` exempts it from quiet hours, `runNudge` exempts
+ * it again at delivery, and the persona promises it out loud. This function was the one place it was
+ * moved anyway — a reminder due at 07:05 under an 07:00 brief was pushed to 07:35, half an hour
+ * after the moment the owner picked, to avoid two messages arriving together.
+ *
+ * The trade is deliberate: the brief and that chase can now land in the same tick, which is exactly
+ * the burst the hold exists to prevent. A burst of two is a smaller failure than a time the owner
+ * chose being quietly wrong, and it is the only kind of collision left — `lib/spread.ts` handles the
+ * structural ones.
+ */
 function rungIsAboutNow(r: Reminder, nowMillis: number): boolean {
-  return r.nextNagAtMillis !== null && r.nextNagAtMillis <= nowMillis + COVERED_BY_BRIEF_MS
+  if (r.nextNagAtMillis === null) return false
+  if (r.dueAtMillis !== null && r.nextNagAtMillis === r.dueAtMillis) return false
+  return r.nextNagAtMillis <= nowMillis + COVERED_BY_BRIEF_MS
 }
 
 /**

@@ -21,8 +21,12 @@ import {
   resolvedPlanFor,
   updateReminder,
 } from '../src/services/reminders.js'
+import { getDevice, setTimezone } from '../src/services/devices.js'
 import { updateSettings } from '../src/services/settings.js'
 import { makeDevice } from './helpers.js'
+
+/** Explicit and named, so nothing here can pass or fail by the zone the suite happens to run in. */
+const ZONE = 'Europe/London'
 
 /**
  * Timing kinds and `update_reminder` at the service level — the half of the ladder work that only
@@ -261,6 +265,69 @@ describe('updateReminder', () => {
     const after = getReminder(r.reminderId)!
     expect(leadCountFor(device, after)).toBeGreaterThan(0)
     expect(after.nextNagAtMillis).toBeLessThan(after.dueAtMillis!)
+  })
+
+  it('re-issues the run-up when a deadline is pushed out after several warnings', async () => {
+    // `plannedAtMillis` is re-anchored on a replan and `nagCount` was not, so the plan was laid out
+    // again from scratch while the index into it stayed where the old ladder had got to.
+    // `rungInstant` maps index N past `leadAt` and into `chase`, so an index that used to point at a
+    // post-due chase rung pointed past the whole new run-up AND past the new due instant: push an
+    // overdue task from Friday to Monday after eight warnings and the first word arrived ten
+    // minutes AFTER the new deadline, with nothing at all beforehand.
+    const device = makeDevice('dev_rt_push')
+    setTimezone(device.deviceId, ZONE)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    const friday = DateTime.fromISO('2026-09-04T17:00', { zone: ZONE }).toMillis()
+    const r = await createReminder(getDevice(device.deviceId)!, {
+      title: 'the report',
+      dueAtMillis: friday,
+      timing: 'deadline',
+    })
+    // Eight warnings have gone out; the ladder is deep into its run-up.
+    db.update(reminders).set({ nagCount: 8 }).where(eq(reminders.reminderId, r.reminderId)).run()
+
+    const monday = DateTime.fromISO('2026-09-07T17:00', { zone: ZONE }).toMillis()
+    const res = await updateReminder(getDevice(device.deviceId)!, r.reminderId, { dueAtMillis: monday })
+    expect(res.ok).toBe(true)
+
+    const after = getReminder(r.reminderId)!
+    // The next thing said lands BEFORE the new deadline, not after it.
+    expect(after.nextNagAtMillis).not.toBeNull()
+    expect(after.nextNagAtMillis!).toBeLessThanOrEqual(monday)
+    // And the evidence stays honest about how often they have actually been asked.
+    expect(after.nagCount).toBe(8)
+  })
+
+  it('plans a ladder against the quiet window in force when it was planned', async () => {
+    // `planRungs` drops any lead rung the window would push past its own deadline, and it read that
+    // window LIVE on every re-entry — so changing quiet hours re-indexed every live ladder in the
+    // database, replaying warnings after a deadline or thinning the chase behind it. The comment
+    // above that filter claimed the mapping stayed stable across re-entry; it did not.
+    const device = makeDevice('dev_rt_pin')
+    setTimezone(device.deviceId, ZONE)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    const due = DateTime.fromISO('2026-09-04T08:00', { zone: ZONE }).toMillis()
+    const r = await createReminder(getDevice(device.deviceId)!, {
+      title: 'the report',
+      dueAtMillis: due,
+      timing: 'deadline',
+    })
+    const plannedLeadCount = leadCountFor(getDevice(device.deviceId)!, getReminder(r.reminderId)!)
+    expect(plannedLeadCount).toBeGreaterThan(0)
+
+    // The owner widens their quiet hours to cover the entire run-up.
+    updateSettings(device.deviceId, { quietHours: '20:00-09:00' })
+
+    // The ladder that is already running is unchanged: same rungs, same meaning for nagCount.
+    expect(leadCountFor(getDevice(device.deviceId)!, getReminder(r.reminderId)!)).toBe(plannedLeadCount)
+
+    // A reminder created AFTER the change is planned against the new window, as it should be.
+    const later = await createReminder(getDevice(device.deviceId)!, {
+      title: 'the other report',
+      dueAtMillis: due,
+      timing: 'deadline',
+    })
+    expect(leadCountFor(getDevice(device.deviceId)!, getReminder(later.reminderId)!)).toBeLessThan(plannedLeadCount)
   })
 
   it('never silently ends a ladder, even when the new one is shorter than the old', async () => {

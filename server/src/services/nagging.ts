@@ -8,10 +8,10 @@ import { log } from '../lib/log.js'
 import { deferPastQuietHours } from '../lib/quietHours.js'
 import { armAlarm } from './alarms.js'
 import { budgetAllows, budgetResetsAt } from './budget.js'
-import { assumedAttendedText, commitmentAt } from './commitments.js'
+import { attendedCheckInText, commitmentAt } from './commitments.js'
 import { getDevice } from './devices.js'
 import { enqueueJob } from './jobs.js'
-import { enqueueAndTryFlush, supersedePending } from './outbox.js'
+import { enqueueAndFlushRow, enqueueAndTryFlush } from './outbox.js'
 import { completeReminder, getReminder, ladderParams, leadCountFor, resolvedPlanFor } from './reminders.js'
 import { nagQuietHours } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
@@ -234,32 +234,53 @@ export async function runNudge(reminderId: string): Promise<void> {
     const wasHeldByThisGate =
       during !== null && deferPastQuietHours(during.endMillis, device.timezone, quiet) === scheduledAt
     if (during !== null && wasHeldByThisGate && during.endMillis <= now) {
-      supersedePending(reminderId)
-      // completeReminder, NOT a hand-rolled close. It releases the rented alarm so a ring:true
-      // reminder does not still go off, cancels the queued nudge jobs, withdraws the lock-screen
-      // notification, and rolls a recurring reminder forward instead of ending the series.
-      await completeReminder(device, reminderId)
-      // Stamped to the completion's OWN instant, read back rather than recomputed, so the two are
-      // exactly equal. `services/signals.ts` counts the record on `completedAtMillis`, and an
-      // assumption is not an achievement — THE_RECORD says never to round it up.
-      const closed = getReminder(reminderId)
-      if (closed?.completedAtMillis != null) {
-        db.update(reminders)
-          .set({ assumedAttendedAtMillis: closed.completedAtMillis, updatedAt: Date.now() })
-          .where(eq(reminders.reminderId, reminderId))
-          .run()
-      }
-      await enqueueAndTryFlush({
+      // ASK. Do not close.
+      //
+      // This used to call `completeReminder` on the assumption that a reminder due inside a meeting
+      // was a thing the meeting WAS — and nothing in the path ever consulted `timingKindOf`, while
+      // `createReminder` defaults every dated reminder to `deadline`. So "send the invoice by 16:00"
+      // plus a protected 16:00 meeting marked the invoice done, with a sentence inviting the owner
+      // to correct it. For an `appointment` the assumption is sound: the dentist at four IS the
+      // four o'clock entry. For a deadline it is backwards — being stuck in a meeting when
+      // something was due is evidence it did NOT get done, and the one message that would have
+      // said so was spent announcing the opposite.
+      //
+      // A question costs the same one message and cannot be wrong. The reminder stays OPEN, so if
+      // they say nothing the ladder simply carries on chasing, which is the safe direction.
+      //
+      // The rung IS spent: a question is a message that reached them and can be answered, which is
+      // this codebase's rule for when a rung is spent (see the deferrals above, which all defer
+      // precisely BECAUSE nobody was sent anything). `assumedAttendedAtMillis` records that the
+      // question was asked, so the writer and the record can tell this apart from an ordinary chase.
+      const asked = await enqueueAndFlushRow({
         waUserId,
         deviceId: device.deviceId,
         kind: 'nudge',
-        body: assumedAttendedText(before.title, during.summary),
+        body: attendedCheckInText(before.title, during.summary),
         reminderId,
         dedupeKey: `attended:${reminderId}:${during.startMillis}`,
       })
+      if (asked.retired) {
+        log.warn({ reminderId }, 'commitment check-in was retired undelivered; leaving the ladder alone')
+        return
+      }
+      const nextAfterAsking = nextNagAt(ladderParams(device, before, before.nagCount + 1, now))
+      db.update(reminders)
+        .set({
+          nagCount: sql`${reminders.nagCount} + 1`,
+          lastNaggedAtMillis: now,
+          nextNagAtMillis: nextAfterAsking,
+          assumedAttendedAtMillis: now,
+          updatedAt: now,
+        })
+        .where(and(eq(reminders.reminderId, reminderId), eq(reminders.nextNagAtMillis, scheduledAt)))
+        .run()
+      if (nextAfterAsking !== null) {
+        enqueueJob('nudge', nextAfterAsking, { reminderId, deviceId: device.deviceId })
+      }
       log.info(
         { reminderId, commitment: during.summary },
-        'reminder was due inside a commitment; closed as assumed-attended',
+        'reminder was due inside a commitment; asked whether it got done rather than assuming it did',
       )
       return
     }
@@ -287,6 +308,22 @@ export async function runNudge(reminderId: string): Promise<void> {
     log.debug({ reminderId }, 'nudge claim lost; another path handled it')
     return
   }
+
+  // ENQUEUED HERE, in the same synchronous block as the claim, and NOT after the sends below.
+  //
+  // The claim writes `nextNagAtMillis = nextRung`, but the job that would act on it used to be
+  // enqueued only at the very end of this function — after `writeNudge` (up to two 15s model calls)
+  // and `enqueueAndFlushRow` (up to ~50s of Graph retries). `index.ts` handles SIGTERM by awaiting
+  // `app.close()` and not the detached scheduler tick, so a `fly deploy` inside that window left the
+  // reminder pointing at a rung no job would ever act on: the surviving old job re-runs, sees a rung
+  // that has moved into the future, and `loop.ts` deletes it. The ladder stalls until the morning
+  // brief happens to heal it, and permanently if the brief is off or the window was shut at the time
+  // — which is exactly when chasing matters.
+  //
+  // This is the ordering `services/alarms.ts` already documents for the arm-ack watchdog ("enqueue
+  // the durable watchdog BEFORE awaiting the push"). A duplicate job row is harmless: `runNudge`
+  // no-ops on a rung that has already moved, three lines from the top.
+  if (nextRung !== null) enqueueJob('nudge', nextRung, { reminderId, deviceId: device.deviceId })
 
   if (!waUserId) {
     log.warn({ reminderId }, 'no WhatsApp number linked; cannot nudge')
@@ -338,5 +375,4 @@ export async function runNudge(reminderId: string): Promise<void> {
     }
   }
 
-  if (nextRung !== null) enqueueJob('nudge', nextRung, { reminderId, deviceId: device.deviceId })
 }

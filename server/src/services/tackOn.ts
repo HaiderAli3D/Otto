@@ -6,7 +6,6 @@ import { inQuietHours } from '../lib/quietHours.js'
 import { nextNagAt } from '../lib/nagLadder.js'
 import type { Device } from './devices.js'
 import { cancelNudges, enqueueJob } from './jobs.js'
-import { supersedePending } from './outbox.js'
 import { ladderParams, leadCountFor, listReminders, type Reminder } from './reminders.js'
 import { quietHoursFor, quietNow } from './settings.js'
 import { reminderEvidence } from './signals.js'
@@ -180,6 +179,29 @@ export function chaseInReply(device: Device, reminderId: string): ChaseInReplyRe
     }
   }
 
+  // IT MUST BE THIS TURN'S CANDIDATE, and the tool enforces that rather than asking the model to.
+  //
+  // Every clause in `tackOnCandidate` removes a case where tacking on would ADD a message instead of
+  // moving one: nothing scheduled means nothing to replace; the rung has to be within six hours; it
+  // is never the first thing Otto ever says about a reminder, because that instant is the one
+  // `timing` exists to choose. None of that was enforced here — the tool took any open reminder id
+  // and spent its rung — so all of it rested on the model picking the id it was given, three
+  // thousand tokens earlier in the prompt, every time.
+  //
+  // Recomputed rather than compared against what the prompt was built from: the two are one line
+  // apart in `renderTackOn`, and recomputing is what makes a rung fired in between a refusal rather
+  // than a race.
+  const candidate = tackOnCandidate(device, now)
+  if (candidate === null || candidate.reminder.reminderId !== reminderId) {
+    return {
+      error:
+        `"${r.title}" is not this turn's tack-on — leave it out of this reply. ` +
+        (candidate === null
+          ? 'There is nothing to tack on this turn.'
+          : `The one you were given is "${candidate.reminder.title}" [${candidate.reminder.reminderId}].`),
+    }
+  }
+
   const nextRung = nextNagAt(ladderParams(device, r, r.nagCount + 1, now))
 
   // The same guarded claim `runNudge` makes, against the same three columns, so the two paths are
@@ -206,11 +228,17 @@ export function chaseInReply(device: Device, reminderId: string): ChaseInReplyRe
     return { error: `"${r.title}" was chased by something else just now — leave it out of this reply` }
   }
 
-  // The idiom from brief.ts: cancel the job row for the rung just spent, supersede a nudge already
-  // queued but not yet delivered, and enqueue the next one. `supersedePending` is the half that
-  // makes "replace" true even when a nudge is sitting PENDING because the window was shut.
+  // The idiom from brief.ts: cancel the job row for the rung just spent and enqueue the next one.
+  //
+  // `supersedePending` is DELIBERATELY NOT here any more. It retired any nudge already queued but
+  // not yet delivered, on the grounds that the reply replaces it — but this tool spends its rung
+  // before the reply exists, and nothing verifies the model then actually mentions the thing. So a
+  // turn that called the tool and then wrote a reply without the tack-on left the owner with no
+  // message at all: the rung burned, the queued nudge dropped, and `nagCount` claiming they had
+  // been asked. Dropping a message that is already written and waiting is the one irreversible half
+  // of this operation, and it is not worth the duplicate it avoids — a queued nudge saying the same
+  // thing is a repetition, which is recoverable; silence is not.
   cancelNudges(reminderId)
-  supersedePending(reminderId)
   if (nextRung !== null) enqueueJob('nudge', nextRung, { reminderId, deviceId: device.deviceId })
   log.info({ reminderId, rung: r.nagCount + 1, nextRung }, 'chase moved into a reply')
 
