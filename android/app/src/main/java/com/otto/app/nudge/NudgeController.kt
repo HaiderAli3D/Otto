@@ -40,6 +40,9 @@ class NudgeController @Inject constructor(
             return
         }
 
+        // Read BEFORE the upsert replaces it — `repository.show` returns only the new row, and the
+        // question is whether this rung says anything the owner has not already read.
+        val previous = repository.getById(command.nudgeId)
         val entity = repository.show(
             nudgeId = command.nudgeId,
             title = command.title,
@@ -52,7 +55,10 @@ class NudgeController @Inject constructor(
         )
         // Any earlier re-show for this nudge is now stale — the server has said something newer.
         scheduler.cancel(entity.notificationId)
-        notifications.show(entity)
+        notifications.show(
+            entity,
+            reAlert = NudgeTiming.shouldReAlert(previous?.body, previous?.level, entity.body, entity.level),
+        )
         refreshSummary()
         OttoLog.i("Showed nudge ${entity.nudgeId} at ${command.level}")
     }
@@ -155,6 +161,19 @@ class NudgeController @Inject constructor(
     private suspend fun applyDecision(nudge: NudgeEntity) {
         when (NudgeTiming.classify(nudge.showAtMillis, nudge.expiresAtMillis, clock.nowMillis())) {
             NudgeTiming.ShowDecision.SHOW_NOW -> {
+                // "Not today" MEANS not today, and a reboot is not a new day.
+                //
+                // DEFERRED is a live state — it stays in `getLive()` so the row survives and the
+                // server can decide the next move, which is what pressing Later hands over. But
+                // `showAtMillis` is when it was ORIGINALLY due, so it is always in the past by the
+                // time anyone deferred it, and this branch read that as "due now": every boot, every
+                // app update, every time recovery ran, the thing they had pushed away came back and
+                // was flipped to ACTIVE. Snooze is unaffected — it moves `showAtMillis` forward, so
+                // an elapsed snooze genuinely is due and still lands here.
+                if (nudge.state == NudgeState.DEFERRED) {
+                    OttoLog.d("Nudge ${nudge.nudgeId} was deferred; leaving it off screen")
+                    return
+                }
                 // Back to ACTIVE: a snoozed nudge being re-shown is on screen again, and the
                 // summary counts what is on screen.
                 repository.resolve(nudge.nudgeId, NudgeState.ACTIVE, DeviceEvents.NUDGE_SHOWN)

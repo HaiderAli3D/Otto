@@ -36,6 +36,34 @@ object NudgeTiming {
     }
 
     /**
+     * Should a replacement notification make a sound, or update the line in silence?
+     *
+     * Every rung of a chase re-posts onto the SAME notification id — that is what makes a ladder
+     * usable, rung six updating one line instead of stacking six the owner has to clear. But
+     * Android suppresses sound and vibration for an update to a notification that is still showing,
+     * and `setOnlyAlertOnce(true)` was hardcoded, so it suppressed them for EVERY rung after the
+     * first. Otto escalates six or seven times through a day and the phone buzzed once, at the
+     * earliest and least urgent rung, while the server logged seven successful deliveries.
+     *
+     * `setTimeoutAfter` is refreshed from the server's six-hour nudge TTL on every rung and the
+     * widest gap in `trigger x hard` is four hours, so the previous notification is always still
+     * showing. There is no case where this resolved itself.
+     *
+     * Re-alert when the words CHANGED or the level went up, and not otherwise. A rung that says
+     * something new is worth a buzz; a boot restore re-posting a body the owner has already read is
+     * not, and neither is the summary being refreshed underneath them.
+     *
+     * Pure and Android-free for the reason the rest of this object is: `NudgeNotifications` touches
+     * `NotificationCompat` and cannot be tested on the JVM at all, so the DECISION lives here where
+     * it can be, and that class stays a dumb applier of the boolean.
+     */
+    fun shouldReAlert(previousBody: String?, previousLevel: String?, body: String, level: String): Boolean {
+        if (previousBody == null) return true
+        if (previousBody != body) return true
+        return NudgeLevel.fromToken(level).ordinal > NudgeLevel.fromToken(previousLevel ?: level).ordinal
+    }
+
+    /**
      * When a snooze should bring a nudge back.
      *
      * Clamped rather than trusted: `snoozeMinutes` arrives from the server as a string in an FCM

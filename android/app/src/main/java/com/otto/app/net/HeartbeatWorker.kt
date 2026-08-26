@@ -1,7 +1,9 @@
 package com.otto.app.net
 
 import android.app.NotificationManager
+import android.app.AlarmManager
 import android.content.Context
+import android.os.Build
 import androidx.core.app.NotificationManagerCompat
 import androidx.hilt.work.HiltWorker
 import androidx.work.BackoffPolicy
@@ -44,6 +46,20 @@ class HeartbeatWorker @AssistedInject constructor(
 ) : CoroutineWorker(appContext, params) {
 
     /** Which of Otto's channels the owner has turned all the way down. */
+    /**
+     * Can this device still schedule an EXACT alarm?
+     *
+     * Inline rather than through PermissionsManager, matching `mutedChannels()` directly below: this
+     * worker takes only what it needs and the call is one system-service read. Mirrors
+     * `AlarmSchedulerImpl.canScheduleExact`, which is the thing that actually refuses.
+     */
+    private fun exactAlarmsPermitted(): Boolean =
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            true
+        } else {
+            applicationContext.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
+        }
+
     private fun mutedChannels(): List<String> {
         val manager = applicationContext.getSystemService(NotificationManager::class.java) ?: return emptyList()
         return NUDGE_CHANNELS.filter { id ->
@@ -65,6 +81,7 @@ class HeartbeatWorker @AssistedInject constructor(
                     timezone = java.util.TimeZone.getDefault().id,
                     notificationsEnabled = NotificationManagerCompat.from(applicationContext).areNotificationsEnabled(),
                     mutedChannels = mutedChannels(),
+                    exactAlarmsPermitted = exactAlarmsPermitted(),
                 ),
             )
             if (response.isSuccessful) {

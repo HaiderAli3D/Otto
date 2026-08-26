@@ -65,6 +65,16 @@ data class HeartbeatRequest(
      */
     val notificationsEnabled: Boolean? = null,
     val mutedChannels: List<String>? = null,
+    /**
+     * Can this device still schedule an EXACT alarm?
+     *
+     * The one health signal the server cannot infer and cannot live without. `registerWithOs`
+     * refuses silently when the grant is gone — the row stays ARMED in Room so a later boot can
+     * retry it, which is right — and the alarm simply never rings. Reported here rather than as an
+     * alarm event because it is a property of the DEVICE, true or false between alarms, and the
+     * server wants to warn about it before the next one is set rather than after it failed.
+     */
+    val exactAlarmsPermitted: Boolean? = null,
 )
 
 /**

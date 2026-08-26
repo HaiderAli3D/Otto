@@ -35,21 +35,32 @@ class AlarmController @Inject constructor(
         allowWhileIdle: Boolean,
     ): FireDecision {
         val decision = AlarmTiming.classify(triggerAtMillis, clock.nowMillis())
+        var registered = true
         // Capture a mid-ring re-arm (agent reschedule via ARM_ALARM, or SYNC) BEFORE the upsert
         // overwrites the RANG row, so we can silence the now-orphaned ring afterwards (AF1).
         val wasRinging = repository.getById(alarmId)?.state == AlarmState.RANG
         val entity = repository.upsertArmed(alarmId, triggerAtMillis, label, allowWhileIdle)
         when (decision) {
             // A past-but-within-grace trigger is handled by the OS firing immediately.
-            FireDecision.ARM, FireDecision.FIRE_NOW -> registerWithOs(entity)
+            FireDecision.ARM, FireDecision.FIRE_NOW -> registered = registerWithOs(entity)
             FireDecision.MISSED -> {
                 repository.markState(alarmId, AlarmState.MISSED)
                 OttoLog.i("Alarm $alarmId older than grace window; marked MISSED, not ringing")
             }
+            // `classify` never returns it — it is a registration outcome, not a timing one, and it
+            // is produced below rather than consumed here.
+            FireDecision.NOT_REGISTERED -> Unit
         }
         // The row is no longer RANG; tell the ring service to re-check Room and stop the sound the
         // previous ring left playing (mirrors cancel()'s wasRinging refresh, bug_003 / AF1).
         if (wasRinging) RingService.refresh(context)
+        if (!registered) {
+            // NOT_REGISTERED, not ARM. The server treats an ARMED report as the delivery ack that
+            // cancels its watchdog, so reporting one here for an alarm the OS refused would make a
+            // silent failure look like a success on both sides.
+            OttoLog.w("Armed $alarmId in Room but the OS refused it; reporting NOT_REGISTERED")
+            return FireDecision.NOT_REGISTERED
+        }
         OttoLog.i("Armed $alarmId -> $decision")
         return decision
     }
@@ -135,18 +146,36 @@ class AlarmController @Inject constructor(
         OttoLog.i("Re-armed $reArmed of ${armed.size} alarm(s); reclassified $missedRinging stuck-RANG as MISSED")
     }
 
-    private fun registerWithOs(entity: AlarmEntity) {
+    /**
+     * Hand the alarm to the OS. Returns whether it actually got there.
+     *
+     * THE RETURN VALUE IS THE POINT. This used to swallow both failures and return nothing, and
+     * `arm()` reported ARM regardless — so the server's arm-ack watchdog was satisfied, the alarm
+     * was recorded as ARMED on both sides, and it simply never rang. The owner is told it is set,
+     * the server believes it is set, and nothing anywhere says otherwise. That is the worst shape a
+     * failure can take in this app.
+     *
+     * Room still keeps the row ARMED either way, deliberately: boot re-arm retries it once the
+     * permission is granted, and the permissions panel surfaces the missing grant (spec §9). What
+     * changes is that the caller now knows, and can decline to claim the alarm is armed.
+     */
+    private fun registerWithOs(entity: AlarmEntity): Boolean {
         if (!scheduler.canScheduleExact()) {
-            // Leave it ARMED in Room so boot re-arm can register it once the exact-alarm
-            // permission is granted; the permissions panel surfaces the missing grant. We do
-            // not pretend it is scheduled beyond that (spec §9).
             OttoLog.w("Exact alarms not permitted; ${entity.alarmId} recorded but not registered")
-            return
+            return false
         }
-        try {
+        return try {
             scheduler.arm(entity)
+            true
         } catch (se: SecurityException) {
             OttoLog.e("Exact alarm denied while arming ${entity.alarmId}", se)
+            false
+        } catch (t: Throwable) {
+            // Quota (IllegalStateException on some OEMs) and anything else the OS decides to throw.
+            // Caught for the same reason as the SecurityException above: an alarm that did not
+            // register must never be reported as one that did.
+            OttoLog.e("Failed to register ${entity.alarmId} with AlarmManager", t)
+            false
         }
     }
 }

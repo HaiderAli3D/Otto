@@ -10,6 +10,7 @@ import { getDevice, latchAuth, markActivity, setHeartbeat, setTimezone, setToken
 import { recordDeviceLocation } from '../services/location.js'
 import { completeReminder, onReminderAlarmEvent, snoozeReminder } from '../services/reminders.js'
 import { isValidZone } from '../services/time.js'
+import { reportDeviceHealth } from '../services/deviceHealth.js'
 import { scheduleWakeCheck } from '../services/wakeCheck.js'
 import { rescheduleWeeklyReviewChain } from '../services/weeklyReview.js'
 
@@ -234,10 +235,27 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
   app.post('/devices/:deviceId/heartbeat', async (req, reply) => {
     const { deviceId } = req.params as { deviceId: string }
     const body = z
-      .object({ appVersion: z.string(), atMillis: z.number(), timezone: z.string().min(1).max(64).optional() })
+      .object({
+        appVersion: z.string(),
+        atMillis: z.number(),
+        timezone: z.string().min(1).max(64).optional(),
+        // The app has been sending these for two releases and this schema silently stripped them,
+        // so it was paying to compute a signal nothing read. They are the device's own answer to
+        // "can I still do the thing you are about to ask me to do", and there is no other way for
+        // the server to know: FCM has no delivery receipt, and an alarm the OS refused looks exactly
+        // like one that is set.
+        notificationsEnabled: z.boolean().optional(),
+        mutedChannels: z.array(z.string().max(64)).max(20).optional(),
+        exactAlarmsPermitted: z.boolean().optional(),
+      })
       .parse(req.body)
     setHeartbeat(deviceId, body.atMillis, body.appVersion)
     applyTimezone(deviceId, body.timezone)
+    await reportDeviceHealth(deviceId, {
+      notificationsEnabled: body.notificationsEnabled,
+      mutedChannels: body.mutedChannels,
+      exactAlarmsPermitted: body.exactAlarmsPermitted,
+    })
     return reply.code(204).send()
   })
 

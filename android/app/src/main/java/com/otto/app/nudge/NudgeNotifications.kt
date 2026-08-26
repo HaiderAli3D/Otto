@@ -30,11 +30,13 @@ class NudgeNotifications @Inject constructor(
      *
      * Posting on the same notification id REPLACES in place, which is the property that makes a
      * chase ladder usable — rung six updates one line rather than stacking six notifications the
-     * owner has to clear individually. `setOnlyAlertOnce` is what stops each replacement buzzing
-     * again for something they have already seen.
+     * owner has to clear individually. `setOnlyAlertOnce` stops each replacement buzzing again for
+     * something they have already seen — but it was hardcoded to true, which also silenced every
+     * rung that said something NEW. `reAlert` is the caller's answer to that, from
+     * `NudgeTiming.shouldReAlert`.
      */
     @SuppressLint("MissingPermission")
-    fun show(nudge: NudgeEntity) {
+    fun show(nudge: NudgeEntity, reAlert: Boolean = false) {
         NotificationChannels.ensureCreated(context)
         val level = NudgeLevel.fromToken(nudge.level)
         val actions = NudgeAction.parseCsv(nudge.actionsCsv)
@@ -52,7 +54,11 @@ class NudgeNotifications @Inject constructor(
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setPriority(priorityFor(level))
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOnlyAlertOnce(true)
+            // `!reAlert`, not a hardcoded true. Replacing a notification that is still showing is
+            // silent under `setOnlyAlertOnce`, and every rung of a chase replaces the same id — so
+            // this suppressed the sound for every escalation after the first. See
+            // `NudgeTiming.shouldReAlert`, which decides; this only applies.
+            .setOnlyAlertOnce(!reAlert)
             .setAutoCancel(false)
             .setOngoing(nudge.ongoing)
             .setWhen(nudge.postedAtMillis)
