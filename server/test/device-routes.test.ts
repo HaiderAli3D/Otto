@@ -13,7 +13,7 @@ vi.mock('../src/fcm/sender.js', () => ({
 import { computeSig } from '../src/fcm/signer.js'
 import { db } from '../src/db/client.js'
 import { jobs } from '../src/db/schema.js'
-import { armAlarm } from '../src/services/alarms.js'
+import { armAlarm, getAlarm } from '../src/services/alarms.js'
 import { scheduleBriefChain } from '../src/services/brief.js'
 import { linkWhatsapp } from '../src/services/devices.js'
 import { pendingFor } from '../src/services/outbox.js'
@@ -313,6 +313,81 @@ describe('SYNC on re-registration', () => {
     })
     await flush()
     expect(sent).toHaveLength(0)
+  })
+})
+
+describe('an alarm the phone accepted but the OS refused', () => {
+  /**
+   * `AlarmRepository.upsertArmed` writes the ARMED outbox event inside the state transaction, before
+   * `registerWithOs` ever runs — so the server receives ARMED, cancels its arm-ack watchdog, and
+   * believes the alarm is set even when the OS refused to schedule it. Returning a distinct
+   * `FireDecision` from `arm()` did nothing about that: all three callers discard the result. The
+   * phone now REPORTS it, arriving right behind the ARMED event, and this is the end that acts.
+   */
+  const report = async (app: Awaited<ReturnType<typeof makeApp>>, deviceId: string, alarmId: string, event: string) =>
+    app.inject({
+      method: 'POST',
+      url: `/alarms/${alarmId}/events`,
+      payload: { deviceId, event, atMillis: Date.now(), appVersion: '1.3.0' },
+    })
+
+  const warnings = (waUserId: string) => pendingFor(waUserId).filter((r) => r.kind === 'system_warning')
+
+  it('tells the owner, naming the alarm and when it was meant to ring', async () => {
+    const app = await makeApp()
+    const device = makeDevice('dev_nr1')
+    linkWhatsapp('dev_nr1', '447700900901')
+    await armAlarm(getDevice('dev_nr1')!, {
+      alarmId: 'alm_nr1',
+      triggerAtMillis: Date.now() + 3_600_000,
+      label: 'Get up',
+    })
+
+    // The order the phone actually drains them in.
+    expect((await report(app, 'dev_nr1', 'alm_nr1', 'ARMED')).statusCode).toBe(204)
+    expect((await report(app, 'dev_nr1', 'alm_nr1', 'NOT_REGISTERED')).statusCode).toBe(204)
+
+    const bodies = warnings('447700900901').map((r) => r.body)
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toContain('Get up')
+    expect(bodies[0]).toContain('will not ring')
+  })
+
+  it('leaves the alarm ARMED, because boot recovery retries it once the grant returns', async () => {
+    const app = await makeApp()
+    const device = makeDevice('dev_nr2')
+    linkWhatsapp('dev_nr2', '447700900902')
+    await armAlarm(getDevice('dev_nr2')!, {
+      alarmId: 'alm_nr2',
+      triggerAtMillis: Date.now() + 3_600_000,
+      label: 'Get up',
+    })
+
+    await report(app, 'dev_nr2', 'alm_nr2', 'NOT_REGISTERED')
+
+    expect(getAlarm('alm_nr2')?.state).toBe('ARMED')
+  })
+
+  it('says it once per alarm, however many times a SYNC re-attempts it', async () => {
+    const app = await makeApp()
+    const device = makeDevice('dev_nr3')
+    linkWhatsapp('dev_nr3', '447700900903')
+    await armAlarm(getDevice('dev_nr3')!, {
+      alarmId: 'alm_nr3',
+      triggerAtMillis: Date.now() + 3_600_000,
+      label: 'Get up',
+    })
+
+    // Distinct instants, or the alarm_events dedupe index rejects the replay before this is reached.
+    for (let i = 0; i < 3; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/alarms/alm_nr3/events',
+        payload: { deviceId: 'dev_nr3', event: 'NOT_REGISTERED', atMillis: Date.now() + i, appVersion: '1.3.0' },
+      })
+    }
+
+    expect(warnings('447700900903')).toHaveLength(1)
   })
 })
 

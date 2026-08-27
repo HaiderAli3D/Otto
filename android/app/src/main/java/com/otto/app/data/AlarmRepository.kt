@@ -133,7 +133,29 @@ class AlarmRepository @Inject constructor(
 
     suspend fun delete(alarmId: String) = dao.deleteById(alarmId)
 
+    /**
+     * Tell the server the OS refused to schedule an alarm we have already reported as ARMED.
+     *
+     * A plain event append, deliberately outside any state transaction. The row IS armed in Room —
+     * that is true, and boot recovery will retry it once the grant returns — so `markState` would be
+     * wrong. What is not true is the ARMED event that `upsertArmedWithEvent` has already written and
+     * queued: the server reads that as the delivery ack that cancels its arm-ack watchdog, so
+     * without this second event an alarm the OS refused looks, from the server, exactly like one
+     * that is set. Both events drain in order, so the server sees ARMED then NOT_REGISTERED.
+     *
+     * `event` is a free-text column, so this costs no Room migration and no schema version.
+     */
+    suspend fun reportNotRegistered(alarmId: String) {
+        dao.insertEvent(AlarmEventEntity(alarmId = alarmId, event = EVENT_NOT_REGISTERED, atMillis = clock.nowMillis()))
+        reportTrigger.requestReport()
+    }
+
     /** Build the outbox event for a transition (inserted inside the state-write transaction, AF6). */
     private fun eventFor(alarmId: String, state: AlarmState, atMillis: Long) =
         AlarmEventEntity(alarmId = alarmId, event = state.name, atMillis = atMillis)
+
+    companion object {
+        /** Not an [AlarmState]: a registration outcome, reported alongside one. */
+        const val EVENT_NOT_REGISTERED = "NOT_REGISTERED"
+    }
 }

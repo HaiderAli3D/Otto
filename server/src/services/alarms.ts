@@ -7,6 +7,8 @@ import { newAlarmId } from '../lib/ids.js'
 import { log } from '../lib/log.js'
 import { cancelJobs, deleteJob, enqueueJob, jobPayload, jobsForAlarm, reanchorJob } from './jobs.js'
 import { clearToken, getDevice, type Device } from './devices.js'
+import { enqueueOutbound } from './outbox.js'
+import { epochMillisToLocalHuman } from './time.js'
 import { nextOccurrence, sameWallClock } from './recurrence.js'
 
 export type Alarm = typeof alarms.$inferSelect
@@ -289,6 +291,34 @@ export function recordEvent(
   if (priorMax !== null && atMillis < priorMax) return
 
   if (event === 'ARMED') cancelJobs('arm_ack', alarmId)
+
+  // The phone armed it in Room and the OS refused to schedule it.
+  //
+  // Arrives right behind the ARMED event that has just cancelled the watchdog, which is exactly the
+  // hole it fills: without it, an alarm the OS would not take is indistinguishable here from one
+  // that is set, and the owner finds out by not waking up. Not a STATE event — the row really is
+  // ARMED, and boot recovery on the phone retries it once the grant returns — so state is left
+  // alone and only the owner is told.
+  //
+  // Keyed per alarm so a SYNC re-arming several refused alarms says it once each rather than once
+  // per attempt, and `enqueueOutbound`'s dedupe index enforces that rather than a counter.
+  if (event === 'NOT_REGISTERED') {
+    const alarm = getAlarm(alarmId)
+    const device = getDevice(deviceId)
+    if (alarm && device?.whatsappNumber) {
+      const when = epochMillisToLocalHuman(alarm.triggerAtMillis, device.timezone)
+      enqueueOutbound({
+        waUserId: device.whatsappNumber,
+        deviceId,
+        kind: 'system_warning',
+        body:
+          `⚠️ Your phone refused to schedule "${alarm.label}" (${when}), so it will not ring. ` +
+          'That is usually the exact-alarm permission: Android Settings → Apps → Otto → Alarms & reminders.',
+        dedupeKey: `notreg:${alarmId}`,
+      })
+      log.warn({ alarmId, deviceId }, 'alarm was accepted by the phone but refused by the OS; owner warned')
+    }
+  }
   // SNOOZED is informational (the app re-arms and reports ARMED again); every other listed event
   // is a real state the server should reflect.
   if (STATE_EVENTS.includes(event)) {

@@ -28,6 +28,8 @@ import {
   type Device,
 } from '../src/services/devices.js'
 import {
+  MAX_SENDS_PER_FLUSH,
+  enqueueAndFlushRow,
   MAX_OUTBOX_ATTEMPTS,
   TEMPLATE_COOLDOWN_MS,
   enqueueAndTryFlush,
@@ -272,6 +274,84 @@ describe('a shut window waits for WhatsApp; it never reaches for the phone', () 
 
     expect(pendingFor('4495')).toHaveLength(0)
     expect(db.select().from(outbox).where(eq(outbox.waUserId, '4495')).all()[0]!.deliveredVia).toBe('whatsapp')
+  })
+})
+
+describe('the answer the owner is waiting for', () => {
+  /**
+   * Two individually-reasonable changes collided here. Routing the reply through the outbox gave it
+   * durability; applying the send cap on the inbound path stopped a day's backlog arriving in one
+   * second. But `pendingFor` is oldest-first and a reply is by construction the newest row, so the
+   * answer sorted behind every chase in the queue — ask Otto a question with ten nudges waiting and
+   * you got six old chases and no answer.
+   */
+  it('goes out ahead of a backlog, not behind it', async () => {
+    const device = makeDevice('dev_reply1')
+    linkWhatsapp(device.deviceId, '4497')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    for (let i = 1; i <= 10; i++) {
+      enqueueOutbound({ waUserId: '4497', deviceId: device.deviceId, kind: 'nudge', body: `backlog ${i}` })
+    }
+
+    // The inbound path drains what it can, then Otto answers.
+    await flushOutbox('4497', device.deviceId)
+    const outcome = await enqueueAndFlushRow({
+      waUserId: '4497',
+      deviceId: device.deviceId,
+      kind: 'reply',
+      body: 'THE ANSWER',
+    })
+
+    expect(outcome.sent).toBe(true)
+    expect(sendMock.mock.calls.map((c) => c[1])).toContain('THE ANSWER')
+    // This file's convention: a test that parks PENDING rows shuts the window behind it, because
+    // the DB is shared and `sweepOutbox` walks every device.
+    clearInboundWindow(device.deviceId)
+  })
+
+  it('does not spend the pass cap, so the backlog still drains three at a time', async () => {
+    const device = makeDevice('dev_reply2')
+    linkWhatsapp(device.deviceId, '4498')
+    markInbound(device.deviceId)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    for (let i = 1; i <= 5; i++) {
+      enqueueOutbound({ waUserId: '4498', deviceId: device.deviceId, kind: 'nudge', body: `b${i}` })
+    }
+    enqueueOutbound({ waUserId: '4498', deviceId: device.deviceId, kind: 'reply', body: 'ANSWER' })
+
+    sendMock.mockClear()
+    await flushOutbox('4498', device.deviceId, { proactiveFor: device })
+
+    const bodies = sendMock.mock.calls.filter((c) => c[0] === '4498').map((c) => c[1])
+    // The reply plus a full cap of proactive rows — the reply is extra, not one of the three.
+    expect(bodies[0]).toBe('ANSWER')
+    expect(bodies.filter((b) => String(b).startsWith('b'))).toHaveLength(MAX_SENDS_PER_FLUSH)
+    clearInboundWindow(device.deviceId)
+  })
+})
+
+describe('a shut window is cheap', () => {
+  it('retires a burned fuse even though it can send nothing', async () => {
+    // Expiry is bookkeeping, not delivery. It used to ride inside the send loop, which was fine
+    // while every pass entered that loop — and stopped being fine the moment a shut window returned
+    // before it, at which point nothing was ever retired and the queue grew to gc's seven-day
+    // backstop.
+    const device = makeDevice('dev_shut1')
+    linkWhatsapp(device.deviceId, '4499')
+    // No markInbound: the window is shut.
+    enqueueOutbound({
+      waUserId: '4499',
+      deviceId: device.deviceId,
+      kind: 'brief',
+      body: 'stale',
+      ttlMs: -1,
+    })
+
+    await flushOutbox('4499', device.deviceId, { proactiveFor: device })
+
+    expect(pendingFor('4499')).toHaveLength(0)
+    expect(db.select().from(outbox).where(eq(outbox.waUserId, '4499')).all()[0]!.state).toBe('EXPIRED')
   })
 })
 

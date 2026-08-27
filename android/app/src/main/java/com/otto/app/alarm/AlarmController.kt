@@ -55,10 +55,13 @@ class AlarmController @Inject constructor(
         // previous ring left playing (mirrors cancel()'s wasRinging refresh, bug_003 / AF1).
         if (wasRinging) RingService.refresh(context)
         if (!registered) {
-            // NOT_REGISTERED, not ARM. The server treats an ARMED report as the delivery ack that
-            // cancels its watchdog, so reporting one here for an alarm the OS refused would make a
-            // silent failure look like a success on both sides.
+            // REPORTED, not merely returned. The three callers of this function (the FCM service,
+            // SyncWorker, the test button) all discard the result, so returning NOT_REGISTERED on
+            // its own changed nothing at all — the server still saw the ARMED event that
+            // `upsertArmedWithEvent` had already queued, cancelled its arm-ack watchdog, and
+            // believed the alarm was set. The event below is what actually reaches it.
             OttoLog.w("Armed $alarmId in Room but the OS refused it; reporting NOT_REGISTERED")
+            repository.reportNotRegistered(alarmId)
             return FireDecision.NOT_REGISTERED
         }
         OttoLog.i("Armed $alarmId -> $decision")
