@@ -198,78 +198,80 @@ describe('outbox', () => {
  * PURE policy: the template is passed in rather than read from config, and the quiet window is
  * handed over explicitly, so every rule is assertable without an environment or a DB row.
  */
-describe('the phone tier, when the WhatsApp window is genuinely shut', () => {
+describe('a shut window waits for WhatsApp; it never reaches for the phone', () => {
   /**
-   * `pushOutboxRow` had exactly one call site — inside the `res.outOfWindow` branch of `flushOutbox`
-   * — and all three callers of `flushOutbox` refused to call it unless `windowOpen()` was already
-   * true. So the FCM tier only ever fired when our own window belief was WRONG, and never in the
-   * case SETUP.md says it exists for: after a day of the owner's silence every brief, review and
-   * chase sat PENDING until its TTL burned, with the phone online the whole time.
+   * The phone is an ALARM device. It rings when the owner asked to be woken or asked for a ring; it
+   * does not carry conversation, chases, briefs or reviews. Everything Otto SAYS arrives in the
+   * WhatsApp thread, so there is one surface to look at and one to mute.
    *
-   * The existing 131047 test passes for the wrong reason — `makeDevice` builds devices at appVersion
-   * 1.0.0 with no heartbeat, so `pushReachable` is false for every one of them and the assertion is
-   * really about the push having FAILED. This builds a genuinely reachable one.
+   * These tests briefly asserted the opposite. `pushOutboxRow` had been unreachable since it was
+   * written, an audit called that a defect, and making it reachable turned every shut-window message
+   * into an Android notification — which is not what this product is. The transport comment in
+   * `services/outbox.ts` is the decision; this is the pin on it.
    */
   const reachable = (deviceId: string): Device => {
     const device = makeDevice(deviceId, 'tok_push')
     db.update(devices)
-      .set({ lastHeartbeatAt: Date.now() - 60_000, appVersion: '1.2.0' })
+      .set({ lastHeartbeatAt: Date.now() - 60_000, appVersion: '1.3.0' })
       .where(eq(devices.deviceId, deviceId))
       .run()
     return getDevice(deviceId)!
   }
 
-  it('delivers over FCM instead of leaving the queue to expire', async () => {
+  it('leaves the row queued even when the phone is perfectly reachable', async () => {
     const device = reachable('dev_push1')
     // No markInbound: the window has never been open, which is the whole point.
-    await enqueueAndTryFlush({
+    const sent = await enqueueAndTryFlush({
       waUserId: '4491',
       deviceId: device.deviceId,
       kind: 'brief',
       body: 'three things today',
     })
 
+    expect(sent).toBe(false)
     const rows = db.select().from(outbox).where(eq(outbox.waUserId, '4491')).all()
     expect(rows).toHaveLength(1)
-    expect(rows[0]!.state).toBe('SENT')
-    expect(rows[0]!.deliveredVia).toBe('push')
-    // And WhatsApp was never attempted — there was no window to attempt it through.
+    expect(rows[0]!.state).toBe('PENDING')
+    expect(rows[0]!.deliveredVia).toBeNull()
+    // WhatsApp was not attempted either — there is no window to attempt it through.
     expect(sendMock).not.toHaveBeenCalled()
   })
 
-  it('reports back whether YOUR row went out, not whether anything did', async () => {
+  it('does not strand the row in SENDING while it waits', async () => {
+    // The bail has to sit ABOVE the claim. Breaking after it leaves the row SENDING with nobody to
+    // release it for two minutes — invisible to `pendingFor`, which is long enough for the sweep
+    // that follows to think the queue is empty and skip the knock.
     const device = reachable('dev_push2')
-    const ok = await enqueueAndTryFlush({
-      waUserId: '4492',
-      deviceId: device.deviceId,
-      kind: 'nudge',
-      body: 'bins',
-      reminderId: 'rem_p2',
-    })
-    expect(ok).toBe(true)
+    enqueueOutbound({ waUserId: '4492', deviceId: device.deviceId, kind: 'nudge', body: 'bins' })
+
+    await flushOutbox('4492', device.deviceId, { proactiveFor: device })
+
+    expect(pendingFor('4492')).toHaveLength(1)
   })
 
-  it('still leaves the row queued when the phone is unreachable too', async () => {
-    const device = makeDevice('dev_push3') // 1.0.0, no heartbeat
-    const ok = await enqueueAndTryFlush({
-      waUserId: '4493',
-      deviceId: device.deviceId,
-      kind: 'brief',
-      body: 'x',
-    })
-    expect(ok).toBe(false)
-    expect(pendingFor('4493')).toHaveLength(1)
-  })
-
-  it('sweeps the queue to the phone without waiting for the owner to say anything', async () => {
+  it('sweeps without sending anything to the phone, and leaves the queue for a knock', async () => {
     const device = reachable('dev_push4')
     linkWhatsapp(device.deviceId, '4494')
     enqueueOutbound({ waUserId: '4494', deviceId: device.deviceId, kind: 'brief', body: 'morning' })
 
     await sweepOutbox(Date.now())
 
-    expect(pendingFor('4494')).toHaveLength(0)
-    expect(db.select().from(outbox).where(eq(outbox.waUserId, '4494')).all()[0]!.deliveredVia).toBe('push')
+    // Still there, still PENDING, still nothing delivered by any other route.
+    expect(pendingFor('4494')).toHaveLength(1)
+    expect(db.select().from(outbox).where(eq(outbox.waUserId, '4494')).all()[0]!.deliveredVia).toBeNull()
+  })
+
+  it('delivers the moment the owner says anything, which is what reopens the window', async () => {
+    const device = reachable('dev_push5')
+    linkWhatsapp(device.deviceId, '4495')
+    enqueueOutbound({ waUserId: '4495', deviceId: device.deviceId, kind: 'brief', body: 'morning' })
+    expect(pendingFor('4495')).toHaveLength(1)
+
+    markInbound(device.deviceId)
+    await flushOutbox('4495', device.deviceId)
+
+    expect(pendingFor('4495')).toHaveLength(0)
+    expect(db.select().from(outbox).where(eq(outbox.waUserId, '4495')).all()[0]!.deliveredVia).toBe('whatsapp')
   })
 })
 
@@ -344,8 +346,20 @@ describe('shouldKnock', () => {
     expect(shouldKnock({ ...base, device: device({ lastInboundAt: NOW - 60_000 }) })).toBe(false)
   })
 
-  it('never knocks for a nudge — chasing gently is the opposite of a push notification', () => {
-    expect(shouldKnock({ ...base, rows: [row({ kind: 'nudge' })] })).toBe(false)
+  it('DOES knock for a nudge, now that the knock is the whole fallback', () => {
+    // This used to be false, on the argument that a chase is gentle and "knocking on a shut window
+    // with a push notification is the opposite of gentle". That reasoning was about a PUSH. A
+    // template knock is a WhatsApp message asking the owner to reply, in the same thread as
+    // everything else Otto says — and the alternative is now silence, because the phone no longer
+    // carries anything Otto says.
+    expect(shouldKnock({ ...base, rows: [row({ kind: 'nudge' })] })).toBe(true)
+    expect(shouldKnock({ ...base, rows: [row({ kind: 'brief' })] })).toBe(true)
+  })
+
+  it('still never knocks to deliver a digest', () => {
+    // Circular: a digest summarises things the owner already did not see, and whatever it
+    // summarises is in this same queue and will knock on its own account.
+    expect(shouldKnock({ ...base, rows: [row({ kind: 'digest' })] })).toBe(false)
   })
 
   it('never knocks for a digest either', () => {
@@ -422,9 +436,14 @@ describe('quiet hours gate proactive delivery', () => {
     expect(pendingFor('447700900201')).toHaveLength(1)
 
     // Held, not retired: the very next sweep after the window ends delivers it.
+    //
+    // Asserted on THIS number rather than on a global call count. `sweepOutbox` visits every device
+    // in the database and this file shares one, so the count depends on what every test above
+    // happens to have left queued — which is a fixture detail, not the behaviour under test.
     updateSettings(device.deviceId, { quietHours: windowBefore(Date.now()) })
+    sendMock.mockClear()
     await sweepOutbox(Date.now())
-    expect(sendMock).toHaveBeenCalledTimes(1)
+    expect(sendMock.mock.calls.filter((c) => c[0] === '447700900201')).toHaveLength(1)
     expect(pendingFor('447700900201')).toHaveLength(0)
   })
 
@@ -611,8 +630,12 @@ describe('sweepOutbox', () => {
 
     await sweepOutbox(Date.now())
 
-    expect(templateMock).toHaveBeenCalledTimes(1)
-    expect(templateMock.mock.calls[0]).toEqual(['447700900105', ['something']])
+    // Filtered to THIS number rather than counted globally: `sweepOutbox` visits every device in the
+    // database, this file shares one, and the widened KNOCK_KINDS means other devices' queued
+    // nudges and briefs are now knockable too.
+    const ours = templateMock.mock.calls.filter((c) => c[0] === '447700900105')
+    expect(ours).toHaveLength(1)
+    expect(ours[0]).toEqual(['447700900105', ['something']])
     // Stamped, so the 6h cooldown starts now rather than on the next sweep five minutes later.
     expect(getDevice(device.deviceId)?.lastTemplateAt).not.toBeNull()
     // …and the queue is untouched: a template knocks, it does not deliver.

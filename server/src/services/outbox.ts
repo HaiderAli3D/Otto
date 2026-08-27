@@ -7,7 +7,6 @@ import { inQuietHours, type QuietHours } from '../lib/quietHours.js'
 import { budgetAllows } from './budget.js'
 import { commitmentAt } from './commitments.js'
 import { clearInboundWindow, getDevice, listDevices, markTemplateSent, type Device } from './devices.js'
-import { pushOutboxRow } from './push.js'
 import { appendAssistantTurns } from './sessions.js'
 import { quietHoursFor } from './settings.js'
 import { sendTemplate, sendText, type SendResult } from './whatsapp.js'
@@ -426,6 +425,32 @@ export async function flushOutbox(
       )
       continue
     }
+    // WhatsApp is the ONLY transport for anything Otto says. There is no second one.
+    //
+    // This is a product decision, not a limitation, and it is the one thing about Otto most likely
+    // to get quietly re-litigated by someone reading `services/push.ts` and finding a perfectly good
+    // notification tier sitting unused. The phone is an ALARM device. It rings when the owner asked
+    // to be woken or asked for a ring; it does not carry conversation, chases, briefs or reviews.
+    // Everything Otto SAYS arrives in one place, which is the WhatsApp thread, so there is exactly
+    // one surface to look at and exactly one to mute.
+    //
+    // The consequence has to be stated plainly rather than engineered around: Meta refuses free-form
+    // messages outside 24 hours of the owner's last inbound, so a shut window means a message WAITS.
+    // What reaches them in that state is a template knock (see `shouldKnock` below) — still WhatsApp
+    // — which prompts a reply, and the reply reopens the window and drains the real queue.
+    //
+    // `pushOutboxRow` therefore has no caller here. It is left in place, tested, and dormant: the
+    // decision above is reversible in one line, and the code costs nothing but its own comment.
+    //
+    // ABOVE THE CLAIM, deliberately. Breaking after it would leave the row SENDING with nobody to
+    // release it until `releaseStaleClaims` notices two minutes later — invisible to `pendingFor`
+    // in between, which is exactly long enough for the sweep that follows to think the queue is
+    // empty and skip the knock.
+    if (!windowIsOpen) {
+      log.debug({ waUserId, id: row.id, kind: row.kind }, 'outbox: window shut; leaving queued for a knock')
+      break
+    }
+
     // Enough for one pass; the rest keep their place in the queue for the next one.
     //
     // The `proactiveFor` guard is gone. It exempted exactly the case the cap was written for: the
@@ -459,31 +484,14 @@ export async function flushOutbox(
       break
     }
 
-    // The transport is chosen HERE, and this is what makes the phone tier reachable at all.
-    //
-    // `pushOutboxRow` used to sit only inside the `res.outOfWindow` branch below — reachable only
-    // when Meta contradicted us with a 131047, i.e. only when our own window belief was WRONG. And
-    // all three callers of this function refused to call it unless `windowOpen()` was already true.
-    // So the FCM tier, which SETUP.md describes as the reason no WhatsApp template is needed, never
-    // once ran in the case it exists for: after a day of the owner's silence every brief, review and
-    // chase sat PENDING until its TTL burned and it was retired EXPIRED, with the phone online and
-    // reachable the whole time.
-    //
-    // A shut window now produces the same shape of result Meta would have, without the round trip,
-    // and falls into the same branch. Every gate above still applies — a push is Otto speaking
-    // first, so quiet hours, the daily budget and the commitment rule all still govern it.
     let res: SendResult
-    if (windowIsOpen) {
-      try {
-        res = await sendText(waUserId, row.body)
-      } catch (err) {
-        // sendText is documented never to throw, but a claim nobody releases is invisible to every
-        // later flush — put the row back before the error propagates, exactly where it was.
-        db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
-        throw err
-      }
-    } else {
-      res = { ok: false, permanent: true, status: 0, outOfWindow: true, body: 'window shut; not attempted' }
+    try {
+      res = await sendText(waUserId, row.body)
+    } catch (err) {
+      // sendText is documented never to throw, but a claim nobody releases is invisible to every
+      // later flush — put the row back before the error propagates, exactly where it was.
+      db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
+      throw err
     }
 
     if (res.ok) {
@@ -495,30 +503,12 @@ export async function flushOutbox(
       continue
     }
     if (res.outOfWindow) {
-      // Only when META said so. A window we already knew was shut needs no correcting, and clearing
-      // it on every sweep of a quiet day would rewrite `lastInboundAt` for no reason.
-      if (deviceId && res.status !== 0) clearInboundWindow(deviceId)
-
-      // A shut window is no longer a wall. Meta permits free-form text only inside 24 hours of the
-      // owner's last inbound, and with no approved template configured `shouldKnock` can never fire
-      // either — so before the phone could take notifications, everything here simply queued until
-      // it expired. A push has no window, costs nothing, and carries the real text.
-      //
-      // Attempted on the CLAIMED row, so the two transports can never both deliver it: whichever
-      // succeeds marks it SENT, and if push fails too the row goes back exactly where it was.
-      if (device && (await pushOutboxRow(device, row, Date.now()))) {
-        db.update(outbox)
-          .set({ state: 'SENT', sentAtMillis: Date.now(), deliveredVia: 'push' })
-          .where(eq(outbox.id, row.id))
-          .run()
-        delivered.push(row.body)
-        // Deliberately NOT `break`. The window being shut said nothing about the phone, and the
-        // whole point is that the rest of the queue can still get through.
-        continue
-      }
+      // Meta contradicted our window belief: correct it, keep the row, and stop. The next sweep
+      // finds the window shut up front and goes to the knock.
+      if (deviceId) clearInboundWindow(deviceId)
 
       db.update(outbox).set({ state: 'PENDING', sentAtMillis: null }).where(eq(outbox.id, row.id)).run()
-      log.warn({ waUserId, id: row.id }, 'outbox flush hit a shut window and the phone is unreachable; leaving queued')
+      log.info({ waUserId, id: row.id }, 'outbox flush hit a shut window; leaving the queue for a knock')
       break // no point trying the rest
     }
     if (res.permanent) {
@@ -662,16 +652,27 @@ function rowState(id: number): string | null {
 }
 
 /**
- * The only kinds worth spending a paid template on.
+ * The kinds worth spending a paid template on.
  *
- * `nudge` is excluded by definition — a nudge is gentle chasing, and knocking on a shut window with
- * a push notification is the opposite of gentle; a reminder that genuinely must break through has
- * `escalateWithAlarm` and rings the phone instead. `digest` is excluded because it is a convenience
- * summary of things the owner already didn't see. What is left is the two kinds that say something
- * went WRONG and only Otto knows: an alarm that never reached the phone, and an alarm that was
- * missed.
+ * WIDENED, because the knock is no longer a second-best next to a notification — it is the whole
+ * fallback. It used to exclude `nudge` on the argument that a chase is gentle and "knocking on a
+ * shut window with a push notification is the opposite of gentle". That reasoning was about a PUSH.
+ * A template knock is a WhatsApp message asking the owner to reply, in the same thread as everything
+ * else Otto says; there is nothing ungentle about it, and the alternative is now silence.
+ *
+ * `digest` stays out, and for its original reason: it is a summary of things the owner already did
+ * not see, so knocking to deliver it is circular — whatever it summarises is in this queue too and
+ * will knock on its own account. `reply` stays out because a reply means they have just messaged,
+ * so the window is open by definition and a knock is unreachable code.
  */
-export const KNOCK_KINDS: readonly OutboxKind[] = ['system_warning', 'missed_alarm']
+export const KNOCK_KINDS: readonly OutboxKind[] = [
+  'system_warning',
+  'missed_alarm',
+  'nudge',
+  'brief',
+  'weekly',
+  'wake_check',
+]
 
 /** At most four knocks a day, and only if there is still something waiting at each one. */
 export const TEMPLATE_COOLDOWN_MS = 6 * 60 * 60 * 1000

@@ -265,17 +265,57 @@ vars; if any is missing the webhook route stays unmounted.
 > last inbound one; outside that window Meta rejects them with error 131047, and only a
 > pre-approved template may be sent.
 >
-> This used to matter a great deal, because Otto speaks first constantly — nudges, briefs, the
-> weekly review, wake-checks, warnings — and outside the window all of it simply queued until it
-> expired. **It no longer does.** When the window is shut Otto delivers to your phone as a
-> notification instead, carrying the real text, with Done and Snooze buttons you can use from the
-> lockscreen. A push has no window, costs nothing, and can be withdrawn later.
+> This matters, and there is no way round it. **Everything Otto says goes over WhatsApp** — nudges,
+> briefs, the weekly review, wake-checks, warnings, replies. The Android app is an *alarm* device:
+> it rings when you asked to be woken or asked for a ring, and it carries nothing else. So when the
+> window is shut, a message **waits**.
 >
-> So `META_TEMPLATE_NAME` is optional and, for a single-owner setup with the app installed,
-> not worth configuring: a template costs money, has a six-hour cooldown, carries one short
-> variable, cannot be retracted, and is the most-blocked message type there is.
+> **`META_TEMPLATE_NAME` is what stops it waiting for ever**, and configuring it is strongly
+> recommended rather than optional. A template is the one thing Meta will deliver into a shut
+> window: Otto sends a short "you have N things waiting" knock, you reply, your reply reopens the
+> window, and the real queue drains as ordinary messages. At most four knocks a day, never inside
+> your quiet hours, and never while your calendar says you are in a meeting.
 >
-> What the window still governs is *which* channel each message takes — see §11.
+> Without it, a message queued while the window is shut is delivered only if you happen to message
+> Otto before its TTL runs out — and a morning brief's fuse is four hours. See §7a.
+>
+> An earlier version of this section said the opposite: that a phone notification made the template
+> unnecessary. That tier existed in code, had never once run, and is deliberately dormant — the
+> phone is not where Otto talks to you.
+
+---
+
+## 7a. The catch-up template (recommended)
+
+The one message Meta will deliver into a shut 24-hour window. Without it, anything Otto has for you
+waits until you message him first.
+
+1. **Meta Business Manager → WhatsApp Manager → Message templates → Create template.**
+   - Category: **Utility** (not Marketing — Utility is what a service notification is, and it is
+     both cheaper and far less likely to be blocked).
+   - Name: `otto_catch_up` (any name; it goes in `META_TEMPLATE_NAME`).
+   - Language: English — must match `META_TEMPLATE_LANG`, which defaults to `en`.
+   - Body, exactly one variable: `Otto has {{1}} waiting for you. Reply and I'll send it over.`
+   - Submit. Approval is usually minutes for a Utility template with no marketing language.
+
+2. **Point the server at it.** These are not secrets, so they belong in the `[env]` block of
+   `fly.production.toml` beside `PUBLIC_ORIGIN`:
+
+   ```toml
+   META_TEMPLATE_NAME = "otto_catch_up"
+   META_TEMPLATE_LANG = "en"
+   ```
+
+   Then `fly deploy -c fly.production.toml`. The boot log line reports `"template": true` once it is
+   live.
+
+3. **What Otto does with it.** One knock, at most every six hours, only when something is genuinely
+   queued, never inside your quiet hours, and never while your calendar says you are in a meeting.
+   The knock does **not** carry the message — it prompts a reply, and the reply is what reopens the
+   window so the real queue can go out as ordinary text.
+
+If you leave this unconfigured, nothing breaks: the queue simply waits for you, and short-fused
+things (a morning brief expires after four hours) may be dropped rather than arriving stale.
 
 ---
 
