@@ -341,9 +341,25 @@ export async function flushOutbox(
 ): Promise<string[]> {
   const now = Date.now()
   releaseStaleClaims(waUserId, now)
-  const rows = pendingFor(waUserId)
+
+  // A REPLY GOES FIRST, and does not count against the pass cap.
+  //
+  // `pendingFor` is oldest-first, which is right for a queue of things Otto decided to say. It is
+  // wrong for the one message the owner is actively waiting for: a reply is by construction the
+  // NEWEST row, so it sorted last, behind every chase in the backlog. With ten queued nudges and
+  // `MAX_SENDS_PER_FLUSH` at three, asking Otto a question delivered six old chases and no answer —
+  // the reply sat PENDING and arrived on some later sweep, minutes afterwards.
+  //
+  // That was two reasonable changes colliding: routing the reply through the outbox for durability,
+  // and applying the send cap on the inbound path so a day's backlog no longer arrives in one
+  // second. Both are right; the ordering between them was not.
+  //
+  // Stable within each group, so the backlog itself keeps its oldest-first order.
+  const rows = pendingFor(waUserId).sort((a, b) => Number(b.kind === 'reply') - Number(a.kind === 'reply'))
   if (rows.length === 0) return []
   const delivered: string[] = []
+  // Counted separately from `delivered` so a reply neither consumes the cap nor is stopped by it.
+  let proactiveSends = 0
 
   // Read once, before the first await, and used for two decisions: which transport each row takes,
   // and whether the phone can be reached at all. A row with no device behind it (deviceId null) can
@@ -351,13 +367,38 @@ export async function flushOutbox(
   const device = (deviceId ? getDevice(deviceId) : null) ?? null
   const windowIsOpen = device === null ? true : windowOpen(device, now)
 
+  // EXPIRY FIRST, and never conditional on the transport.
+  //
+  // Retiring a row whose fuse has burned is bookkeeping, not delivery: it has to happen whether or
+  // not anything can be sent right now, or a shut window means nothing is ever retired and the
+  // queue grows until gc's seven-day backstop notices. It used to ride inside the send loop, which
+  // was fine while every pass entered that loop — and stopped being fine the moment a shut window
+  // could return before it.
+  const stale = rows.filter((r) => r.expiresAtMillis !== null && r.expiresAtMillis < now)
+  markExpired(stale.map((r) => r.id))
+  const liveRows = rows.filter((r) => !stale.includes(r))
+  if (liveRows.length === 0) return []
+
+  // Nothing can go out through a shut window, so stop before spending anything on finding out what
+  // we would have sent. The loop below breaks on its first row for the same reason; this only moves
+  // the decision above the calendar read, which is a live Google call. Without it the five-minute
+  // sweep asked Google what the owner was doing every five minutes all night, on behalf of a pass
+  // that was always going to deliver nothing — roughly 120 pointless round trips before breakfast.
+  if (!windowIsOpen) {
+    log.debug({ waUserId, queued: liveRows.length }, 'outbox: window shut; leaving the queue for a knock')
+    return []
+  }
+
   // ONE calendar read per proactive pass, hoisted out of the loop and taken only once there is
   // something to deliver. `releaseStaleClaims` has already run — it must precede the first await —
   // and every row below is still taken with a guarded UPDATE, so this yield cannot cost a row.
   const commitment = opts.proactiveFor ? await commitmentAt(opts.proactiveFor, now) : null
 
-  for (const row of rows) {
-    if (row.expiresAtMillis !== null && row.expiresAtMillis < now) {
+  for (const row of liveRows) {
+    // Already filtered above; kept because `now` was captured before the awaits and a long pass can
+    // outlive a short fuse — a wake_check's is forty-five minutes and three Graph retries are fifty
+    // seconds each.
+    if (row.expiresAtMillis !== null && row.expiresAtMillis < Date.now()) {
       markExpired([row.id])
       continue
     }
@@ -442,14 +483,13 @@ export async function flushOutbox(
     // `pushOutboxRow` therefore has no caller here. It is left in place, tested, and dormant: the
     // decision above is reversible in one line, and the code costs nothing but its own comment.
     //
-    // ABOVE THE CLAIM, deliberately. Breaking after it would leave the row SENDING with nobody to
+    // The whole-pass check above returns before this is reached, so this is belt and braces against
+    // a future edit that moves the transport decision back inside the loop. If it ever does fire it
+    // must stay ABOVE THE CLAIM: breaking after one would leave the row SENDING with nobody to
     // release it until `releaseStaleClaims` notices two minutes later — invisible to `pendingFor`
-    // in between, which is exactly long enough for the sweep that follows to think the queue is
-    // empty and skip the knock.
-    if (!windowIsOpen) {
-      log.debug({ waUserId, id: row.id, kind: row.kind }, 'outbox: window shut; leaving queued for a knock')
-      break
-    }
+    // in between, which is long enough for the sweep that follows to think the queue is empty and
+    // skip the knock.
+    if (!windowIsOpen) break
 
     // Enough for one pass; the rest keep their place in the queue for the next one.
     //
@@ -459,7 +499,7 @@ export async function flushOutbox(
     // reason it was scoped to proactive passes was to keep the owner's own REPLY from waiting behind
     // a backlog, and that still holds: the reply is sent by routes/whatsapp.ts after this returns,
     // not from inside this queue.
-    if (delivered.length >= MAX_SENDS_PER_FLUSH) {
+    if (row.kind !== 'reply' && proactiveSends >= MAX_SENDS_PER_FLUSH) {
       log.info({ waUserId, remaining: rows.length - delivered.length }, 'outbox: pass full, leaving the tail queued')
       break
     }
@@ -500,6 +540,7 @@ export async function flushOutbox(
         .where(eq(outbox.id, row.id))
         .run()
       delivered.push(row.body)
+      if (row.kind !== 'reply') proactiveSends++
       continue
     }
     if (res.outOfWindow) {
@@ -766,8 +807,8 @@ export async function sweepOutbox(now: number = Date.now()): Promise<void> {
     if (delivered.length > 0) appendAssistantTurns(waUserId, device.deviceId, delivered)
     if (windowOpen(device, now)) continue
 
-    // Still here: the window is shut. Anything the phone could take has just gone over FCM, so what
-    // is left is genuinely unreachable and worth a paid knock.
+    // Still here: the window is shut, so the flush above delivered nothing and everything queued is
+    // genuinely unreachable until the owner speaks first. That is what a knock is for.
     const stillPending = pendingFor(waUserId)
     if (stillPending.length === 0) continue
 
