@@ -40,10 +40,15 @@ export type OwnerRecord = {
 /**
  * Completions Otto actually witnessed, as opposed to ones he assumed.
  *
- * A reminder closed by the assumed-attendance check-in (services/nagging.ts) writes
- * `assumedAttendedAtMillis` to the SAME instant as `completedAtMillis`, so equality is the test.
- * A later genuine completion — after the owner said "no, I wasn't there" and it was reopened —
- * writes a new `completedAtMillis` and stops matching, so it counts again.
+ * KEPT FOR THE ROWS THAT PREDATE THE REVERSAL, and that is now the whole of its job. Otto used to
+ * CLOSE a reminder whose due rung fell inside a meeting, writing `assumedAttendedAtMillis` to the
+ * same instant as `completedAtMillis` — equality being the tell. He no longer does: he asks, the
+ * reminder stays OPEN, and `assumedAttendedAtMillis` records when the QUESTION was put. So for
+ * anything written since, the two columns can never be equal and this guard always passes, which is
+ * correct — every completion now is one the owner reported.
+ *
+ * Do not delete it on that basis. Rows closed on an assumption before the reversal still carry the
+ * equal pair, and counting them would retroactively inflate the record they were excluded from.
  *
  * This is here rather than in the caller because THE_RECORD tells the model these numbers are the
  * whole of its evidence and to never round them up. "You finished twelve things this week" when

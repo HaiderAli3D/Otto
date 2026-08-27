@@ -160,8 +160,8 @@ async function handleInbound(msg: InboundMessage): Promise<void> {
 
   // The reply goes out like everything else Otto says, rather than through a bare `sendText`.
   //
-  // This was the one outbound message in the system with no outbox row, no retry and no fallback:
-  // a Meta 5xx, a timeout, or a phone that had just dropped off wifi meant the owner asked a
+  // This was the one outbound message in the system with no outbox row and no retry:
+  // a Meta 5xx or a timeout meant the owner asked a
   // question, Otto composed an answer, spent whatever it cost, wrote it into the transcript as
   // though it had been said — and they simply never got it. Every other kind of message has a
   // durable row behind it, and the reply is the one they are actively waiting for.
@@ -178,5 +178,8 @@ async function handleInbound(msg: InboundMessage): Promise<void> {
     deviceId: device.deviceId,
     kind: 'reply',
     body: reply,
+    // The owner is right here and just spoke. Matching the flush at the top of this handler, which
+    // passes no `proactiveFor` for the same reason.
+    proactive: false,
   })
 }

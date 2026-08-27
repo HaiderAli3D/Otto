@@ -93,6 +93,15 @@ export function versionAtLeast(actual: string | null, minimum: string): boolean 
  * wrong. A `nudge` sits in between: it is a chase, and a chase the owner does not notice is not a
  * chase, but it is also not an emergency.
  */
+/**
+ * DORMANT. Nothing in this server calls `pushOutboxRow` any more.
+ *
+ * Everything Otto SAYS goes over WhatsApp; the Android app is an alarm device and carries nothing
+ * else (AGENTS.md rule 7). The tables below, and the transport under them, are kept complete and
+ * tested because that decision is worth being able to reverse in one line — but read them as a
+ * description of a road not taken, not of what happens today. `pushArm` and the location request
+ * further down ARE live: those are an alarm and a location fix, not things Otto says.
+ */
 const LEVEL_BY_KIND: Record<OutboxKind, 'SILENT' | 'NORMAL' | 'URGENT'> = {
   nudge: 'NORMAL',
   digest: 'SILENT',

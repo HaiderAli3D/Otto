@@ -485,6 +485,12 @@ export async function updateReminder(
     // against the window in force NOW. Leaving the old pin would plan a fresh schedule against an
     // out-of-date one, which is the mirror of the bug the pin exists to stop.
     planQuietHours: replanned ? pinnedQuietSpec(device, escalateWithAlarm) : r.planQuietHours,
+    // The owner moving the due time IS moving the series. Left alone, `completeReminder` rolls the
+    // next occurrence from the original anchor and the edit silently reverts on the first
+    // completion. Only follows a REAL move: a replan triggered by a policy or timing change must
+    // not shift a series the owner did not touch.
+    seriesAnchorMillis:
+      dueAtMillis !== null && dueAtMillis !== r.dueAtMillis ? dueAtMillis : r.seriesAnchorMillis,
     nagCount: patch.resetChase === true ? 0 : r.nagCount,
     deferCount: deferred ? r.deferCount + 1 : r.deferCount,
     updatedAt: now,
@@ -527,6 +533,22 @@ export async function updateReminder(
       escalateWithAlarm: next.escalateWithAlarm,
       alarmId: next.alarmId,
       plannedAtMillis: next.plannedAtMillis,
+      // BOTH of these were computed into `next` and then dropped on the floor, because this is an
+      // explicit column list and the two were added to the object without being added here. The
+      // silence is the problem: a missing column in a hand-written `.set()` reads exactly like a
+      // column that was deliberately left alone.
+      //
+      // `planQuietHours` — a replan lays the ladder out again, so it must be planned against the
+      // window in force NOW. Never written, the reminder kept the pin from its creation and every
+      // later replan was measured against a window the owner may have moved months ago.
+      //
+      // `seriesAnchorMillis` — this is the sharper of the two. `completeReminder` reads the anchor
+      // in preference to the due time, and `nextOccurrence` re-imposes the anchor's wall clock on
+      // every step, so a stale anchor is decisive rather than advisory: "move pills to 08:00" would
+      // work today, and tomorrow's occurrence would silently revert to 07:00 for ever — the chat
+      // nudge AND, for a ring:true reminder, the alarm on the phone.
+      planQuietHours: next.planQuietHours,
+      seriesAnchorMillis: next.seriesAnchorMillis,
       nagCount: next.nagCount,
       nextNagAtMillis: next.nextNagAtMillis,
       deferCount: next.deferCount,

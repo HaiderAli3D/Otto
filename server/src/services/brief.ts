@@ -15,9 +15,6 @@ import { cancelJobsForDevice, cancelNudges, enqueueJob, ensureSingletonJob } fro
 import {
   enqueueAndFlushRow,
   heldByQuietHours,
-  markSuperseded,
-  pendingFor,
-  supersedePending,
   windowOpen,
 } from './outbox.js'
 import { leadCountFor, listReminders, type Reminder } from './reminders.js'
