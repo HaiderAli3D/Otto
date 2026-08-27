@@ -104,17 +104,31 @@ describe('what the phone says about its own health', () => {
     expect(warnings('447700900804')).toHaveLength(0)
   })
 
-  it('mentions muted channels and switched-off notifications separately', async () => {
+  it('says nothing about muted channels or switched-off notifications', async () => {
+    // Both mattered while the phone carried chases. It does not — Otto speaks over WhatsApp and the
+    // app is an alarm device — so warning about them would be Otto complaining about a setting that
+    // no longer affects him. That is the false alarm that teaches someone to ignore the channel the
+    // exact-alarm warning needs. Still accepted at the route and still logged; just not said.
     const app = await makeApp()
     makeDevice('dev_h5')
     linkWhatsapp('dev_h5', '447700900805')
 
-    await beat(app, 'dev_h5', { notificationsEnabled: false, mutedChannels: ['otto_nudge_low'] })
+    const res = await beat(app, 'dev_h5', { notificationsEnabled: false, mutedChannels: ['otto_nudge_low'] })
 
-    const bodies = warnings('447700900805').map((r) => r.body)
-    expect(bodies).toHaveLength(2)
-    expect(bodies.some((b) => b.includes('Notifications are switched off'))).toBe(true)
-    expect(bodies.some((b) => b.includes('muted'))).toBe(true)
+    expect(res.statusCode).toBe(204)
+    expect(warnings('447700900805')).toHaveLength(0)
+  })
+
+  it('still warns about exact alarms, because the app still rings them', async () => {
+    const app = await makeApp()
+    makeDevice('dev_h6')
+    linkWhatsapp('dev_h6', '447700900806')
+
+    await beat(app, 'dev_h6', { exactAlarmsPermitted: false, notificationsEnabled: false })
+
+    const bodies = warnings('447700900806').map((r) => r.body)
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toContain('exact alarms')
   })
 })
 

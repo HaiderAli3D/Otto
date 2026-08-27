@@ -61,7 +61,13 @@ it, deliberately. The server needs only `FIREBASE_SERVICE_ACCOUNT` to boot.
    every new push invisible to any device that hasn't updated.
 6. **Room is the source of truth** on the app side. AlarmManager is derived state. If they
    disagree, Room wins.
-7. **Never commit a credential.** `.gitignore` at the root plus one per half form a deliberately
+7. **Everything Otto SAYS goes over WhatsApp. The app is an alarm device.** It rings when the owner
+   asked to be woken or asked for a ring, and carries nothing else — no chases, no briefs, no
+   replies. `services/push.ts` still has a complete, tested notification tier; it is deliberately
+   dormant and has no caller in `flushOutbox`. A shut 24-hour window means a message WAITS, and the
+   way out is the WhatsApp template knock (`META_TEMPLATE_NAME`), not the phone. Making that tier
+   "work" has been tried once, shipped, and reverted within a day.
+8. **Never commit a credential.** `.gitignore` at the root plus one per half form a deliberately
    redundant net. This repo is public and has never contained a secret; keep it that way.
 
 ## This repository is public

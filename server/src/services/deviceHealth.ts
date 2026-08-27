@@ -6,21 +6,18 @@ import { localDateKey } from './time.js'
 /**
  * What the phone says about its own ability to do what it is told, and what Otto does about it.
  *
- * The load-bearing boundary in this system is that the server speaks in absolute instructions and
- * the app never interprets them. That leaves one thing the server cannot know: whether the app is
- * still ALLOWED to carry them out. FCM has no delivery receipt, `registerWithOs` refuses an alarm
- * silently when the exact-alarm grant is gone (and leaves the row ARMED so a later boot can retry
- * it, which is right), and a muted channel swallows a chase without a trace. Every one of those
- * looks, from here, exactly like success.
+ * The app has exactly ONE job — ringing a real alarm — so there is exactly one thing worth warning
+ * about here, and it is whether the OS will still let it. `registerWithOs` refuses silently when the
+ * exact-alarm grant is gone (and leaves the row ARMED so a later boot can retry it, which is right),
+ * FCM has no delivery receipt, and from the server an alarm the OS refused looks exactly like one
+ * that is set. Nothing else can tell the owner.
  *
- * The app has been reporting two of these three on every heartbeat for two releases. The route's
- * zod schema stripped them and nothing read them — so it was paying to compute a signal that was
- * discarded at the door. This is the reader.
+ * The other two fields the app reports are accepted and ignored on purpose — see below.
  *
- * ONE MESSAGE PER PROBLEM PER LOCAL DAY, through the outbox like every other proactive message, and
- * keyed so the dedupe index enforces that rather than a counter someone has to maintain. A broken
- * grant does not heal on its own and the heartbeat runs constantly; without the key this would be a
- * message every fifteen minutes about a thing the owner already knows.
+ * ONE MESSAGE PER PROBLEM PER LOCAL DAY, over WhatsApp like everything else Otto says, and keyed so
+ * the dedupe index enforces that rather than a counter someone has to maintain. A broken grant does
+ * not heal on its own and the heartbeat runs constantly; without the key this would be a message
+ * every fifteen minutes about a thing the owner already knows.
  */
 
 export type DeviceHealth = {
@@ -65,24 +62,21 @@ export async function reportDeviceHealth(deviceId: string, health: DeviceHealth)
     )
   }
 
-  // Everything Otto says on the phone tier goes through a notification, so this silences the whole
-  // fallback channel — including the one that exists for when WhatsApp cannot reach them.
-  if (health.notificationsEnabled === false) {
-    warn(
-      'notifications',
-      "⚠️ Notifications are switched off for Otto on your phone. Reminders I can't send over WhatsApp " +
-        'have nowhere to go — turn them back on in Android Settings → Apps → Otto → Notifications.',
-    )
-  }
-
-  // A muted channel is quieter than it looks: the notification still posts, so the phone reports it
-  // delivered and the record shows a chase that landed. It just makes no sound.
-  const muted = health.mutedChannels ?? []
-  if (muted.length > 0) {
-    warn(
-      'muted-channels',
-      `⚠️ You've muted ${muted.length === 1 ? 'one of my notification channels' : `${muted.length} of my notification channels`} ` +
-        "on your phone, so those chases arrive silently. That's fine if you meant it — say so and I'll stop mentioning it.",
+  // `notificationsEnabled` and `mutedChannels` are READ AND DELIBERATELY IGNORED.
+  //
+  // They mattered while the phone carried chases. It does not: Otto says everything over WhatsApp
+  // and the app is an alarm device (see the transport comment in services/outbox.ts). A muted
+  // notification channel now silences nothing the owner would miss, and warning them about it would
+  // be Otto complaining about a setting that no longer affects him — which is exactly the kind of
+  // false alarm that teaches someone to ignore the channel the exact-alarm warning above needs.
+  //
+  // Still accepted at the route and still logged, because the day that decision is revisited these
+  // are the two signals it will need, and because an app already reporting them should not have to
+  // be re-released to start being heard.
+  if (health.notificationsEnabled === false || (health.mutedChannels ?? []).length > 0) {
+    log.info(
+      { deviceId, notificationsEnabled: health.notificationsEnabled, mutedChannels: health.mutedChannels },
+      'device health: notifications are limited, which is fine — Otto speaks over WhatsApp',
     )
   }
 }

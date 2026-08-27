@@ -19,6 +19,7 @@ import {
   snoozeReminder,
 } from '../src/services/reminders.js'
 import { getDevice, setTimezone } from '../src/services/devices.js'
+import { updateSettings } from '../src/services/settings.js'
 import { makeDevice } from './helpers.js'
 
 beforeEach(() => ensureSchema())
@@ -145,12 +146,33 @@ describe('reminder lifecycle', () => {
 
   it('snoozing moves the next nudge without completing', async () => {
     const device = makeDevice('dev_r7')
+    // Quiet hours OFF explicitly. `snoozeReminder` now defers a snooze target out of the window like
+    // every other instant the server chooses, so with the 22:00-07:00 default this assertion would
+    // hold by day and fail by night — five hours from "now" crosses 22:00 for a third of the clock.
+    // Same reason tack-on.test.ts pins it; the deferral itself is asserted just below.
+    updateSettings(device.deviceId, { quietHours: 'off' })
     const r = await createReminder(device, { title: 'x', dueAtMillis: inHours(1) })
     const until = inHours(5)
     expect(snoozeReminder(r.reminderId, until)).toBe(true)
     const after = getReminder(r.reminderId)!
     expect(after.state).toBe('OPEN')
     expect(after.nextNagAtMillis).toBe(until)
+  })
+
+  it('defers a lockscreen snooze out of quiet hours', async () => {
+    // The button posts a fixed offset the PHONE computed — `NudgeTiming.snoozeUntil` knows nothing
+    // about the owner's window — and this used to be written verbatim, so "snooze 3 hours" at 23:30
+    // landed at 02:30 through the one path the owner reaches with their thumb.
+    const device = makeDevice('dev_r7b')
+    setTimezone(device.deviceId, 'Europe/London')
+    updateSettings(device.deviceId, { quietHours: '22:00-07:00' })
+    const r = await createReminder(getDevice(device.deviceId)!, { title: 'x', dueAtMillis: inHours(1) })
+
+    const intoTheNight = DateTime.fromISO('2026-09-04T02:30', { zone: 'Europe/London' }).toMillis()
+    expect(snoozeReminder(r.reminderId, intoTheNight)).toBe(true)
+
+    const at = DateTime.fromMillis(getReminder(r.reminderId)!.nextNagAtMillis!, { zone: 'Europe/London' })
+    expect(at.toFormat('HH:mm')).toBe('07:00')
   })
 
   it('reopen undoes a completion', async () => {
