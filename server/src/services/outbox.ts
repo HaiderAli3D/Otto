@@ -671,11 +671,34 @@ export async function enqueueAndFlushRow(params: {
   reminderId?: string | null
   dedupeKey?: string | null
   ttlMs?: number
+  /**
+   * Is Otto speaking FIRST? Defaults to true, because almost every caller is.
+   *
+   * The exception is the reply, which is an answer to something the owner just said — so the gates
+   * that govern interrupting them must not be applied to the queue it drags through with it.
+   */
+  proactive?: boolean
 }): Promise<FlushOutcome> {
   const id = enqueueOutbound(params)
   const device = getDevice(params.deviceId)
   if (!device) return { sent: false, queued: false, retired: true }
-  const delivered = await flushOutbox(params.waUserId, params.deviceId, { proactiveFor: device })
+  // `proactiveFor` only when Otto is actually speaking first.
+  //
+  // This was passed unconditionally, and `routes/whatsapp.ts` uses this function to send the REPLY —
+  // so answering the owner ran their own queue through the gates that exist to stop Otto
+  // interrupting them. The `reply` row itself is exempt from all three, but the rows behind it are
+  // not: the commitment gate SUPERSEDEs, so messaging Otto during a meeting delivered the answer and
+  // destroyed whatever the first flush had not drained. The flush twenty lines earlier on the very
+  // same inbound (`routes/whatsapp.ts:156`) deliberately passes nothing, and this contradicted it.
+  //
+  // It also charged every reply a live Google Calendar round trip on the latency path of the one
+  // message the owner is sitting there waiting for.
+  const proactive = params.proactive !== false
+  const delivered = await flushOutbox(
+    params.waUserId,
+    params.deviceId,
+    proactive ? { proactiveFor: device } : {},
+  )
   if (delivered.length > 0) appendAssistantTurns(params.waUserId, params.deviceId, delivered)
   // A dedupe rejection means an identical message is already PENDING — queued, by someone else.
   if (id === null) return { sent: false, queued: true, retired: false }

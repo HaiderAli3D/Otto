@@ -181,6 +181,30 @@ describe('scheduling the ladder', () => {
     expect(armed).toHaveLength(1)
   })
 
+  it('rings the backup alarm when the scheduler fires the last rung a few seconds late', async () => {
+    // The regression this guard nearly caused. `STALE_DISMISSAL_MS` IS `wakeCheckAt(MAX_WAKE_ROUNDS, 0)`,
+    // and the last round schedules its successor at exactly `startedAt + that`. The scheduler polls on
+    // a 15-second tick unrelated to the dismissal, so `nowMillis` arrives LATE by construction — and a
+    // `>` comparison against the span itself stood the ladder down before `escalate` was ever reached.
+    // No ring, no record row, on the healthy path, every time. The other tests miss it because
+    // `runOnTime` passes `job.runAtMillis`, the one clock value that makes the difference zero.
+    const device = reachableDevice('dev_wc_late')
+    const alarmId = await wakeAlarm(device, 'alm_wc_late', true)
+    const dismissedAt = Date.now() - 60_000
+    scheduleReportedAt(alarmId, device, dismissedAt)
+
+    // Walk the ladder the way the scheduler does, each rung a few seconds after it was due.
+    for (let i = 0; i <= MAX_WAKE_ROUNDS; i++) {
+      const job = wakeJobs()[0]
+      if (!job) break
+      await runWakeCheck(job, job.runAtMillis + 7_000)
+    }
+
+    expect(armed).toHaveLength(1)
+    expect(armed[0]!.data.label).toContain('Still asleep?')
+    expect(ownerRecord(device.deviceId).sleptThroughAfterDismiss).toBe(1)
+  })
+
   it('stands a ladder down rather than replaying it after a restart outlasted it', async () => {
     // Every rung is derived from the DISMISSAL rather than from now, so a process down longer than
     // the ladder's own span comes back with the whole remainder already in the past. That used to

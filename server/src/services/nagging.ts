@@ -11,7 +11,7 @@ import { budgetAllows, budgetResetsAt } from './budget.js'
 import { attendedCheckInText, commitmentAt } from './commitments.js'
 import { getDevice } from './devices.js'
 import { enqueueJob } from './jobs.js'
-import { enqueueAndFlushRow, enqueueAndTryFlush } from './outbox.js'
+import { enqueueAndFlushRow, enqueueAndTryFlush, windowOpen } from './outbox.js'
 import { completeReminder, getReminder, ladderParams, leadCountFor, resolvedPlanFor } from './reminders.js'
 import { nagQuietHours } from './settings.js'
 import { epochMillisToLocalHuman } from './time.js'
@@ -357,7 +357,32 @@ export async function runNudge(reminderId: string): Promise<void> {
     const overdueBy = before.dueAtMillis === null ? 0 : now - before.dueAtMillis
     const cooling =
       before.lastEscalatedAtMillis !== null && now - before.lastEscalatedAtMillis < ESCALATE_COOLDOWN_MS
-    if (!sent && escalating && overdueBy > ESCALATE_AFTER_MS && !cooling) {
+    // `!windowOpen` alongside `!sent`, because `!sent` stopped meaning "unreachable".
+    //
+    // This branch rings the owner's phone at full volume, and its stated precondition is "out of
+    // window and genuinely overdue" — which nothing enforced. `enqueueAndTryFlush` now answers "did
+    // MY row go out in this pass", and the pass cap can answer no for a purely cosmetic reason:
+    // three older proactive rows deliver, the cap breaks, and this rung is left PENDING with the
+    // window wide open, on its way out on the very next sweep. The phone then rings sixty seconds
+    // later for a chase that was already in flight. Reachable on the ordinary quiet-hours release,
+    // where a brief, a weekly review and a digest all queue overnight and deliver three-at-once.
+    //
+    // Worse in the other direction than in this one: a spurious ring stamps `lastEscalatedAtMillis`,
+    // and `ESCALATE_COOLDOWN_MS` is two hours — so it suppresses a GENUINELY undeliverable, badly
+    // overdue rung for the rest of that window, on the one item the owner marked as "this WILL wake
+    // me".
+    //
+    // Testing `!queued` instead would be wrong: a shut-window row is queued too, which is precisely
+    // the case that must still ring.
+    // Re-read AFTER the send, not from the snapshot at the top of this function.
+    //
+    // The window belief can be corrected by the send itself: `flushOutbox` calls
+    // `clearInboundWindow` when Meta answers 131047, which is the case where our belief was wrong
+    // and the ring is most warranted. Reading the stale device would miss exactly that. Same reason
+    // `services/brief.ts` re-reads before deciding to hold a rung.
+    const after = getDevice(device.deviceId) ?? device
+    const unreachable = !windowOpen(after, Date.now())
+    if (!sent && unreachable && escalating && overdueBy > ESCALATE_AFTER_MS && !cooling) {
       const alarmId = newAlarmId()
       await armAlarm(device, {
         alarmId,
@@ -370,7 +395,7 @@ export async function runNudge(reminderId: string): Promise<void> {
         .where(eq(reminders.reminderId, reminderId))
         .run()
       log.warn({ reminderId, alarmId }, 'window shut and overdue; escalating to a ringing alarm')
-    } else if (!sent && escalating && cooling) {
+    } else if (!sent && unreachable && escalating && cooling) {
       log.info({ reminderId, since: before.lastEscalatedAtMillis }, 'escalation suppressed; still inside the ring cooldown')
     }
   }

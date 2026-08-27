@@ -267,6 +267,40 @@ describe('updateReminder', () => {
     expect(after.nextNagAtMillis).toBeLessThan(after.dueAtMillis!)
   })
 
+  it('moves a recurring series when the owner moves its time, and it stays moved', async () => {
+    // `updateReminder` builds a full `next` object and then persists an explicit column list, and
+    // both `seriesAnchorMillis` and `planQuietHours` were computed into the object without being
+    // added to the list. A missing column in a hand-written `.set()` reads exactly like one left
+    // alone deliberately, so this was silent: "move pills to 08:00" worked today, and the first
+    // completion rolled tomorrow's occurrence from the ORIGINAL anchor and reverted it for good.
+    const device = makeDevice('dev_rt_move')
+    setTimezone(device.deviceId, ZONE)
+    updateSettings(device.deviceId, { quietHours: 'off' })
+    const at0700 = DateTime.fromISO('2026-09-04T07:00', { zone: ZONE }).toMillis()
+    const r = await createReminder(getDevice(device.deviceId)!, {
+      title: 'pills',
+      dueAtMillis: at0700,
+      recurrence: 'FREQ=DAILY',
+    })
+
+    const at0800 = DateTime.fromISO('2026-09-04T08:00', { zone: ZONE }).toMillis()
+    const res = await updateReminder(getDevice(device.deviceId)!, r.reminderId, { dueAtMillis: at0800 })
+    expect(res.ok).toBe(true)
+    expect(getReminder(r.reminderId)!.seriesAnchorMillis).toBe(at0800)
+    // The plan pin moved with it, so the fresh ladder is measured against today's window.
+    expect(getReminder(r.reminderId)!.planQuietHours).not.toBeNull()
+
+    // …and the next occurrence keeps the new time rather than reverting.
+    vi.useFakeTimers()
+    vi.setSystemTime(DateTime.fromISO('2026-09-04T08:05', { zone: ZONE }).toJSDate())
+    await completeReminder(getDevice(device.deviceId)!, r.reminderId)
+    const rolled = getReminder(r.reminderId)!
+    expect(DateTime.fromMillis(rolled.dueAtMillis!, { zone: ZONE }).toFormat('yyyy-MM-dd HH:mm')).toBe(
+      '2026-09-05 08:00',
+    )
+    vi.useRealTimers()
+  })
+
   it('re-issues the run-up when a deadline is pushed out after several warnings', async () => {
     // `plannedAtMillis` is re-anchored on a replan and `nagCount` was not, so the plan was laid out
     // again from scratch while the index into it stayed where the old ladder had got to.

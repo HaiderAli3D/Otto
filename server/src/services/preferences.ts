@@ -277,10 +277,19 @@ export function setPreferences(device: Device, input: Record<string, unknown>): 
   //
   // Cleared to NULL rather than to a literal, so `quietHoursFor` falls back to the server default —
   // the state the device was in before a routine was ever stated.
+  //
+  // Gated on the DERIVATION being impossible, not on the routine being absent. Since `parseRoutine`
+  // began accepting a wake window on its own, `{bedWindow: 'off'}` leaves `routineNow` non-null with
+  // `bedStated: false` — so the re-derive above bails (there is no stated bedtime to start a window
+  // from) and this clear never ran either, because it tested for a null routine. The derived window
+  // stayed in the column, and from the next call `oursBefore` was null so `quietIsOurs` was false
+  // for ever: no later routine change, not even a fully restated one, could move it again. "Forget
+  // my bedtime" left the owner silenced by a window they never chose, with only an explicit
+  // quietHours to escape it and nothing telling them so.
   if (
-    routineNow === null &&
     routineChanged &&
     !quietStated &&
+    (routineNow === null || impliedQuietHours(routineNow) === null) &&
     before.quietHours !== null &&
     before.quietHours === oursBefore
   ) {

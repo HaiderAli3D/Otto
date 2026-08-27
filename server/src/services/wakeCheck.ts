@@ -157,10 +157,25 @@ export async function runWakeCheck(job: Job, nowMillis: number = Date.now()): Pr
   // Deliberately NOT re-anchored on `now`: asking "you up?" three hours late is worse than not
   // asking. And deliberately no record row, for the reason `escalate` documents at length — the
   // owner was never in a position to answer a question nobody managed to send.
-  if (nowMillis - startedAt > STALE_DISMISSAL_MS) {
+  // Compared against the ESCALATION instant plus a grace, not against the ladder's span.
+  //
+  // This guard was one comparison away from disabling the entire feature, on the healthy path,
+  // every time. `STALE_DISMISSAL_MS` IS `wakeCheckAt(MAX_WAKE_ROUNDS, 0)` — exactly the offset the
+  // last round returns as its own next instant. So the escalation tick is scheduled for precisely
+  // `startedAt + STALE_DISMISSAL_MS`, the scheduler polls on a 15-second tick that has nothing to do
+  // with the dismissal, and `nowMillis` therefore arrives a few seconds LATE by construction. `>`
+  // was true, the ladder stood down, `escalate` was never reached, and the backup alarm that is the
+  // whole point of the wake-check never rang. The tests missed it because they pass `job.runAtMillis`
+  // as the clock, which is the one value that makes the difference exactly zero.
+  //
+  // The rule this is meant to encode is "so late that even ringing is absurd", not "we have reached
+  // the last rung". `WAKE_TTL_MS` is the grace because it is already this module's answer to how
+  // long a wake-check is worth anything at all.
+  const escalateAt = wakeCheckAt(MAX_WAKE_ROUNDS, startedAt)
+  if (nowMillis > escalateAt + WAKE_TTL_MS) {
     log.info(
       { alarmId: job.alarmId, round, lateBy: nowMillis - startedAt },
-      'wake-check: the whole ladder is behind us; standing down rather than replaying it',
+      'wake-check: past the point where even ringing would make sense; standing down',
     )
     return null
   }
@@ -233,12 +248,22 @@ export async function runWakeCheck(job: Job, nowMillis: number = Date.now()): Pr
     ttlMs: WAKE_TTL_MS,
   })
   if (outcome.retired) {
-    // Give the round back. Nothing was asked, so nothing was answered, and the ladder must not spend
-    // a rung on it — the same argument every deferral in services/nagging.ts makes.
-    db.update(jobs).set({ payload: JSON.stringify({ round, startedAt }) }).where(eq(jobs.id, job.id)).run()
-    log.warn({ alarmId: job.alarmId, round }, 'wake-check round was retired undelivered; not counting it')
+    // The question could not be delivered, so RING. Not retry.
+    //
+    // Re-deriving this round's own instant returned a time already in the past, which `settle`'s
+    // floor turns into a fresh attempt every fifteen seconds — a hundred-odd outbox rows, Meta
+    // sends and live Calendar reads before the staleness guard finally stops it, and still no ring
+    // at the end. And retrying is the wrong answer anyway: "cannot reach them over WhatsApp" is
+    // already the condition the branch above escalates on (`!waUserId || !windowOpen`), for the
+    // stated reason that a shut channel is not a reason to leave someone asleep. A row the
+    // commitment gate or a transport failure retired is the same situation arriving later.
+    //
+    // `round` rather than `next` as the delivered count: this round reached nobody.
+    log.warn({ alarmId: job.alarmId, round }, 'wake-check round was retired undelivered; ringing instead')
+    await escalate(device, job.alarmId, label, round, nowMillis)
+    return null
   }
-  return wakeCheckAt(outcome.retired ? round : next, startedAt)
+  return wakeCheckAt(next, startedAt)
 }
 
 /**
